@@ -603,7 +603,7 @@ impl ProxyServer {
                     serde_json::from_slice(&body_bytes).unwrap_or(serde_json::Value::Null);
 
                 // Parse query parameters from URI
-                let query_params = crate::template::parse_query_string(uri.query());
+                let query_params = crate::predicate::parse_query_string(uri.query());
 
                 let script_request = ScriptRequest {
                     method: method.to_string(),
