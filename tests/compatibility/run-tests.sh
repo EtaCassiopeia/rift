@@ -126,22 +126,23 @@ compare_json_response() {
     fi
 }
 
-# Helper function to remap ports in JSON data for Rift (add 1000 to ports)
+# Helper function to remap ports in JSON data for Rift
+# NOTE: We do NOT remap ports in the JSON payload because Rift creates imposters
+# on the same container port (4545). The Docker port mapping (host 5545 -> container 4545)
+# handles the translation when accessing the imposter endpoints.
 remap_ports_for_rift() {
     local data="$1"
-    # Replace port numbers: 4545->5545, 4546->5546, 4547->5547
-    echo "$data" | sed -e 's/"port"[[:space:]]*:[[:space:]]*4545/"port": 5545/g' \
-                      -e 's/"port"[[:space:]]*:[[:space:]]*4546/"port": 5546/g' \
-                      -e 's/"port"[[:space:]]*:[[:space:]]*4547/"port": 5547/g'
+    # No remapping needed - Rift uses the same container ports as Mountebank
+    echo "$data"
 }
 
-# Helper function to remap ports in API path for Rift (add 1000 to ports)
+# Helper function to remap ports in API path for Rift
+# NOTE: We do NOT remap the API path because Rift's admin API references the container port (4545),
+# not the host port (5545). The admin API path /imposters/4545 is correct for both systems.
 remap_path_for_rift() {
     local path="$1"
-    # Replace port numbers in path: /imposters/4545 -> /imposters/5545
-    echo "$path" | sed -e 's|/imposters/4545|/imposters/5545|g' \
-                      -e 's|/imposters/4546|/imposters/5546|g' \
-                      -e 's|/imposters/4547|/imposters/5547|g'
+    # No remapping needed - admin API uses container ports
+    echo "$path"
 }
 
 # Generic API test
@@ -288,7 +289,7 @@ test_stub_management() {
 
     # Cleanup
     curl -s -X DELETE "$MB_ADMIN/imposters/4545" > /dev/null
-    curl -s -X DELETE "$RIFT_ADMIN/imposters/5545" > /dev/null
+    curl -s -X DELETE "$RIFT_ADMIN/imposters/4545" > /dev/null
 }
 
 # =============================================================================
@@ -421,7 +422,7 @@ test_request_recording() {
 
     # Check recorded requests count (using correct ports for each service)
     mb_count=$(curl -s "$MB_ADMIN/imposters/4545" | jq '.numberOfRequests')
-    rift_count=$(curl -s "$RIFT_ADMIN/imposters/5545" | jq '.numberOfRequests')
+    rift_count=$(curl -s "$RIFT_ADMIN/imposters/4545" | jq '.numberOfRequests')
 
     if [ "$mb_count" == "$rift_count" ]; then
         log_success "Request count matches ($mb_count requests)"
@@ -479,9 +480,9 @@ test_error_handling() {
     # Invalid protocol
     test_api "POST /imposters (invalid protocol)" "POST" "/imposters" '{"port": 4545, "protocol": "ftp"}' ""
 
-    # Duplicate port (with port remapping for Rift)
+    # Duplicate port - create imposter on 4545 for both, then try duplicate
     curl -s -X POST -H "Content-Type: application/json" -d '{"port": 4545}' "$MB_ADMIN/imposters" > /dev/null
-    curl -s -X POST -H "Content-Type: application/json" -d '{"port": 5545}' "$RIFT_ADMIN/imposters" > /dev/null
+    curl -s -X POST -H "Content-Type: application/json" -d '{"port": 4545}' "$RIFT_ADMIN/imposters" > /dev/null
     test_api "POST /imposters (duplicate port)" "POST" "/imposters" '{"port": 4545}' ""
 
     # Cleanup
