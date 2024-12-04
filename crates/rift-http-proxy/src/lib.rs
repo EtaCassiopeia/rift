@@ -10,6 +10,7 @@ pub mod flow_state;
 pub mod imposter;
 pub mod matcher;
 pub mod predicate;
+pub mod proxy;
 pub mod recording;
 pub mod routing;
 pub mod rule_index;
