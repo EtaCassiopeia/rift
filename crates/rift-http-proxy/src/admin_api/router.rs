@@ -1,6 +1,6 @@
 //! Route dispatch logic for the Admin API.
 //!
-//! This module provides clean routing without giant match statements.
+//! This module provides routing
 
 use crate::admin_api::handlers::{imposters, stubs, system};
 use crate::admin_api::types::{error_response, get_base_url, not_found};
