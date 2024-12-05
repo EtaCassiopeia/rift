@@ -1,8 +1,8 @@
 //! Imposter CRUD handlers.
 
 use crate::admin_api::types::*;
+use crate::extensions::stub_analysis::analyze_stubs;
 use crate::imposter::{ImposterConfig, ImposterError, ImposterManager, StubResponse};
-use crate::stub_analysis::analyze_stubs;
 use bytes::Bytes;
 use http_body_util::Full;
 use hyper::body::Incoming;

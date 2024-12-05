@@ -2,8 +2,8 @@
 
 use crate::admin_api::handlers::imposters::handle_get as handle_get_imposter;
 use crate::admin_api::types::*;
+use crate::extensions::stub_analysis::{analyze_new_stub, analyze_stubs};
 use crate::imposter::{ImposterError, ImposterManager, Stub};
-use crate::stub_analysis::{analyze_new_stub, analyze_stubs};
 use bytes::Bytes;
 use http_body_util::Full;
 use hyper::body::Incoming;

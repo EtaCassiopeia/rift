@@ -48,7 +48,7 @@ mod recording_tests {
 #[cfg(test)]
 mod router_tests {
     use crate::config::{Route, RouteMatch};
-    use crate::routing::Router;
+    use crate::extensions::routing::Router;
 
     #[test]
     fn test_router_creation_empty() {
@@ -157,7 +157,7 @@ mod router_tests {
 #[cfg(test)]
 mod compiled_rule_tests {
     use crate::config::{FaultConfig, MatchConfig, PathMatch, Rule};
-    use crate::matcher::CompiledRule;
+    use crate::extensions::matcher::CompiledRule;
     use hyper::{HeaderMap, Method, Uri};
 
     fn create_rule(path: PathMatch, methods: Vec<&str>) -> Rule {
@@ -317,7 +317,7 @@ mod compiled_rule_tests {
 
 #[cfg(test)]
 mod flow_store_tests {
-    use crate::flow_state::{FlowStore, NoOpFlowStore};
+    use crate::extensions::flow_state::{FlowStore, NoOpFlowStore};
     use serde_json::json;
 
     #[test]

@@ -1,4 +1,4 @@
-use crate::flow_state::FlowStore;
+use crate::extensions::flow_state::FlowStore;
 use anyhow::{Context, Result};
 use redis::{Commands, Connection};
 use serde_json::Value;

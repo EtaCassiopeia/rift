@@ -1,4 +1,4 @@
-use crate::flow_state::FlowStore;
+use crate::extensions::flow_state::FlowStore;
 use crate::scripting::{FaultDecision, ScriptRequest};
 use anyhow::{anyhow, Result};
 use boa_engine::{
