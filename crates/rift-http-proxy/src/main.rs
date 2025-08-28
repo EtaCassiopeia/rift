@@ -2,7 +2,6 @@ use clap::Parser;
 
 #[derive(Parser, Debug)]
 #[command(name = "rift-http-proxy")]
-#[command(about = "High-performance HTTP proxy")]
 struct Args {
     #[arg(short, long, default_value = "8080")]
     port: u16,
@@ -10,7 +9,9 @@ struct Args {
     config: Option<String>,
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let args = Args::parse();
     println!("Starting on port {}", args.port);
+    tokio::signal::ctrl_c().await.ok();
 }
