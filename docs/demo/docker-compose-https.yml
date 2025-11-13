@@ -1,0 +1,44 @@
+# Rift Demo - HTTPS/TLS Mode
+#
+# Prerequisites:
+#   1. Build the local image:
+#      docker build -t rift-proxy:local -f crates/rift-http-proxy/Dockerfile .
+#
+#   2. Generate certificates:
+#      ./generate-certs.sh
+#
+# Quick Start:
+#   docker compose -f docker-compose-https.yml up -d
+#   curl --cacert certs/ca.crt https://localhost:8443/get
+#
+# This demo shows Rift's TLS support:
+# - HTTPS listener with custom certificates
+# - All fault injection features work over TLS
+# - Proxying to HTTP backend (httpbin)
+
+services:
+  httpbin:
+    image: kennethreitz/httpbin:latest
+    container_name: httpbin-https
+    expose:
+      - "80"
+
+  rift:
+    image: rift-proxy:local
+    container_name: rift-https-demo
+    depends_on:
+      - httpbin
+    ports:
+      - "8443:8443"    # HTTPS Proxy
+      - "9091:9090"    # Metrics (HTTP)
+    environment:
+      - RUST_LOG=info
+    volumes:
+      - ./native-config-https.yaml:/config.yaml:ro
+      - ./certs:/certs:ro
+    command: ["--rift-config", "/config.yaml"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9090/metrics"]
+      interval: 10s
+      timeout: 5s
+      retries: 3

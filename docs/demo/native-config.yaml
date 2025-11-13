@@ -1,0 +1,152 @@
+# Native Rift Configuration - Advanced Features Demo
+#
+# This configuration demonstrates features not available in Mountebank format:
+# - Probabilistic fault injection
+# - Flow state for stateful scenarios
+# - Rhai scripting for complex logic
+#
+# Usage:
+#   docker run -p 8080:8080 -v $(pwd)/native-config.yaml:/config.yaml \
+#     zainalpour/rift-proxy:latest /config.yaml
+
+mode: sidecar
+
+listen:
+  port: 8080
+  host: "0.0.0.0"
+
+upstream:
+  host: "httpbin"
+  port: 80
+
+# Flow state for stateful testing scenarios
+flow_state:
+  backend: inmemory
+
+# Prometheus metrics
+metrics:
+  enabled: true
+  port: 9090
+
+rules:
+  # Rule 1: Probabilistic latency injection (30% of requests)
+  - id: "latency-injection"
+    match:
+      methods: ["GET"]
+      path:
+        prefix: "/delay"
+    fault:
+      latency:
+        probability: 0.3
+        min_ms: 100
+        max_ms: 500
+
+  # Rule 2: Probabilistic error injection (10% of requests)
+  - id: "error-injection"
+    match:
+      methods: ["POST"]
+      path:
+        prefix: "/post"
+    fault:
+      error:
+        probability: 0.1
+        status: 503
+        body: '{"error": "Service temporarily unavailable"}'
+        headers:
+          Retry-After: "30"
+          X-Rift-Fault: "injected"
+
+  # Rule 3: Retry simulation with flow state
+  # Fails first 2 requests, succeeds on 3rd (simulates transient failures)
+  - id: "retry-simulation"
+    match:
+      path:
+        exact: "/anything/retry"
+    fault:
+      script:
+        engine: rhai
+        code: |
+          // Get flow ID from request headers
+          let flow_id = request.headers["X-Flow-Id"];
+          let key = "retry:" + flow_id;
+
+          // Get current attempt count
+          let attempts = flow.get(key).unwrap_or(0);
+          flow.set(key, attempts + 1);
+          flow.expire(key, 60);  // Reset after 60 seconds
+
+          // Fail first 2 attempts
+          if attempts < 2 {
+            #{
+              error_status: 500,
+              error_body: `{"error": "Transient failure", "attempt": ${attempts + 1}, "message": "Retry with same X-Flow-Id"}`,
+              error_headers: #{ "X-Rift-Attempt": `${attempts + 1}` },
+              inject: true
+            }
+          } else {
+            #{ inject: false }
+          }
+
+  # Rule 4: Rate limiting simulation
+  - id: "rate-limit"
+    match:
+      path:
+        prefix: "/anything/limited"
+    fault:
+      script:
+        engine: rhai
+        code: |
+          let client_ip = request.headers["X-Client-Id"];
+          if client_ip == () {
+            client_ip = "anonymous";
+          }
+
+          let key = "rate:" + client_ip;
+          let count = flow.get(key).unwrap_or(0);
+          flow.set(key, count + 1);
+          flow.expire(key, 10);  // Reset every 10 seconds
+
+          // Allow 5 requests per 10 seconds
+          if count >= 5 {
+            #{
+              error_status: 429,
+              error_body: `{"error": "Rate limit exceeded", "limit": 5, "window": "10s"}`,
+              error_headers: #{ "Retry-After": "10", "X-RateLimit-Remaining": "0" },
+              inject: true
+            }
+          } else {
+            #{ inject: false }
+          }
+
+  # Rule 5: Conditional fault based on request content
+  - id: "conditional-fault"
+    match:
+      methods: ["POST"]
+      path:
+        exact: "/anything/conditional"
+    fault:
+      script:
+        engine: rhai
+        code: |
+          // Check for test header
+          let test_mode = request.headers["X-Test-Mode"];
+
+          if test_mode == "slow" {
+            #{
+              latency_ms: 2000,
+              inject: true
+            }
+          } else if test_mode == "fail" {
+            #{
+              error_status: 500,
+              error_body: `{"error": "Forced failure for testing"}`,
+              inject: true
+            }
+          } else if test_mode == "timeout" {
+            #{
+              latency_ms: 35000,
+              inject: true
+            }
+          } else {
+            #{ inject: false }
+          }

@@ -1,0 +1,108 @@
+{
+  "imposters": [
+    {
+      "port": 4545,
+      "protocol": "http",
+      "name": "User API Mock",
+      "recordRequests": true,
+      "stubs": [
+        {
+          "predicates": [{ "equals": { "method": "GET", "path": "/health" } }],
+          "responses": [{ "is": { "statusCode": 200, "body": "OK" } }]
+        },
+        {
+          "predicates": [{ "equals": { "method": "GET", "path": "/api/users" } }],
+          "responses": [{
+            "is": {
+              "statusCode": 200,
+              "headers": { "Content-Type": "application/json" },
+              "body": [
+                { "id": 1, "name": "Alice", "email": "alice@example.com" },
+                { "id": 2, "name": "Bob", "email": "bob@example.com" }
+              ]
+            }
+          }]
+        },
+        {
+          "predicates": [{
+            "and": [
+              { "equals": { "method": "GET" } },
+              { "matches": { "path": "/api/users/\\d+" } }
+            ]
+          }],
+          "responses": [{
+            "is": {
+              "statusCode": 200,
+              "headers": { "Content-Type": "application/json" },
+              "body": { "id": 1, "name": "Alice", "email": "alice@example.com" }
+            }
+          }]
+        },
+        {
+          "predicates": [{ "equals": { "method": "POST", "path": "/api/users" } }],
+          "responses": [{
+            "is": {
+              "statusCode": 201,
+              "headers": { "Content-Type": "application/json" },
+              "body": { "id": 999, "message": "User created" }
+            }
+          }]
+        },
+        {
+          "predicates": [{ "equals": { "path": "/api/slow" } }],
+          "responses": [{
+            "is": {
+              "statusCode": 200,
+              "body": { "message": "Slow response" }
+            },
+            "_behaviors": { "wait": 2000 }
+          }]
+        },
+        {
+          "predicates": [{ "equals": { "path": "/api/error" } }],
+          "responses": [{
+            "is": {
+              "statusCode": 500,
+              "body": { "error": "Internal Server Error" }
+            }
+          }]
+        }
+      ]
+    },
+    {
+      "port": 4546,
+      "protocol": "http",
+      "name": "Order API Mock",
+      "stubs": [
+        {
+          "predicates": [{ "equals": { "method": "GET", "path": "/health" } }],
+          "responses": [{ "is": { "statusCode": 200, "body": "OK" } }]
+        },
+        {
+          "predicates": [{ "equals": { "method": "GET", "path": "/api/orders" } }],
+          "responses": [{
+            "is": {
+              "statusCode": 200,
+              "headers": { "Content-Type": "application/json" },
+              "body": [
+                { "id": "ORD-001", "status": "completed", "total": 99.99 },
+                { "id": "ORD-002", "status": "pending", "total": 149.99 }
+              ]
+            }
+          }]
+        },
+        {
+          "predicates": [{ "equals": { "method": "POST", "path": "/api/orders" } }],
+          "responses": [{
+            "is": {
+              "statusCode": 201,
+              "headers": { "Content-Type": "application/json" },
+              "body": { "id": "ORD-999", "status": "created" }
+            },
+            "_behaviors": { "wait": 500 }
+          }]
+        }
+      ]
+    }
+  ]
+}

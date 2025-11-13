@@ -1,0 +1,30 @@
+# Rift Demo - Mountebank-Compatible Mode
+#
+# Quick Start:
+#   docker compose up -d
+#   curl http://localhost:4545/health
+#
+# This demo shows Rift running in Mountebank-compatible mode with
+# two mock API services (User API on 4545, Order API on 4546).
+
+services:
+  rift:
+    image: rift-proxy:local
+    container_name: rift-demo
+    ports:
+      - "2525:2525"    # Admin API
+      - "4545:4545"    # User API Mock
+      - "4546:4546"    # Order API Mock
+      - "9090:9090"    # Metrics
+    environment:
+      - MB_PORT=2525
+      - MB_ALLOW_INJECTION=true
+      - RUST_LOG=info
+    volumes:
+      - ./imposters.json:/imposters.json:ro
+    command: ["--configfile", "/imposters.json"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:2525/"]
+      interval: 10s
+      timeout: 5s
+      retries: 3

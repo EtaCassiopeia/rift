@@ -1,0 +1,358 @@
+---
+layout: default
+title: Proxy Mode
+parent: Mountebank Compatibility
+nav_order: 5
+---
+
+# Proxy Mode
+
+Proxy mode forwards requests to real servers and optionally records responses for playback. This is useful for creating mocks from real API behavior.
+
+---
+
+## Basic Proxy
+
+Forward all requests to a backend server:
+
+```json
+{
+  "port": 4545,
+  "protocol": "http",
+  "stubs": [{
+    "responses": [{
+      "proxy": {
+        "to": "https://api.example.com"
+      }
+    }]
+  }]
+}
+```
+
+---
+
+## Proxy Modes
+
+### proxyAlways
+
+Always forward requests; record a new stub for each unique request:
+
+```json
+{
+  "proxy": {
+    "to": "https://api.example.com",
+    "mode": "proxyAlways"
+  }
+}
+```
+
+Use when: Building a comprehensive mock from varied requests.
+
+### proxyOnce
+
+Forward the first request, then replay the recorded response:
+
+```json
+{
+  "proxy": {
+    "to": "https://api.example.com",
+    "mode": "proxyOnce"
+  }
+}
+```
+
+Use when: Recording a fixed set of responses for offline testing.
+
+### proxyTransparent
+
+Forward without recording (pure reverse proxy):
+
+```json
+{
+  "proxy": {
+    "to": "https://api.example.com",
+    "mode": "proxyTransparent"
+  }
+}
+```
+
+Use when: Acting as a transparent proxy without mocking.
+
+---
+
+## Predicate Generators
+
+Control how requests are matched when generating stubs:
+
+```json
+{
+  "proxy": {
+    "to": "https://api.example.com",
+    "predicateGenerators": [{
+      "matches": {
+        "method": true,
+        "path": true,
+        "query": true
+      }
+    }]
+  }
+}
+```
+
+### Available Fields
+
+| Field | Description |
+|:------|:------------|
+| `method` | Match HTTP method |
+| `path` | Match request path |
+| `query` | Match query parameters |
+| `headers` | Match request headers |
+| `body` | Match request body |
+
+### Selective Matching
+
+Match only specific aspects:
+
+```json
+{
+  "predicateGenerators": [{
+    "matches": {
+      "method": true,
+      "path": true
+    }
+  }]
+}
+```
+
+This generates stubs that match method and path, ignoring query and body.
+
+### Case Sensitivity
+
+```json
+{
+  "predicateGenerators": [{
+    "matches": { "path": true },
+    "caseSensitive": true
+  }]
+}
+```
+
+---
+
+## Recording Workflow
+
+### Step 1: Create Recording Proxy
+
+```bash
+curl -X POST http://localhost:2525/imposters \
+  -H "Content-Type: application/json" \
+  -d '{
+    "port": 4545,
+    "protocol": "http",
+    "stubs": [{
+      "responses": [{
+        "proxy": {
+          "to": "https://api.example.com",
+          "mode": "proxyOnce",
+          "predicateGenerators": [{
+            "matches": { "method": true, "path": true, "query": true }
+          }]
+        }
+      }]
+    }]
+  }'
+```
+
+### Step 2: Run Your Tests
+
+```bash
+# Run application tests against the proxy
+npm test
+# or
+pytest
+```
+
+### Step 3: Export Recorded Stubs
+
+```bash
+curl http://localhost:2525/imposters/4545?replayable=true > recorded.json
+```
+
+### Step 4: Use Recorded Mocks
+
+```bash
+# Delete proxy imposter
+curl -X DELETE http://localhost:2525/imposters/4545
+
+# Load recorded mocks
+curl -X POST http://localhost:2525/imposters \
+  -H "Content-Type: application/json" \
+  -d @recorded.json
+```
+
+---
+
+## Modifying Proxied Responses
+
+### addDecorateBehavior
+
+Transform proxied responses before recording:
+
+```json
+{
+  "proxy": {
+    "to": "https://api.example.com",
+    "addDecorateBehavior": "function(request, response) { \
+      response.headers['X-Proxied-By'] = 'Rift'; \
+      return response; \
+    }"
+  }
+}
+```
+
+### addWaitBehavior
+
+Add latency to proxied responses:
+
+```json
+{
+  "proxy": {
+    "to": "https://api.example.com",
+    "addWaitBehavior": 100
+  }
+}
+```
+
+---
+
+## HTTPS Proxy
+
+### Proxy to HTTPS Backend
+
+```json
+{
+  "proxy": {
+    "to": "https://secure-api.example.com"
+  }
+}
+```
+
+### Skip Certificate Verification
+
+For self-signed certificates:
+
+```json
+{
+  "proxy": {
+    "to": "https://internal-api.local",
+    "cert": null
+  }
+}
+```
+
+### Mutual TLS
+
+```json
+{
+  "proxy": {
+    "to": "https://api.example.com",
+    "key": "-----BEGIN RSA PRIVATE KEY-----\n...",
+    "cert": "-----BEGIN CERTIFICATE-----\n..."
+  }
+}
+```
+
+---
+
+## Header Manipulation
+
+### Inject Headers
+
+Add headers to proxied requests:
+
+```json
+{
+  "proxy": {
+    "to": "https://api.example.com",
+    "injectHeaders": {
+      "X-Forwarded-By": "Rift",
+      "Authorization": "Bearer token123"
+    }
+  }
+}
+```
+
+---
+
+## Combining Proxy with Stubs
+
+Mix static stubs with proxy fallback:
+
+```json
+{
+  "port": 4545,
+  "protocol": "http",
+  "stubs": [
+    {
+      "predicates": [{ "equals": { "path": "/mocked" } }],
+      "responses": [{
+        "is": { "statusCode": 200, "body": "Mocked response" }
+      }]
+    },
+    {
+      "responses": [{
+        "proxy": {
+          "to": "https://api.example.com",
+          "mode": "proxyTransparent"
+        }
+      }]
+    }
+  ]
+}
+```
+
+Requests to `/mocked` return the static response; all others proxy to the real API.
+
+---
+
+## Example: API Gateway Pattern
+
+Create a proxy that records and allows overriding specific endpoints:
+
+```json
+{
+  "port": 4545,
+  "protocol": "http",
+  "stubs": [
+    {
+      "predicates": [{ "equals": { "path": "/health" } }],
+      "responses": [{ "is": { "statusCode": 200, "body": "OK" } }]
+    },
+    {
+      "predicates": [{ "equals": { "path": "/api/feature-flag" } }],
+      "responses": [{ "is": { "body": { "enabled": true } } }]
+    },
+    {
+      "responses": [{
+        "proxy": {
+          "to": "https://api.example.com",
+          "mode": "proxyOnce",
+          "predicateGenerators": [{
+            "matches": { "method": true, "path": true }
+          }]
+        }
+      }]
+    }
+  ]
+}
+```
+
+---
+
+## Best Practices
+
+1. **Start with proxyOnce** - Record responses for consistent tests
+2. **Use predicate generators wisely** - Too specific = too many stubs
+3. **Export regularly** - Save recorded mocks to version control
+4. **Clean up sensitive data** - Review recorded responses for secrets
+5. **Use proxyTransparent for debugging** - See actual API responses

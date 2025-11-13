@@ -1,0 +1,91 @@
+# Native Rift Configuration - HTTPS Demo
+#
+# This configuration demonstrates HTTPS/TLS support in native mode:
+# - TLS listener with custom certificates
+# - HTTPS proxying to upstream services
+# - All the same fault injection features as HTTP
+#
+# Prerequisites:
+#   Run ./generate-certs.sh first to create certificates
+#
+# Usage:
+#   docker compose -f docker-compose-https.yml up -d
+#   curl --cacert certs/ca.crt https://localhost:8443/get
+
+mode: sidecar
+
+listen:
+  port: 8443
+  host: "0.0.0.0"
+  protocol: https
+  tls:
+    cert_path: "/certs/server.crt"
+    key_path: "/certs/server.key"
+
+upstream:
+  host: "httpbin"
+  port: 80
+
+# Flow state for stateful testing
+flow_state:
+  backend: inmemory
+
+# Prometheus metrics (HTTP, separate port)
+metrics:
+  enabled: true
+  port: 9090
+
+rules:
+  # Rule 1: Probabilistic latency injection
+  - id: "https-latency-demo"
+    match:
+      methods: ["GET"]
+      path:
+        prefix: "/delay"
+    fault:
+      latency:
+        probability: 0.3
+        min_ms: 200
+        max_ms: 800
+
+  # Rule 2: Error injection on POST
+  - id: "https-error-demo"
+    match:
+      methods: ["POST"]
+      path:
+        prefix: "/post"
+    fault:
+      error:
+        probability: 0.2
+        status: 503
+        body: '{"error": "Service temporarily unavailable", "tls": true}'
+        headers:
+          X-Rift-Fault: "https-error-demo"
+          Retry-After: "30"
+
+  # Rule 3: Conditional TLS test endpoint
+  - id: "tls-test"
+    match:
+      path:
+        exact: "/anything/tls-test"
+    fault:
+      script:
+        engine: rhai
+        code: |
+          // Return TLS connection info
+          let test_mode = request.headers["X-TLS-Test"];
+
+          if test_mode == "fail" {
+            #{
+              error_status: 500,
+              error_body: `{"error": "TLS test failure", "mode": "fail"}`,
+              inject: true
+            }
+          } else if test_mode == "slow" {
+            #{
+              latency_ms: 1500,
+              inject: true
+            }
+          } else {
+            #{ inject: false }
+          }
