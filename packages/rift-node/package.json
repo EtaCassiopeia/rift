@@ -1,0 +1,71 @@
+{
+  "name": "rift-node",
+  "version": "0.1.0",
+  "description": "Mountebank-compatible Node.js bindings for Rift - A high-performance service virtualization proxy",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "type": "module",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js",
+    "test:unit": "npm test -- --testPathPattern=test/unit",
+    "test:integration": "npm test -- --testPathPattern=test/integration",
+    "postinstall": "node bin/postinstall.js",
+    "prepublishOnly": "npm run build",
+    "lint": "eslint src test --ext .ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "axios": "^1.6.0"
+  },
+  "devDependencies": {
+    "@types/jest": "^29.5.0",
+    "@types/node": "^20.10.0",
+    "@typescript-eslint/eslint-plugin": "^6.0.0",
+    "@typescript-eslint/parser": "^6.0.0",
+    "eslint": "^8.56.0",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.1.0",
+    "typescript": "^5.3.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "files": [
+    "dist",
+    "bin",
+    "binaries/.gitkeep"
+  ],
+  "keywords": [
+    "mountebank",
+    "mock",
+    "stub",
+    "test",
+    "double",
+    "chaos",
+    "engineering",
+    "rift",
+    "service-virtualization",
+    "api-mocking"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/EtaCassiopeia/rift.git",
+    "directory": "packages/rift-node"
+  },
+  "bugs": {
+    "url": "https://github.com/EtaCassiopeia/rift/issues"
+  },
+  "homepage": "https://github.com/EtaCassiopeia/rift/tree/master/packages/rift-node#readme",
+  "license": "MIT",
+  "author": "Rift Contributors",
+  "publishConfig": {
+    "access": "public"
+  }
+}

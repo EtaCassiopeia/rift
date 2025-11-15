@@ -1,0 +1,2 @@
+# This directory contains downloaded Rift binaries
+# The actual binaries are downloaded by postinstall.js and are not committed to git
