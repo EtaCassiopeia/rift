@@ -61,13 +61,13 @@ jobs:
 
           # macOS x86_64 (Intel)
           - target: x86_64-apple-darwin
-            os: macos-13
+            os: macos-15-intel
             archive: tar.gz
             features: lua,javascript,redis-backend
 
           # macOS ARM64 (Apple Silicon)
           - target: aarch64-apple-darwin
-            os: macos-14
+            os: macos-15
             archive: tar.gz
             features: lua,javascript,redis-backend
 
