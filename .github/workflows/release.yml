@@ -60,13 +60,14 @@ jobs:
             cross: true
 
           # macOS x86_64 (Intel)
+          # Note: Pinned to macos-13 until ring crate supports macos-15
           - target: x86_64-apple-darwin
-            os: macos-15-intel
+            os: macos-13
             archive: tar.gz
             features: lua,javascript,redis-backend
 
           # macOS ARM64 (Apple Silicon)
-          # Note: Using macos-14 because ring 0.17.14 doesn't support macos-15 ARM yet
+          # Note: Pinned to macos-14 until ring crate supports macos-15
           - target: aarch64-apple-darwin
             os: macos-14
             archive: tar.gz
