@@ -107,6 +107,22 @@ cargo build --release
 ./target/release/rift-http-proxy
 ```
 
+### Node.js / npm
+
+For Node.js projects, use the official npm package:
+
+```bash
+npm install @rift-vs/rift
+```
+
+```javascript
+import rift from '@rift-vs/rift';
+
+const server = await rift.create({ port: 2525 });
+// Create imposters, run tests...
+await server.close();
+```
+
 ---
 
 ## Documentation
@@ -114,6 +130,7 @@ cargo build --release
 ### Getting Started
 - [Installation](https://etacassiopeia.github.io/rift/getting-started/) - Docker, binary, build from source
 - [Quick Start](https://etacassiopeia.github.io/rift/getting-started/quickstart/) - Create your first imposter
+- [Node.js Integration](https://etacassiopeia.github.io/rift/getting-started/nodejs/) - npm package for Node.js
 - [Migration Guide](https://etacassiopeia.github.io/rift/getting-started/migration/) - Using Rift with Mountebank configs
 
 ### Mountebank Compatibility

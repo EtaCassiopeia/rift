@@ -58,6 +58,26 @@ cargo build --release
 ./target/release/rift-http-proxy
 ```
 
+### Node.js / npm
+
+For Node.js projects, install the official npm package:
+
+```bash
+npm install @rift-vs/rift
+```
+
+Usage:
+
+```javascript
+import rift from '@rift-vs/rift';
+
+const server = await rift.create({ port: 2525 });
+// Create imposters, run tests...
+await server.close();
+```
+
+See the [Node.js Integration Guide]({{ site.baseurl }}/getting-started/nodejs/) for complete documentation.
+
 ---
 
 ## Verify Installation
@@ -157,6 +177,7 @@ Example `imposters.json`:
 ## Next Steps
 
 - [Quick Start Tutorial]({{ site.baseurl }}/getting-started/quickstart/) - Detailed walkthrough
+- [Node.js Integration]({{ site.baseurl }}/getting-started/nodejs/) - npm package for Node.js projects
 - [Predicates Guide]({{ site.baseurl }}/mountebank/predicates/) - Request matching
 - [Responses Guide]({{ site.baseurl }}/mountebank/responses/) - Response configuration
 - [Migration Guide]({{ site.baseurl }}/getting-started/migration/) - Switching from Mountebank

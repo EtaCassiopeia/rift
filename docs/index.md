@@ -92,6 +92,27 @@ docker run -p 2525:2525 -v $(pwd)/imposters.json:/imposters.json \
   zainalpour/rift-proxy:latest --configfile /imposters.json
 ```
 
+### Node.js Integration
+
+For Node.js projects, use the official npm package:
+
+```bash
+npm install @rift-vs/rift
+```
+
+```javascript
+import rift from '@rift-vs/rift';
+
+// Start a Rift server (drop-in replacement for Mountebank)
+const server = await rift.create({ port: 2525 });
+
+// Create imposters, run your tests...
+
+await server.close();
+```
+
+See the [Node.js Integration Guide]({{ site.baseurl }}/getting-started/nodejs/) for complete documentation.
+
 ---
 
 ## Documentation
@@ -99,6 +120,7 @@ docker run -p 2525:2525 -v $(pwd)/imposters.json:/imposters.json \
 ### Getting Started
 - [Installation]({{ site.baseurl }}/getting-started/) - Docker, binary, and build from source
 - [Quick Start]({{ site.baseurl }}/getting-started/quickstart/) - Create your first imposter
+- [Node.js Integration]({{ site.baseurl }}/getting-started/nodejs/) - npm package for Node.js projects
 - [Migration from Mountebank]({{ site.baseurl }}/getting-started/migration/) - Switch from Mountebank to Rift
 
 ### Mountebank Compatibility
