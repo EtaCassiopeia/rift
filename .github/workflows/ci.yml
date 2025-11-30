@@ -2,9 +2,15 @@ name: CI
 
 on:
   push:
-    branches: [ main, master, develop ]
+    branches-ignore:
+      - main
+      - master
   pull_request:
-    branches: [ main, master, develop ]
+    branches: [ main, master ]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -12,7 +18,7 @@ env:
 
 jobs:
   test:
-    name: Test
+    name: Unit Tests
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -123,6 +129,9 @@ jobs:
   compatibility-test:
     name: Compatibility Tests (Mountebank)
     runs-on: ubuntu-latest
+    # Only run on pull requests to master/main
+    if: github.event_name == 'pull_request'
+    needs: [test, lint, build]
     steps:
       - uses: actions/checkout@v4
 
