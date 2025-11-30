@@ -142,102 +142,46 @@ rm -rf certs/  # Optional: remove generated certificates
 
 ---
 
-## Demo 3: Native Mode (Advanced Features)
-
-Demonstrates features not available in Mountebank format:
-- Probabilistic fault injection
-- Flow state for stateful scenarios
-- Rhai scripting
-
-### Start
-
-```bash
-docker compose -f docker-compose-native.yml up -d
-```
-
-### Test Probabilistic Faults
-
-```bash
-# Basic proxy request
-curl http://localhost:8080/get
-
-# Latency injection (30% probability on /delay/*)
-echo "Testing latency injection..."
-for i in {1..5}; do
-  START=$(date +%s%3N)
-  curl -s http://localhost:8080/delay/1 -o /dev/null
-  END=$(date +%s%3N)
-  echo "Request $i: $((END - START))ms"
-done
-
-# Error injection (10% probability on POST)
-echo "Testing error injection..."
-for i in {1..10}; do
-  STATUS=$(curl -s -X POST http://localhost:8080/post \
-    -d "test" -w "%{http_code}" -o /dev/null)
-  echo "Request $i: HTTP $STATUS"
-done
-```
-
-### Test Conditional Faults
-
-```bash
-# Normal request
-curl http://localhost:8080/anything/conditional \
-  -X POST -d "test"
-
-# Slow mode (2s delay)
-time curl http://localhost:8080/anything/conditional \
-  -X POST -H "X-Test-Mode: slow" -d "test"
-
-# Fail mode
-curl http://localhost:8080/anything/conditional \
-  -X POST -H "X-Test-Mode: fail" -d "test"
-```
-
-### View Metrics
-
-```bash
-curl http://localhost:9090/metrics | grep rift
-```
-
-### Cleanup
-
-```bash
-docker compose -f docker-compose-native.yml down
-```
-
----
-
 ## Configuration Files
 
 | File | Description |
 |:-----|:------------|
 | `imposters.json` | Mountebank HTTP imposter config |
-| `native-config.yaml` | Native Rift config with advanced features |
-| `native-config-https.yaml` | Native Rift config with TLS |
-| `docker-compose.yml` | HTTP demo (Mountebank mode) |
+| `docker-compose.yml` | HTTP demo |
 | `docker-compose-https.yml` | HTTPS/TLS demo |
-| `docker-compose-native.yml` | Native mode demo |
 | `generate-certs.sh` | Certificate generation script |
 
 ---
 
-## When to Use Each Mode
+## Rift Extensions (`_rift` namespace)
 
-**Mountebank Mode** (recommended for most users):
-- Compatible with existing Mountebank configurations
-- Standard API mocking for integration tests
-- Simple configuration with JSON format
+Rift extends Mountebank with advanced features through the `_rift` namespace:
 
-**HTTPS/TLS Mode** (secure testing):
-- Testing with TLS-enabled endpoints
-- Simulating production HTTPS environments
-- Testing client certificate handling
-- Verifying TLS configuration
+- **Flow State**: Stateful testing with in-memory or Redis backends
+- **Fault Injection**: Probabilistic latency, error, and TCP faults
+- **Scripting**: Multi-engine scripting (Rhai, Lua, JavaScript)
 
-**Native Mode** (advanced use cases):
-- Chaos engineering with probabilistic faults
-- Stateful testing with flow state
-- Complex conditional logic with scripting
-- Custom fault injection scenarios
+Example imposter with `_rift` extensions:
+
+```json
+{
+  "port": 4545,
+  "protocol": "http",
+  "_rift": {
+    "flowState": {"backend": "inmemory", "ttlSeconds": 300}
+  },
+  "stubs": [{
+    "predicates": [{"equals": {"path": "/api/test"}}],
+    "responses": [{
+      "is": {"statusCode": 200, "body": "OK"},
+      "_rift": {
+        "fault": {
+          "latency": {"probability": 0.3, "minMs": 100, "maxMs": 500}
+        }
+      }
+    }]
+  }]
+}
+```
+
+See the [Rift Extensions documentation](/docs/features/rift-extensions.md) for more details.

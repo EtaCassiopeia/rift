@@ -43,16 +43,16 @@ Feature: Alternative Mountebank Format Compatibility
     Then both services should return status 404
 
   # ==========================================================================
-  # Behaviors Without Underscore Prefix
+  # Behaviors With Underscore Prefix (Standard Mountebank Format)
   # ==========================================================================
 
-  Scenario: Behaviors field without underscore prefix
+  Scenario: Behaviors field with underscore prefix
     Given an imposter on port 4545 with stub:
       """
       {
-        "predicates": [{"equals": {"path": "/no-underscore"}}],
+        "predicates": [{"equals": {"path": "/with-underscore"}}],
         "responses": [{
-          "behaviors": {"wait": 100},
+          "_behaviors": {"wait": 100},
           "is": {
             "statusCode": 200,
             "body": "waited"
@@ -60,42 +60,42 @@ Feature: Alternative Mountebank Format Compatibility
         }]
       }
       """
-    When I send GET request to "/no-underscore" on imposter 4545 and measure time
+    When I send GET request to "/with-underscore" on imposter 4545 and measure time
     Then both services should return status 200
     And both responses should take at least 100ms
 
   # ==========================================================================
-  # Behaviors as Array Format
+  # Behaviors as Object Format (Standard Mountebank)
   # ==========================================================================
 
-  Scenario: Behaviors as array with single behavior
+  Scenario: Behaviors as object with single behavior
     Given an imposter on port 4545 with stub:
       """
       {
-        "predicates": [{"equals": {"path": "/array-behavior"}}],
+        "predicates": [{"equals": {"path": "/object-behavior"}}],
         "responses": [{
-          "behaviors": [{"wait": 50}],
+          "_behaviors": {"wait": 50},
           "is": {
             "statusCode": 200,
-            "body": "array format"
+            "body": "object format"
           }
         }]
       }
       """
-    When I send GET request to "/array-behavior" on imposter 4545 and measure time
+    When I send GET request to "/object-behavior" on imposter 4545 and measure time
     Then both services should return status 200
     And both responses should take at least 50ms
 
-  Scenario: Behaviors as array with multiple behaviors
+  Scenario: Behaviors as object with multiple behaviors
     Given an imposter on port 4545 with stub:
       """
       {
-        "predicates": [{"equals": {"path": "/multi-array-behavior"}}],
+        "predicates": [{"equals": {"path": "/multi-object-behavior"}}],
         "responses": [{
-          "behaviors": [
-            {"wait": 50},
-            {"decorate": "function(request, response) { response.body = response.body + ' decorated'; }"}
-          ],
+          "_behaviors": {
+            "wait": 50,
+            "decorate": "function(request, response) { response.body = response.body + ' decorated'; }"
+          },
           "is": {
             "statusCode": 200,
             "body": "original"
@@ -103,7 +103,7 @@ Feature: Alternative Mountebank Format Compatibility
         }]
       }
       """
-    When I send GET request to "/multi-array-behavior" on imposter 4545 and measure time
+    When I send GET request to "/multi-object-behavior" on imposter 4545 and measure time
     Then both services should return status 200
     And both responses should have body "original decorated"
 

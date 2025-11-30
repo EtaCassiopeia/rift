@@ -11,7 +11,7 @@ Rift enables fault injection for chaos engineering and resilience testing.
 
 ---
 
-## Mountebank Mode
+## Mountebank Behaviors
 
 ### Latency with wait Behavior
 
@@ -74,87 +74,103 @@ Rift enables fault injection for chaos engineering and resilience testing.
 
 ---
 
-## Native Mode
+## Rift Extensions (`_rift.fault`)
 
 ### Probabilistic Latency
 
-```yaml
-rules:
-  - id: "latency-injection"
-    match:
-      path:
-        prefix: "/api"
-    fault:
-      latency:
-        probability: 0.3    # 30% of requests
-        min_ms: 100
-        max_ms: 500
+```json
+{
+  "port": 4545,
+  "protocol": "http",
+  "stubs": [{
+    "predicates": [{ "startsWith": { "path": "/api" } }],
+    "responses": [{
+      "is": { "statusCode": 200, "body": "OK" },
+      "_rift": {
+        "fault": {
+          "latency": {
+            "probability": 0.3,
+            "minMs": 100,
+            "maxMs": 500
+          }
+        }
+      }
+    }]
+  }]
+}
 ```
 
 ### Probabilistic Errors
 
-```yaml
-rules:
-  - id: "error-injection"
-    match:
-      methods: ["POST"]
-    fault:
-      error:
-        probability: 0.1    # 10% of requests
-        status_code: 503
-        body: '{"error": "Service Unavailable"}'
-        headers:
-          Retry-After: "30"
+```json
+{
+  "stubs": [{
+    "predicates": [{ "equals": { "method": "POST" } }],
+    "responses": [{
+      "is": { "statusCode": 200, "body": "OK" },
+      "_rift": {
+        "fault": {
+          "error": {
+            "probability": 0.1,
+            "status": 503,
+            "body": "{\"error\": \"Service Unavailable\"}",
+            "headers": {
+              "Retry-After": "30"
+            }
+          }
+        }
+      }
+    }]
+  }]
+}
 ```
 
 ### Combined Faults
 
 Apply both latency and errors:
 
-```yaml
-rules:
-  - id: "combined-faults"
-    match:
-      path:
-        prefix: "/critical"
-    fault:
-      latency:
-        probability: 0.5
-        min_ms: 200
-        max_ms: 1000
-      error:
-        probability: 0.05
-        status_code: 500
+```json
+{
+  "responses": [{
+    "is": { "statusCode": 200, "body": "OK" },
+    "_rift": {
+      "fault": {
+        "latency": {
+          "probability": 0.5,
+          "minMs": 200,
+          "maxMs": 1000
+        },
+        "error": {
+          "probability": 0.05,
+          "status": 500
+        }
+      }
+    }
+  }]
+}
 ```
 
-### Conditional Faults
+### TCP Faults
 
-Target specific conditions:
+Simulate network-level failures:
 
-```yaml
-rules:
-  # Only affect certain users
-  - id: "user-specific-fault"
-    match:
-      headers:
-        X-User-Type: "test"
-    fault:
-      latency:
-        probability: 1.0
-        min_ms: 500
-        max_ms: 500
-
-  # Only affect specific endpoints
-  - id: "endpoint-fault"
-    match:
-      path:
-        regex: "/api/v[12]/orders"
-      methods: ["POST", "PUT"]
-    fault:
-      error:
-        probability: 0.2
-        status_code: 429
+```json
+{
+  "_rift": {
+    "fault": {
+      "tcp": {
+        "probability": 0.05,
+        "type": "reset"
+      }
+    }
+  }
+}
 ```
+
+TCP fault types:
+- `reset` - RST packet (connection reset)
+- `timeout` - Connection timeout
+- `close` - Close connection without response
 
 ---
 
@@ -162,53 +178,37 @@ rules:
 
 ### Rhai Script
 
-```yaml
-rules:
-  - id: "scripted-fault"
-    fault:
-      script:
-        engine: rhai
-        code: |
-          // Fail every 5th request
-          let count = flow.get("counter").unwrap_or(0);
-          flow.set("counter", count + 1);
-
-          if count % 5 == 4 {
-            #{
-              error_status: 500,
-              error_body: "Periodic failure",
-              inject: true
-            }
-          } else if request.path.contains("slow") {
-            #{
-              latency_ms: rand(100, 500),
-              inject: true
-            }
-          } else {
-            #{ inject: false }
-          }
+```json
+{
+  "port": 4545,
+  "protocol": "http",
+  "_rift": {
+    "flowState": {"backend": "inmemory"}
+  },
+  "stubs": [{
+    "responses": [{
+      "_rift": {
+        "script": {
+          "engine": "rhai",
+          "code": "let count = flow.get(\"counter\").unwrap_or(0); flow.set(\"counter\", count + 1); if count % 5 == 4 { #{ error_status: 500, error_body: \"Periodic failure\", inject: true } } else if request.path.contains(\"slow\") { #{ latency_ms: rand(100, 500), inject: true } } else { #{ inject: false } }"
+        }
+      }
+    }]
+  }]
+}
 ```
 
 ### Time-Based Faults
 
-```yaml
-rules:
-  - id: "time-based-fault"
-    fault:
-      script:
-        engine: rhai
-        code: |
-          let hour = timestamp().hour();
-
-          // Higher error rate during business hours
-          if hour >= 9 && hour <= 17 {
-            #{
-              error_probability: 0.1,
-              inject: true
-            }
-          } else {
-            #{ inject: false }
-          }
+```json
+{
+  "_rift": {
+    "script": {
+      "engine": "rhai",
+      "code": "let hour = timestamp().hour(); if hour >= 9 && hour <= 17 { #{ error_probability: 0.1, inject: true } } else { #{ inject: false } }"
+    }
+  }
+}
 ```
 
 ---
@@ -217,66 +217,57 @@ rules:
 
 ### Testing Timeout Handling
 
-```yaml
-rules:
-  - id: "timeout-test"
-    match:
-      path:
-        exact: "/api/external-service"
-    fault:
-      latency:
-        probability: 1.0
-        min_ms: 35000  # Longer than typical timeout
-        max_ms: 35000
+```json
+{
+  "predicates": [{ "equals": { "path": "/api/external-service" } }],
+  "responses": [{
+    "is": { "statusCode": 200, "body": "OK" },
+    "_rift": {
+      "fault": {
+        "latency": {
+          "probability": 1.0,
+          "ms": 35000
+        }
+      }
+    }
+  }]
+}
 ```
 
 ### Testing Retry Logic
 
-```yaml
-rules:
-  - id: "retry-test"
-    fault:
-      script:
-        engine: rhai
-        code: |
-          let key = "attempt:" + request.headers["X-Request-Id"];
-          let attempts = flow.get(key).unwrap_or(0);
-          flow.set(key, attempts + 1);
-          flow.expire(key, 60);
-
-          // Fail first 2 attempts, succeed on 3rd
-          if attempts < 2 {
-            #{
-              error_status: 503,
-              inject: true
-            }
-          } else {
-            #{ inject: false }
-          }
+```json
+{
+  "port": 4545,
+  "protocol": "http",
+  "_rift": {
+    "flowState": {"backend": "inmemory"}
+  },
+  "stubs": [{
+    "responses": [{
+      "_rift": {
+        "script": {
+          "engine": "rhai",
+          "code": "let key = \"attempt:\" + request.headers[\"X-Request-Id\"]; let attempts = flow.get(key).unwrap_or(0); flow.set(key, attempts + 1); flow.expire(key, 60); if attempts < 2 { #{ error_status: 503, inject: true } } else { #{ inject: false } }"
+        }
+      }
+    }]
+  }]
+}
 ```
 
 ### Testing Circuit Breaker
 
-```yaml
-rules:
-  - id: "circuit-breaker-test"
-    fault:
-      script:
-        engine: rhai
-        code: |
-          let failures = flow.get("failure_count").unwrap_or(0);
-
-          // Simulate degraded service
-          if rand() < 0.5 {
-            flow.set("failure_count", failures + 1);
-            #{
-              error_status: 500,
-              inject: true
-            }
-          } else {
-            flow.set("failure_count", 0);
-            #{ inject: false }
-          }
+```json
+{
+  "_rift": {
+    "flowState": {"backend": "inmemory"},
+    "script": {
+      "engine": "rhai",
+      "code": "let failures = flow.get(\"failure_count\").unwrap_or(0); if rand() < 0.5 { flow.set(\"failure_count\", failures + 1); #{ error_status: 500, inject: true } } else { flow.set(\"failure_count\", 0); #{ inject: false } }"
+    }
+  }
+}
 ```
 
 ---

@@ -139,9 +139,8 @@ function buildCliArgs(options: CreateOptions): string[] {
     // Don't add --local-only by default, let user control via ipWhitelist
   }
 
-  // Note: Redis support for distributed state requires Rift native mode
-  // The Mountebank API mode doesn't support Redis directly
-  // For Redis support, use --rift-config with a native config file
+  // Note: Redis support for distributed flow state can be configured via
+  // the _rift.flowState extension in imposter configs with backend: "redis"
 
   return args;
 }

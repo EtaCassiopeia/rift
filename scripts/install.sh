@@ -190,14 +190,14 @@ install_rift() {
 
     echo ""
     log_info "Quick start:"
-    echo "  # Start in Mountebank mode"
+    echo "  # Start server"
     echo "  rift --port 2525"
     echo ""
-    echo "  # Or use the mb alias"
+    echo "  # Or use the mb alias (Mountebank-compatible)"
     echo "  mb --port 2525"
     echo ""
-    echo "  # Start with a config file"
-    echo "  rift --rift-config config.yaml"
+    echo "  # Start with imposters config file"
+    echo "  rift --configfile imposters.json"
     echo ""
     log_info "Documentation: https://github.com/${GITHUB_REPO}#readme"
 }

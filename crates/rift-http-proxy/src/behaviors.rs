@@ -793,7 +793,8 @@ pub fn apply_lookup_behaviors(
 // =============================================================================
 
 /// Extract value using JSONPath
-fn extract_jsonpath(json_str: &str, path: &str) -> Option<String> {
+/// Used by copy behaviors and predicate jsonpath parameter
+pub fn extract_jsonpath(json_str: &str, path: &str) -> Option<String> {
     let json: serde_json::Value = serde_json::from_str(json_str).ok()?;
 
     // Simple JSONPath implementation (supports basic paths like $.field, $.array[0])
@@ -831,7 +832,8 @@ fn extract_jsonpath(json_str: &str, path: &str) -> Option<String> {
 }
 
 /// Extract value using XPath
-fn extract_xpath(xml_str: &str, path: &str) -> Option<String> {
+/// Used by copy behaviors and predicate xpath parameter
+pub fn extract_xpath(xml_str: &str, path: &str) -> Option<String> {
     use sxd_document::parser;
     use sxd_xpath::{evaluate_xpath, Value};
 

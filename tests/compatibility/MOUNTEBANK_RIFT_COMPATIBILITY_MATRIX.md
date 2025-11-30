@@ -408,12 +408,10 @@ This matches Mountebank's behavior for automatic port assignment.
 
 ### Rift Configuration
 - ✅ JSON format (Mountebank-compatible)
-- ✅ YAML format (additional option)
-- ✅ Single file: `--configfile imposters.json` or `--rift-config config.yaml`
+- ✅ Single file: `--configfile imposters.json`
 - ✅ Data directory: `--datadir ./imposters` (loads all .json files)
 - ✅ All Mountebank structures supported
-- ✅ Additional Kubernetes-focused YAML configuration
-- ✅ Multiple schema versions (v1, v2, v3)
+- ✅ `_rift` namespace extensions for advanced features (flow state, fault injection, scripting)
 
 **Example 1 - Single Config File (works in both):**
 ```bash

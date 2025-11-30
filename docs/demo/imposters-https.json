@@ -1,0 +1,87 @@
+{
+  "imposters": [
+    {
+      "port": 4545,
+      "protocol": "https",
+      "name": "HTTPS Demo",
+      "key": "<%- include('/certs/server.key') %>",
+      "cert": "<%- include('/certs/server.crt') %>",
+      "_rift": {
+        "flowState": {
+          "backend": "inmemory",
+          "ttlSeconds": 300
+        }
+      },
+      "stubs": [
+        {
+          "predicates": [
+            {"equals": {"path": "/api/test"}}
+          ],
+          "responses": [
+            {
+              "is": {
+                "statusCode": 200,
+                "headers": {"Content-Type": "application/json"},
+                "body": "{\"message\": \"Secure response over HTTPS\", \"tls\": true}"
+              }
+            }
+          ]
+        },
+        {
+          "predicates": [
+            {"equals": {"path": "/api/slow"}}
+          ],
+          "responses": [
+            {
+              "is": {
+                "statusCode": 200,
+                "body": "Slow secure response"
+              },
+              "_rift": {
+                "fault": {
+                  "latency": {
+                    "probability": 1.0,
+                    "minMs": 500,
+                    "maxMs": 1000
+                  }
+                }
+              }
+            }
+          ]
+        },
+        {
+          "predicates": [
+            {"equals": {"path": "/api/flaky"}}
+          ],
+          "responses": [
+            {
+              "is": {
+                "statusCode": 200,
+                "body": "Success"
+              },
+              "_rift": {
+                "fault": {
+                  "error": {
+                    "probability": 0.3,
+                    "status": 503,
+                    "body": "Service temporarily unavailable"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        {
+          "predicates": [
+            {"equals": {"path": "/api/counter"}}
+          ],
+          "responses": [
+            {
+              "inject": "function(request, state) { state.count = (state.count || 0) + 1; return { statusCode: 200, headers: {'Content-Type': 'application/json'}, body: JSON.stringify({count: state.count, secure: true}) }; }"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

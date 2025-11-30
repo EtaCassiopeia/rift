@@ -9,8 +9,8 @@
 
 use crate::backends::InMemoryFlowStore;
 use crate::behaviors::{
-    apply_copy_behaviors, apply_decorate, HasRepeatBehavior, RequestContext, ResponseBehaviors,
-    ResponseCycler,
+    apply_copy_behaviors, apply_decorate, extract_jsonpath, extract_xpath, HasRepeatBehavior,
+    RequestContext, ResponseBehaviors, ResponseCycler,
 };
 use crate::flow_state::{FlowStore, NoOpFlowStore};
 use crate::recording::{ProxyMode, RecordedResponse, RecordingStore, RequestSignature};
@@ -904,6 +904,27 @@ impl Imposter {
         let query_map = Self::parse_query(query);
         let body_str = body.unwrap_or("");
 
+        // Handle jsonpath parameter - extract value from JSON body
+        let extracted_body: String;
+        let effective_body = if let Some(jsonpath) = obj.get("jsonpath") {
+            if let Some(selector) = jsonpath.get("selector").and_then(|s| s.as_str()) {
+                extracted_body = extract_jsonpath(body_str, selector).unwrap_or_default();
+                &extracted_body
+            } else {
+                body_str
+            }
+        // Handle xpath parameter - extract value from XML body
+        } else if let Some(xpath) = obj.get("xpath") {
+            if let Some(selector) = xpath.get("selector").and_then(|s| s.as_str()) {
+                extracted_body = extract_xpath(body_str, selector).unwrap_or_default();
+                &extracted_body
+            } else {
+                body_str
+            }
+        } else {
+            body_str
+        };
+
         // Handle logical "not" operator
         if let Some(not_pred) = obj.get("not") {
             return !Self::predicate_matches(not_pred, method, path, query, headers, body);
@@ -931,7 +952,7 @@ impl Imposter {
                 path,
                 &query_map,
                 headers,
-                body_str,
+                effective_body,
                 &apply_except,
                 |expected, actual| str_equals(expected, actual),
                 false, // not deep equals
@@ -948,7 +969,7 @@ impl Imposter {
                 path,
                 &query_map,
                 headers,
-                body_str,
+                effective_body,
                 &apply_except,
                 |expected, actual| str_equals(expected, actual),
                 true, // deep equals
@@ -965,7 +986,7 @@ impl Imposter {
                 path,
                 &query_map,
                 headers,
-                body_str,
+                effective_body,
                 &apply_except,
                 |expected, actual| str_contains(actual, expected),
                 false,
@@ -982,7 +1003,7 @@ impl Imposter {
                 path,
                 &query_map,
                 headers,
-                body_str,
+                effective_body,
                 &apply_except,
                 |expected, actual| str_starts_with(actual, expected),
                 false,
@@ -999,7 +1020,7 @@ impl Imposter {
                 path,
                 &query_map,
                 headers,
-                body_str,
+                effective_body,
                 &apply_except,
                 |expected, actual| str_ends_with(actual, expected),
                 false,
@@ -1016,7 +1037,7 @@ impl Imposter {
                 path,
                 &query_map,
                 headers,
-                body_str,
+                effective_body,
                 &apply_except,
                 case_sensitive,
             ) {
@@ -1026,7 +1047,7 @@ impl Imposter {
 
         // Handle "exists" predicate
         if let Some(exists) = obj.get("exists") {
-            if !Self::check_exists_predicate(exists, &query_map, headers, body_str) {
+            if !Self::check_exists_predicate(exists, &query_map, headers, effective_body) {
                 return false;
             }
         }
@@ -3913,5 +3934,1998 @@ mod tests {
         assert_eq!(deserialized.service_name, original.service_name);
         assert_eq!(deserialized.stubs.len(), 1);
         assert_eq!(deserialized.stubs[0].scenario_name, original.stubs[0].scenario_name);
+    }
+
+    // =============================================================================
+    // _rift Configuration Parsing Tests
+    // =============================================================================
+
+    #[test]
+    fn test_rift_config_basic_parsing() {
+        let json = r#"{
+            "flowState": {
+                "backend": "inmemory",
+                "ttlSeconds": 600
+            }
+        }"#;
+
+        let config: RiftConfig = serde_json::from_str(json).unwrap();
+        assert!(config.flow_state.is_some());
+        let flow_state = config.flow_state.unwrap();
+        assert_eq!(flow_state.backend, "inmemory");
+        assert_eq!(flow_state.ttl_seconds, 600);
+        assert!(flow_state.redis.is_none());
+    }
+
+    #[test]
+    fn test_rift_config_flow_state_defaults() {
+        let json = r#"{"flowState": {}}"#;
+
+        let config: RiftConfig = serde_json::from_str(json).unwrap();
+        let flow_state = config.flow_state.unwrap();
+        assert_eq!(flow_state.backend, "inmemory"); // default
+        assert_eq!(flow_state.ttl_seconds, 300); // default
+    }
+
+    #[test]
+    fn test_rift_config_redis_backend() {
+        let json = r#"{
+            "flowState": {
+                "backend": "redis",
+                "ttlSeconds": 3600,
+                "redis": {
+                    "url": "redis://localhost:6379",
+                    "poolSize": 20,
+                    "keyPrefix": "myapp:"
+                }
+            }
+        }"#;
+
+        let config: RiftConfig = serde_json::from_str(json).unwrap();
+        let flow_state = config.flow_state.unwrap();
+        assert_eq!(flow_state.backend, "redis");
+        assert_eq!(flow_state.ttl_seconds, 3600);
+
+        let redis = flow_state.redis.unwrap();
+        assert_eq!(redis.url, "redis://localhost:6379");
+        assert_eq!(redis.pool_size, 20);
+        assert_eq!(redis.key_prefix, "myapp:");
+    }
+
+    #[test]
+    fn test_rift_config_redis_defaults() {
+        let json = r#"{
+            "flowState": {
+                "backend": "redis",
+                "redis": {
+                    "url": "redis://localhost:6379"
+                }
+            }
+        }"#;
+
+        let config: RiftConfig = serde_json::from_str(json).unwrap();
+        let redis = config.flow_state.unwrap().redis.unwrap();
+        assert_eq!(redis.pool_size, 10); // default
+        assert_eq!(redis.key_prefix, "rift:"); // default
+    }
+
+    #[test]
+    fn test_rift_config_full_imposter_level() {
+        let json = r#"{
+            "flowState": {
+                "backend": "inmemory",
+                "ttlSeconds": 300,
+                "mountebankStateMapping": {
+                    "enabled": true,
+                    "flowIdSource": "header:X-Session-Id"
+                }
+            },
+            "metrics": {
+                "enabled": true,
+                "port": 9091
+            },
+            "proxy": {
+                "upstream": {
+                    "host": "api.example.com",
+                    "port": 443,
+                    "protocol": "https"
+                },
+                "connectionPool": {
+                    "maxIdlePerHost": 50,
+                    "idleTimeoutSecs": 60
+                }
+            },
+            "scriptEngine": {
+                "defaultEngine": "lua",
+                "timeoutMs": 10000
+            }
+        }"#;
+
+        let config: RiftConfig = serde_json::from_str(json).unwrap();
+
+        // Flow state
+        let flow_state = config.flow_state.unwrap();
+        assert_eq!(flow_state.backend, "inmemory");
+        let mapping = flow_state.mountebank_state_mapping.unwrap();
+        assert!(mapping.enabled);
+        assert_eq!(mapping.flow_id_source, "header:X-Session-Id");
+
+        // Metrics
+        let metrics = config.metrics.unwrap();
+        assert!(metrics.enabled);
+        assert_eq!(metrics.port, 9091);
+
+        // Proxy
+        let proxy = config.proxy.unwrap();
+        let upstream = proxy.upstream.unwrap();
+        assert_eq!(upstream.host, "api.example.com");
+        assert_eq!(upstream.port, 443);
+        assert_eq!(upstream.protocol, "https");
+        let pool = proxy.connection_pool.unwrap();
+        assert_eq!(pool.max_idle_per_host, 50);
+        assert_eq!(pool.idle_timeout_secs, 60);
+
+        // Script engine
+        let script_engine = config.script_engine.unwrap();
+        assert_eq!(script_engine.default_engine, "lua");
+        assert_eq!(script_engine.timeout_ms, 10000);
+    }
+
+    #[test]
+    fn test_rift_response_extension_latency_fault() {
+        let json = r#"{
+            "fault": {
+                "latency": {
+                    "probability": 0.5,
+                    "minMs": 100,
+                    "maxMs": 500
+                }
+            }
+        }"#;
+
+        let ext: RiftResponseExtension = serde_json::from_str(json).unwrap();
+        let fault = ext.fault.unwrap();
+        let latency = fault.latency.unwrap();
+        assert_eq!(latency.probability, 0.5);
+        assert_eq!(latency.min_ms, 100);
+        assert_eq!(latency.max_ms, 500);
+    }
+
+    #[test]
+    fn test_rift_response_extension_fixed_latency() {
+        let json = r#"{
+            "fault": {
+                "latency": {
+                    "probability": 1.0,
+                    "ms": 200
+                }
+            }
+        }"#;
+
+        let ext: RiftResponseExtension = serde_json::from_str(json).unwrap();
+        let latency = ext.fault.unwrap().latency.unwrap();
+        assert_eq!(latency.probability, 1.0);
+        assert_eq!(latency.ms, Some(200));
+    }
+
+    #[test]
+    fn test_rift_response_extension_error_fault() {
+        let json = r#"{
+            "fault": {
+                "error": {
+                    "probability": 0.1,
+                    "status": 503,
+                    "body": "Service temporarily unavailable",
+                    "headers": {
+                        "Retry-After": "30"
+                    }
+                }
+            }
+        }"#;
+
+        let ext: RiftResponseExtension = serde_json::from_str(json).unwrap();
+        let error = ext.fault.unwrap().error.unwrap();
+        assert_eq!(error.probability, 0.1);
+        assert_eq!(error.status, 503);
+        assert_eq!(error.body, Some("Service temporarily unavailable".to_string()));
+        assert_eq!(error.headers.get("Retry-After"), Some(&"30".to_string()));
+    }
+
+    #[test]
+    fn test_rift_response_extension_tcp_fault() {
+        let json = r#"{
+            "fault": {
+                "tcp": "reset"
+            }
+        }"#;
+
+        let ext: RiftResponseExtension = serde_json::from_str(json).unwrap();
+        assert_eq!(ext.fault.unwrap().tcp, Some("reset".to_string()));
+    }
+
+    #[test]
+    fn test_rift_response_extension_script() {
+        let json = r##"{
+            "script": {
+                "engine": "rhai",
+                "code": "let x = 1; x + 1"
+            }
+        }"##;
+
+        let ext: RiftResponseExtension = serde_json::from_str(json).unwrap();
+        let script = ext.script.unwrap();
+        assert_eq!(script.engine, "rhai");
+        assert!(script.code.contains("let x"));
+    }
+
+    #[test]
+    fn test_rift_response_extension_lua_script() {
+        let json = r##"{
+            "script": {
+                "engine": "lua",
+                "code": "return {statusCode = 200, body = 'hello'}"
+            }
+        }"##;
+
+        let ext: RiftResponseExtension = serde_json::from_str(json).unwrap();
+        let script = ext.script.unwrap();
+        assert_eq!(script.engine, "lua");
+        assert!(script.code.contains("statusCode"));
+    }
+
+    #[test]
+    fn test_rift_response_extension_combined_fault_and_script() {
+        let json = r#"{
+            "fault": {
+                "latency": {
+                    "probability": 0.2,
+                    "minMs": 50,
+                    "maxMs": 100
+                }
+            },
+            "script": {
+                "engine": "javascript",
+                "code": "({ statusCode: 200, body: JSON.stringify({timestamp: Date.now()}) })"
+            }
+        }"#;
+
+        let ext: RiftResponseExtension = serde_json::from_str(json).unwrap();
+        assert!(ext.fault.is_some());
+        assert!(ext.script.is_some());
+        assert_eq!(ext.script.unwrap().engine, "javascript");
+    }
+
+    #[test]
+    fn test_imposter_config_with_rift_extension() {
+        let json = r#"{
+            "port": 4545,
+            "protocol": "http",
+            "name": "test-imposter",
+            "_rift": {
+                "flowState": {
+                    "backend": "inmemory"
+                }
+            },
+            "stubs": [{
+                "predicates": [{"equals": {"path": "/api/test"}}],
+                "responses": [{
+                    "is": {
+                        "statusCode": 200,
+                        "body": "test response"
+                    },
+                    "_rift": {
+                        "fault": {
+                            "latency": {
+                                "probability": 0.3,
+                                "minMs": 100,
+                                "maxMs": 200
+                            }
+                        }
+                    }
+                }]
+            }]
+        }"#;
+
+        let config: ImposterConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.port, Some(4545));
+        assert_eq!(config.name, Some("test-imposter".to_string()));
+
+        // Check imposter-level _rift config
+        let rift = config.rift.unwrap();
+        assert!(rift.flow_state.is_some());
+        assert_eq!(rift.flow_state.unwrap().backend, "inmemory");
+
+        // Check response-level _rift extension
+        assert_eq!(config.stubs.len(), 1);
+        if let StubResponse::Is { rift, .. } = &config.stubs[0].responses[0] {
+            let rift_ext = rift.as_ref().unwrap();
+            let latency = rift_ext.fault.as_ref().unwrap().latency.as_ref().unwrap();
+            assert_eq!(latency.probability, 0.3);
+            assert_eq!(latency.min_ms, 100);
+            assert_eq!(latency.max_ms, 200);
+        } else {
+            panic!("Expected Is response");
+        }
+    }
+
+    #[test]
+    fn test_imposter_config_with_rift_script_response() {
+        let json = r##"{
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [{
+                "predicates": [],
+                "responses": [{
+                    "_rift": {
+                        "script": {
+                            "engine": "rhai",
+                            "code": "let count = 1; count + 1"
+                        }
+                    }
+                }]
+            }]
+        }"##;
+
+        let config: ImposterConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.stubs.len(), 1);
+
+        if let StubResponse::RiftScript { rift } = &config.stubs[0].responses[0] {
+            let script = rift.script.as_ref().unwrap();
+            assert_eq!(script.engine, "rhai");
+            assert!(script.code.contains("let count"));
+        } else {
+            panic!("Expected RiftScript response, got {:?}", config.stubs[0].responses[0]);
+        }
+    }
+
+    #[test]
+    fn test_rift_config_empty() {
+        let json = r#"{}"#;
+        let config: RiftConfig = serde_json::from_str(json).unwrap();
+        assert!(config.flow_state.is_none());
+        assert!(config.metrics.is_none());
+        assert!(config.proxy.is_none());
+        assert!(config.script_engine.is_none());
+    }
+
+    #[test]
+    fn test_rift_response_extension_empty() {
+        let json = r#"{}"#;
+        let ext: RiftResponseExtension = serde_json::from_str(json).unwrap();
+        assert!(ext.fault.is_none());
+        assert!(ext.script.is_none());
+    }
+
+    #[test]
+    fn test_rift_config_serialization_roundtrip() {
+        let config = RiftConfig {
+            flow_state: Some(RiftFlowStateConfig {
+                backend: "redis".to_string(),
+                ttl_seconds: 600,
+                redis: Some(RiftRedisConfig {
+                    url: "redis://localhost:6379".to_string(),
+                    pool_size: 15,
+                    key_prefix: "test:".to_string(),
+                }),
+                mountebank_state_mapping: Some(MountebankStateMapping {
+                    enabled: true,
+                    flow_id_source: "header:X-Flow-Id".to_string(),
+                }),
+            }),
+            metrics: Some(RiftMetricsConfig {
+                enabled: true,
+                port: 9091,
+            }),
+            proxy: None,
+            script_engine: Some(RiftScriptEngineConfig {
+                default_engine: "lua".to_string(),
+                timeout_ms: 5000,
+            }),
+        };
+
+        let serialized = serde_json::to_string(&config).unwrap();
+        let deserialized: RiftConfig = serde_json::from_str(&serialized).unwrap();
+
+        let flow_state = deserialized.flow_state.unwrap();
+        assert_eq!(flow_state.backend, "redis");
+        assert_eq!(flow_state.ttl_seconds, 600);
+        assert_eq!(flow_state.redis.unwrap().pool_size, 15);
+
+        assert_eq!(deserialized.metrics.unwrap().port, 9091);
+        assert_eq!(deserialized.script_engine.unwrap().default_engine, "lua");
+    }
+
+    #[test]
+    fn test_rift_fault_defaults() {
+        // Test that fault configs have proper defaults
+        let json = r#"{"latency": {}}"#;
+        let fault: RiftFaultConfig = serde_json::from_str(json).unwrap();
+        let latency = fault.latency.unwrap();
+        assert_eq!(latency.probability, 1.0); // default probability
+        assert_eq!(latency.min_ms, 0); // default min
+        assert_eq!(latency.max_ms, 0); // default max
+    }
+
+    #[test]
+    fn test_rift_error_fault_defaults() {
+        let json = r#"{"error": {"probability": 0.5}}"#;
+        let fault: RiftFaultConfig = serde_json::from_str(json).unwrap();
+        let error = fault.error.unwrap();
+        assert_eq!(error.probability, 0.5);
+        assert_eq!(error.status, 503); // default status
+        assert!(error.body.is_none());
+        assert!(error.headers.is_empty());
+    }
+
+    #[test]
+    fn test_mountebank_compatibility_with_rift_extensions() {
+        // Ensure standard Mountebank fields work alongside _rift
+        let json = r#"{
+            "port": 4545,
+            "protocol": "http",
+            "recordRequests": true,
+            "defaultResponse": {
+                "statusCode": 404,
+                "body": "Not found"
+            },
+            "_rift": {
+                "flowState": {"backend": "inmemory"}
+            },
+            "stubs": [{
+                "predicates": [
+                    {"equals": {"path": "/api"}},
+                    {"equals": {"method": "GET"}}
+                ],
+                "responses": [{
+                    "is": {
+                        "statusCode": 200,
+                        "headers": {"Content-Type": "application/json"},
+                        "body": "{\"success\": true}"
+                    },
+                    "_behaviors": {"wait": 100},
+                    "_rift": {
+                        "fault": {
+                            "latency": {"probability": 0.1, "minMs": 50, "maxMs": 100}
+                        }
+                    }
+                }]
+            }]
+        }"#;
+
+        let config: ImposterConfig = serde_json::from_str(json).unwrap();
+
+        // Standard Mountebank fields
+        assert_eq!(config.port, Some(4545));
+        assert!(config.record_requests);
+        assert!(config.default_response.is_some());
+
+        // _rift extension
+        assert!(config.rift.is_some());
+
+        // Stub predicates (standard Mountebank)
+        assert_eq!(config.stubs[0].predicates.len(), 2);
+
+        // Response with both _behaviors and _rift
+        if let StubResponse::Is { behaviors, rift, .. } = &config.stubs[0].responses[0] {
+            assert!(behaviors.is_some());
+            assert!(rift.is_some());
+        } else {
+            panic!("Expected Is response");
+        }
+    }
+
+    // =============================================================================
+    // _rift Flow Store Creation Tests
+    // =============================================================================
+
+    #[test]
+    fn test_create_flow_store_no_rift_config() {
+        let config = ImposterConfig {
+            port: Some(4545),
+            protocol: "http".to_string(),
+            name: None,
+            record_requests: false,
+            stubs: vec![],
+            default_response: None,
+            allow_cors: false,
+            service_name: None,
+            service_info: None,
+            rift: None, // No _rift config
+        };
+
+        let store = Imposter::create_flow_store(&config);
+        // Should return NoOpFlowStore - verify it's a valid store
+        assert!(store.get("test", "key").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_create_flow_store_empty_rift_config() {
+        let config = ImposterConfig {
+            port: Some(4545),
+            protocol: "http".to_string(),
+            name: None,
+            record_requests: false,
+            stubs: vec![],
+            default_response: None,
+            allow_cors: false,
+            service_name: None,
+            service_info: None,
+            rift: Some(RiftConfig::default()), // Empty _rift config
+        };
+
+        let store = Imposter::create_flow_store(&config);
+        assert!(store.get("test", "key").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_create_flow_store_inmemory_backend() {
+        let config = ImposterConfig {
+            port: Some(4545),
+            protocol: "http".to_string(),
+            name: None,
+            record_requests: false,
+            stubs: vec![],
+            default_response: None,
+            allow_cors: false,
+            service_name: None,
+            service_info: None,
+            rift: Some(RiftConfig {
+                flow_state: Some(RiftFlowStateConfig {
+                    backend: "inmemory".to_string(),
+                    ttl_seconds: 300,
+                    redis: None,
+                    mountebank_state_mapping: None,
+                }),
+                metrics: None,
+                proxy: None,
+                script_engine: None,
+            }),
+        };
+
+        let store = Imposter::create_flow_store(&config);
+        // Test that the store works
+        store.set("test_flow", "counter", serde_json::json!(42)).unwrap();
+        let value = store.get("test_flow", "counter").unwrap();
+        assert_eq!(value, Some(serde_json::json!(42)));
+    }
+
+    #[test]
+    fn test_create_flow_store_unknown_backend() {
+        let config = ImposterConfig {
+            port: Some(4545),
+            protocol: "http".to_string(),
+            name: None,
+            record_requests: false,
+            stubs: vec![],
+            default_response: None,
+            allow_cors: false,
+            service_name: None,
+            service_info: None,
+            rift: Some(RiftConfig {
+                flow_state: Some(RiftFlowStateConfig {
+                    backend: "unknown_backend".to_string(),
+                    ttl_seconds: 300,
+                    redis: None,
+                    mountebank_state_mapping: None,
+                }),
+                metrics: None,
+                proxy: None,
+                script_engine: None,
+            }),
+        };
+
+        // Should fallback to NoOp store
+        let store = Imposter::create_flow_store(&config);
+        assert!(store.get("test", "key").unwrap().is_none());
+    }
+
+    // =============================================================================
+    // _rift execute_stub_with_rift Tests
+    // =============================================================================
+
+    #[test]
+    fn test_execute_stub_with_rift_basic_is_response() {
+        let config = ImposterConfig {
+            port: Some(4545),
+            protocol: "http".to_string(),
+            name: None,
+            record_requests: false,
+            stubs: vec![],
+            default_response: None,
+            allow_cors: false,
+            service_name: None,
+            service_info: None,
+            rift: None,
+        };
+        let imposter = Imposter::new(config);
+
+        let stub = Stub {
+            predicates: vec![],
+            responses: vec![StubResponse::Is {
+                is: IsResponse {
+                    status_code: 200,
+                    headers: HashMap::new(),
+                    body: Some(serde_json::json!("test body")),
+                },
+                behaviors: None,
+                rift: None,
+            }],
+            scenario_name: None,
+        };
+
+        let result = imposter.execute_stub_with_rift(&stub, 0);
+        assert!(result.is_some());
+        let (status, _headers, body, behaviors, rift_ext, is_fault) = result.unwrap();
+        assert_eq!(status, 200);
+        assert_eq!(body, "test body");
+        assert!(behaviors.is_none());
+        assert!(rift_ext.is_none());
+        assert!(!is_fault);
+    }
+
+    #[test]
+    fn test_execute_stub_with_rift_returns_rift_extension() {
+        let config = ImposterConfig {
+            port: Some(4545),
+            protocol: "http".to_string(),
+            name: None,
+            record_requests: false,
+            stubs: vec![],
+            default_response: None,
+            allow_cors: false,
+            service_name: None,
+            service_info: None,
+            rift: None,
+        };
+        let imposter = Imposter::new(config);
+
+        let stub = Stub {
+            predicates: vec![],
+            responses: vec![StubResponse::Is {
+                is: IsResponse {
+                    status_code: 200,
+                    headers: HashMap::new(),
+                    body: Some(serde_json::json!("test")),
+                },
+                behaviors: Some(serde_json::json!({"wait": 100})),
+                rift: Some(RiftResponseExtension {
+                    fault: Some(RiftFaultConfig {
+                        latency: Some(RiftLatencyFault {
+                            probability: 1.0,
+                            min_ms: 50,
+                            max_ms: 100,
+                            ms: None,
+                        }),
+                        error: None,
+                        tcp: None,
+                    }),
+                    script: None,
+                }),
+            }],
+            scenario_name: None,
+        };
+
+        let result = imposter.execute_stub_with_rift(&stub, 0);
+        assert!(result.is_some());
+        let (status, _headers, _body, behaviors, rift_ext, is_fault) = result.unwrap();
+        assert_eq!(status, 200);
+        assert!(behaviors.is_some());
+        assert!(rift_ext.is_some());
+        assert!(!is_fault);
+
+        let rift = rift_ext.unwrap();
+        assert!(rift.fault.is_some());
+        let latency = rift.fault.unwrap().latency.unwrap();
+        assert_eq!(latency.probability, 1.0);
+        assert_eq!(latency.min_ms, 50);
+        assert_eq!(latency.max_ms, 100);
+    }
+
+    #[test]
+    fn test_execute_stub_with_rift_fault_response() {
+        let config = ImposterConfig {
+            port: Some(4545),
+            protocol: "http".to_string(),
+            name: None,
+            record_requests: false,
+            stubs: vec![],
+            default_response: None,
+            allow_cors: false,
+            service_name: None,
+            service_info: None,
+            rift: None,
+        };
+        let imposter = Imposter::new(config);
+
+        let stub = Stub {
+            predicates: vec![],
+            responses: vec![StubResponse::Fault {
+                fault: "CONNECTION_RESET_BY_PEER".to_string(),
+            }],
+            scenario_name: None,
+        };
+
+        let result = imposter.execute_stub_with_rift(&stub, 0);
+        assert!(result.is_some());
+        let (status, _headers, body, _behaviors, _rift_ext, is_fault) = result.unwrap();
+        assert_eq!(status, 0);
+        assert_eq!(body, "CONNECTION_RESET_BY_PEER");
+        assert!(is_fault);
+    }
+
+    #[test]
+    fn test_execute_stub_with_rift_empty_responses() {
+        let config = ImposterConfig {
+            port: Some(4545),
+            protocol: "http".to_string(),
+            name: None,
+            record_requests: false,
+            stubs: vec![],
+            default_response: None,
+            allow_cors: false,
+            service_name: None,
+            service_info: None,
+            rift: None,
+        };
+        let imposter = Imposter::new(config);
+
+        let stub = Stub {
+            predicates: vec![],
+            responses: vec![],
+            scenario_name: None,
+        };
+
+        let result = imposter.execute_stub_with_rift(&stub, 0);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_execute_stub_with_rift_json_body_adds_content_type() {
+        let config = ImposterConfig {
+            port: Some(4545),
+            protocol: "http".to_string(),
+            name: None,
+            record_requests: false,
+            stubs: vec![],
+            default_response: None,
+            allow_cors: false,
+            service_name: None,
+            service_info: None,
+            rift: None,
+        };
+        let imposter = Imposter::new(config);
+
+        let stub = Stub {
+            predicates: vec![],
+            responses: vec![StubResponse::Is {
+                is: IsResponse {
+                    status_code: 200,
+                    headers: HashMap::new(), // No content-type
+                    body: Some(serde_json::json!({"key": "value"})), // JSON object
+                },
+                behaviors: None,
+                rift: None,
+            }],
+            scenario_name: None,
+        };
+
+        let result = imposter.execute_stub_with_rift(&stub, 0);
+        assert!(result.is_some());
+        let (_status, headers, body, _behaviors, _rift_ext, _is_fault) = result.unwrap();
+        // Should auto-add Content-Type for JSON objects
+        assert_eq!(headers.get("Content-Type"), Some(&"application/json".to_string()));
+        assert!(body.contains("key"));
+    }
+
+    // =============================================================================
+    // _rift get_rift_script_response Tests
+    // =============================================================================
+
+    #[test]
+    fn test_get_rift_script_response_with_script() {
+        let config = ImposterConfig {
+            port: Some(4545),
+            protocol: "http".to_string(),
+            name: None,
+            record_requests: false,
+            stubs: vec![],
+            default_response: None,
+            allow_cors: false,
+            service_name: None,
+            service_info: None,
+            rift: None,
+        };
+        let imposter = Imposter::new(config);
+
+        let stub = Stub {
+            predicates: vec![],
+            responses: vec![StubResponse::RiftScript {
+                rift: RiftResponseExtension {
+                    fault: None,
+                    script: Some(RiftScriptConfig {
+                        engine: "rhai".to_string(),
+                        code: "let x = 1; x + 1".to_string(),
+                    }),
+                },
+            }],
+            scenario_name: None,
+        };
+
+        let result = imposter.get_rift_script_response(&stub, 0);
+        assert!(result.is_some());
+        let script = result.unwrap();
+        assert_eq!(script.engine, "rhai");
+        assert_eq!(script.code, "let x = 1; x + 1");
+    }
+
+    #[test]
+    fn test_get_rift_script_response_non_script_response() {
+        let config = ImposterConfig {
+            port: Some(4545),
+            protocol: "http".to_string(),
+            name: None,
+            record_requests: false,
+            stubs: vec![],
+            default_response: None,
+            allow_cors: false,
+            service_name: None,
+            service_info: None,
+            rift: None,
+        };
+        let imposter = Imposter::new(config);
+
+        let stub = Stub {
+            predicates: vec![],
+            responses: vec![StubResponse::Is {
+                is: IsResponse {
+                    status_code: 200,
+                    headers: HashMap::new(),
+                    body: None,
+                },
+                behaviors: None,
+                rift: None,
+            }],
+            scenario_name: None,
+        };
+
+        let result = imposter.get_rift_script_response(&stub, 0);
+        assert!(result.is_none());
+    }
+
+    // =============================================================================
+    // _rift Latency Calculation Tests
+    // =============================================================================
+
+    #[test]
+    fn test_rift_latency_fixed_ms() {
+        let latency = RiftLatencyFault {
+            probability: 1.0,
+            min_ms: 0,
+            max_ms: 0,
+            ms: Some(150),
+        };
+
+        // When ms is set, it should be used regardless of min/max
+        assert_eq!(latency.ms, Some(150));
+        assert_eq!(latency.probability, 1.0);
+    }
+
+    #[test]
+    fn test_rift_latency_range_ms() {
+        let latency = RiftLatencyFault {
+            probability: 0.5,
+            min_ms: 100,
+            max_ms: 200,
+            ms: None,
+        };
+
+        // Range should be valid
+        assert!(latency.min_ms <= latency.max_ms);
+        assert_eq!(latency.probability, 0.5);
+    }
+
+    #[test]
+    fn test_rift_latency_min_equals_max() {
+        let latency = RiftLatencyFault {
+            probability: 1.0,
+            min_ms: 100,
+            max_ms: 100, // Same as min
+            ms: None,
+        };
+
+        // When min == max, delay should be exactly min_ms
+        assert_eq!(latency.min_ms, latency.max_ms);
+    }
+
+    // =============================================================================
+    // _rift Error Fault Configuration Tests
+    // =============================================================================
+
+    #[test]
+    fn test_rift_error_fault_full_config() {
+        let mut headers = HashMap::new();
+        headers.insert("Retry-After".to_string(), "60".to_string());
+        headers.insert("X-Custom".to_string(), "value".to_string());
+
+        let error = RiftErrorFault {
+            probability: 0.25,
+            status: 429,
+            body: Some("Rate limited".to_string()),
+            headers: headers.clone(),
+        };
+
+        assert_eq!(error.probability, 0.25);
+        assert_eq!(error.status, 429);
+        assert_eq!(error.body, Some("Rate limited".to_string()));
+        assert_eq!(error.headers.len(), 2);
+        assert_eq!(error.headers.get("Retry-After"), Some(&"60".to_string()));
+    }
+
+    #[test]
+    fn test_rift_error_fault_minimal_config() {
+        let error = RiftErrorFault {
+            probability: 1.0,
+            status: 500,
+            body: None,
+            headers: HashMap::new(),
+        };
+
+        assert_eq!(error.probability, 1.0);
+        assert_eq!(error.status, 500);
+        assert!(error.body.is_none());
+        assert!(error.headers.is_empty());
+    }
+
+    // =============================================================================
+    // _rift TCP Fault Configuration Tests
+    // =============================================================================
+
+    #[test]
+    fn test_rift_tcp_fault_reset() {
+        let fault = RiftFaultConfig {
+            latency: None,
+            error: None,
+            tcp: Some("reset".to_string()),
+        };
+
+        assert_eq!(fault.tcp, Some("reset".to_string()));
+    }
+
+    #[test]
+    fn test_rift_tcp_fault_connection_reset() {
+        let fault = RiftFaultConfig {
+            latency: None,
+            error: None,
+            tcp: Some("CONNECTION_RESET_BY_PEER".to_string()),
+        };
+
+        assert_eq!(fault.tcp, Some("CONNECTION_RESET_BY_PEER".to_string()));
+    }
+
+    #[test]
+    fn test_rift_tcp_fault_garbage() {
+        let fault = RiftFaultConfig {
+            latency: None,
+            error: None,
+            tcp: Some("garbage".to_string()),
+        };
+
+        assert_eq!(fault.tcp, Some("garbage".to_string()));
+    }
+
+    // =============================================================================
+    // _rift Combined Fault Configuration Tests
+    // =============================================================================
+
+    #[test]
+    fn test_rift_fault_combined_latency_and_error() {
+        let fault = RiftFaultConfig {
+            latency: Some(RiftLatencyFault {
+                probability: 0.5,
+                min_ms: 100,
+                max_ms: 200,
+                ms: None,
+            }),
+            error: Some(RiftErrorFault {
+                probability: 0.1,
+                status: 503,
+                body: Some("Service Unavailable".to_string()),
+                headers: HashMap::new(),
+            }),
+            tcp: None,
+        };
+
+        assert!(fault.latency.is_some());
+        assert!(fault.error.is_some());
+        assert!(fault.tcp.is_none());
+
+        let latency = fault.latency.as_ref().unwrap();
+        assert_eq!(latency.probability, 0.5);
+
+        let error = fault.error.as_ref().unwrap();
+        assert_eq!(error.probability, 0.1);
+    }
+
+    // =============================================================================
+    // _rift Script Configuration Tests
+    // =============================================================================
+
+    #[test]
+    fn test_rift_script_config_rhai() {
+        let script = RiftScriptConfig {
+            engine: "rhai".to_string(),
+            code: "let result = 1 + 2; result".to_string(),
+        };
+
+        assert_eq!(script.engine, "rhai");
+        assert!(script.code.contains("result"));
+    }
+
+    #[test]
+    fn test_rift_script_config_lua() {
+        let script = RiftScriptConfig {
+            engine: "lua".to_string(),
+            code: "return {statusCode = 200, body = 'hello'}".to_string(),
+        };
+
+        assert_eq!(script.engine, "lua");
+        assert!(script.code.contains("statusCode"));
+    }
+
+    #[test]
+    fn test_rift_script_config_javascript() {
+        let script = RiftScriptConfig {
+            engine: "javascript".to_string(),
+            code: "({ statusCode: 200, body: 'hello' })".to_string(),
+        };
+
+        assert_eq!(script.engine, "javascript");
+        assert!(script.code.contains("statusCode"));
+    }
+
+    // =============================================================================
+    // _rift Response Extension Parsing Edge Cases
+    // =============================================================================
+
+    #[test]
+    fn test_rift_response_extension_only_fault() {
+        let json = r##"{
+            "fault": {
+                "latency": {"probability": 1.0, "ms": 100}
+            }
+        }"##;
+
+        let ext: RiftResponseExtension = serde_json::from_str(json).unwrap();
+        assert!(ext.fault.is_some());
+        assert!(ext.script.is_none());
+    }
+
+    #[test]
+    fn test_rift_response_extension_only_script() {
+        let json = r##"{
+            "script": {
+                "engine": "rhai",
+                "code": "42"
+            }
+        }"##;
+
+        let ext: RiftResponseExtension = serde_json::from_str(json).unwrap();
+        assert!(ext.fault.is_none());
+        assert!(ext.script.is_some());
+    }
+
+    #[test]
+    fn test_rift_response_extension_all_fault_types() {
+        let json = r##"{
+            "fault": {
+                "latency": {"probability": 0.5, "minMs": 100, "maxMs": 200},
+                "error": {"probability": 0.1, "status": 500},
+                "tcp": "reset"
+            }
+        }"##;
+
+        let ext: RiftResponseExtension = serde_json::from_str(json).unwrap();
+        let fault = ext.fault.unwrap();
+        assert!(fault.latency.is_some());
+        assert!(fault.error.is_some());
+        assert!(fault.tcp.is_some());
+    }
+
+    // =============================================================================
+    // _rift Imposter Config Edge Cases
+    // =============================================================================
+
+    #[test]
+    fn test_imposter_with_rift_metrics_config() {
+        let json = r##"{
+            "port": 4545,
+            "protocol": "http",
+            "_rift": {
+                "metrics": {
+                    "enabled": true,
+                    "port": 9091
+                }
+            },
+            "stubs": []
+        }"##;
+
+        let config: ImposterConfig = serde_json::from_str(json).unwrap();
+        assert!(config.rift.is_some());
+        let rift = config.rift.unwrap();
+        assert!(rift.metrics.is_some());
+        let metrics = rift.metrics.unwrap();
+        assert!(metrics.enabled);
+        assert_eq!(metrics.port, 9091);
+    }
+
+    #[test]
+    fn test_imposter_with_rift_proxy_config() {
+        let json = r##"{
+            "port": 4545,
+            "protocol": "http",
+            "_rift": {
+                "proxy": {
+                    "upstream": {
+                        "host": "api.example.com",
+                        "port": 443,
+                        "protocol": "https"
+                    },
+                    "connectionPool": {
+                        "maxIdlePerHost": 50,
+                        "idleTimeoutSecs": 60
+                    }
+                }
+            },
+            "stubs": []
+        }"##;
+
+        let config: ImposterConfig = serde_json::from_str(json).unwrap();
+        let rift = config.rift.unwrap();
+        let proxy = rift.proxy.unwrap();
+        let upstream = proxy.upstream.unwrap();
+        assert_eq!(upstream.host, "api.example.com");
+        assert_eq!(upstream.port, 443);
+        assert_eq!(upstream.protocol, "https");
+        let pool = proxy.connection_pool.unwrap();
+        assert_eq!(pool.max_idle_per_host, 50);
+    }
+
+    #[test]
+    fn test_imposter_with_rift_script_engine_config() {
+        let json = r##"{
+            "port": 4545,
+            "protocol": "http",
+            "_rift": {
+                "scriptEngine": {
+                    "defaultEngine": "lua",
+                    "timeoutMs": 10000
+                }
+            },
+            "stubs": []
+        }"##;
+
+        let config: ImposterConfig = serde_json::from_str(json).unwrap();
+        let rift = config.rift.unwrap();
+        let script_engine = rift.script_engine.unwrap();
+        assert_eq!(script_engine.default_engine, "lua");
+        assert_eq!(script_engine.timeout_ms, 10000);
+    }
+
+    #[test]
+    fn test_imposter_with_rift_mountebank_state_mapping() {
+        let json = r##"{
+            "port": 4545,
+            "protocol": "http",
+            "_rift": {
+                "flowState": {
+                    "backend": "inmemory",
+                    "mountebankStateMapping": {
+                        "enabled": true,
+                        "flowIdSource": "header:X-Session-Id"
+                    }
+                }
+            },
+            "stubs": []
+        }"##;
+
+        let config: ImposterConfig = serde_json::from_str(json).unwrap();
+        let flow_state = config.rift.unwrap().flow_state.unwrap();
+        let mapping = flow_state.mountebank_state_mapping.unwrap();
+        assert!(mapping.enabled);
+        assert_eq!(mapping.flow_id_source, "header:X-Session-Id");
+    }
+
+    #[test]
+    fn test_multiple_stubs_with_different_rift_configs() {
+        let json = r##"{
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+                {
+                    "predicates": [{"equals": {"path": "/fast"}}],
+                    "responses": [{
+                        "is": {"statusCode": 200, "body": "fast response"}
+                    }]
+                },
+                {
+                    "predicates": [{"equals": {"path": "/slow"}}],
+                    "responses": [{
+                        "is": {"statusCode": 200, "body": "slow response"},
+                        "_rift": {
+                            "fault": {"latency": {"probability": 1.0, "ms": 500}}
+                        }
+                    }]
+                },
+                {
+                    "predicates": [{"equals": {"path": "/error"}}],
+                    "responses": [{
+                        "is": {"statusCode": 200, "body": "error response"},
+                        "_rift": {
+                            "fault": {"error": {"probability": 1.0, "status": 503}}
+                        }
+                    }]
+                }
+            ]
+        }"##;
+
+        let config: ImposterConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.stubs.len(), 3);
+
+        // First stub - no _rift
+        if let StubResponse::Is { rift, .. } = &config.stubs[0].responses[0] {
+            assert!(rift.is_none());
+        }
+
+        // Second stub - latency fault
+        if let StubResponse::Is { rift, .. } = &config.stubs[1].responses[0] {
+            let rift_ext = rift.as_ref().unwrap();
+            assert!(rift_ext.fault.as_ref().unwrap().latency.is_some());
+        }
+
+        // Third stub - error fault
+        if let StubResponse::Is { rift, .. } = &config.stubs[2].responses[0] {
+            let rift_ext = rift.as_ref().unwrap();
+            assert!(rift_ext.fault.as_ref().unwrap().error.is_some());
+        }
+    }
+
+    #[test]
+    fn test_response_cycling_with_rift_extensions() {
+        let config = ImposterConfig {
+            port: Some(4545),
+            protocol: "http".to_string(),
+            name: None,
+            record_requests: false,
+            stubs: vec![],
+            default_response: None,
+            allow_cors: false,
+            service_name: None,
+            service_info: None,
+            rift: None,
+        };
+        let imposter = Imposter::new(config);
+
+        let stub = Stub {
+            predicates: vec![],
+            responses: vec![
+                StubResponse::Is {
+                    is: IsResponse {
+                        status_code: 200,
+                        headers: HashMap::new(),
+                        body: Some(serde_json::json!("first")),
+                    },
+                    behaviors: None,
+                    rift: Some(RiftResponseExtension {
+                        fault: Some(RiftFaultConfig {
+                            latency: Some(RiftLatencyFault {
+                                probability: 1.0,
+                                min_ms: 10,
+                                max_ms: 10,
+                                ms: None,
+                            }),
+                            error: None,
+                            tcp: None,
+                        }),
+                        script: None,
+                    }),
+                },
+                StubResponse::Is {
+                    is: IsResponse {
+                        status_code: 200,
+                        headers: HashMap::new(),
+                        body: Some(serde_json::json!("second")),
+                    },
+                    behaviors: None,
+                    rift: None, // No rift extension
+                },
+            ],
+            scenario_name: None,
+        };
+
+        // First call
+        let result1 = imposter.execute_stub_with_rift(&stub, 0);
+        assert!(result1.is_some());
+        let (_, _, body1, _, rift1, _) = result1.unwrap();
+        assert_eq!(body1, "first");
+        assert!(rift1.is_some());
+
+        // Second call - should cycle to second response
+        let result2 = imposter.execute_stub_with_rift(&stub, 0);
+        assert!(result2.is_some());
+        let (_, _, body2, _, rift2, _) = result2.unwrap();
+        assert_eq!(body2, "second");
+        assert!(rift2.is_none());
+
+        // Third call - should cycle back to first
+        let result3 = imposter.execute_stub_with_rift(&stub, 0);
+        assert!(result3.is_some());
+        let (_, _, body3, _, rift3, _) = result3.unwrap();
+        assert_eq!(body3, "first");
+        assert!(rift3.is_some());
+    }
+
+    // =============================================================================
+    // Advanced Scenario Config Parsing Tests
+    // These test configurations for circuit breaker, rate limiter, etc.
+    // =============================================================================
+
+    #[test]
+    fn test_circuit_breaker_config_rhai() {
+        // Circuit breaker pattern: track failures in flow state, trip after threshold
+        let json = r##"{
+            "port": 4545,
+            "protocol": "http",
+            "_rift": {
+                "flowState": {
+                    "backend": "inmemory",
+                    "ttlSeconds": 60
+                }
+            },
+            "stubs": [{
+                "predicates": [{"equals": {"path": "/api/service"}}],
+                "responses": [{
+                    "_rift": {
+                        "script": {
+                            "engine": "rhai",
+                            "code": "let failures = flow.get_or_default(\"failures\", 0); let circuit_open = flow.get_or_default(\"circuit_open\", false); if circuit_open { #{\"statusCode\": 503, \"body\": \"Circuit breaker open\"} } else if failures >= 5 { flow.set(\"circuit_open\", true); #{\"statusCode\": 503, \"body\": \"Circuit breaker tripped\"} } else { #{\"statusCode\": 200, \"body\": \"OK\"} }"
+                        }
+                    }
+                }]
+            }]
+        }"##;
+
+        let config: ImposterConfig = serde_json::from_str(json).unwrap();
+        assert!(config.rift.is_some());
+        let flow_state = config.rift.as_ref().unwrap().flow_state.as_ref().unwrap();
+        assert_eq!(flow_state.backend, "inmemory");
+        assert_eq!(flow_state.ttl_seconds, 60);
+
+        // Verify the script response is parsed
+        if let StubResponse::RiftScript { rift } = &config.stubs[0].responses[0] {
+            let script = rift.script.as_ref().unwrap();
+            assert_eq!(script.engine, "rhai");
+            assert!(script.code.contains("circuit_open"));
+            assert!(script.code.contains("failures"));
+        } else {
+            panic!("Expected RiftScript response");
+        }
+    }
+
+    #[test]
+    fn test_rate_limiter_config_lua() {
+        // Rate limiter: track request count per time window using flow state
+        let json = r##"{
+            "port": 4545,
+            "protocol": "http",
+            "_rift": {
+                "flowState": {
+                    "backend": "inmemory",
+                    "ttlSeconds": 60
+                }
+            },
+            "stubs": [{
+                "predicates": [],
+                "responses": [{
+                    "_rift": {
+                        "script": {
+                            "engine": "lua",
+                            "code": "local count = flow:get_or_default('request_count', 0); local limit = 100; if count >= limit then return {statusCode = 429, headers = {['Retry-After'] = '60', ['X-RateLimit-Limit'] = tostring(limit), ['X-RateLimit-Remaining'] = '0'}, body = 'Rate limit exceeded'} else flow:set('request_count', count + 1); return {statusCode = 200, headers = {['X-RateLimit-Limit'] = tostring(limit), ['X-RateLimit-Remaining'] = tostring(limit - count - 1)}, body = 'OK'} end"
+                        }
+                    }
+                }]
+            }]
+        }"##;
+
+        let config: ImposterConfig = serde_json::from_str(json).unwrap();
+        if let StubResponse::RiftScript { rift } = &config.stubs[0].responses[0] {
+            let script = rift.script.as_ref().unwrap();
+            assert_eq!(script.engine, "lua");
+            assert!(script.code.contains("request_count"));
+            assert!(script.code.contains("RateLimit"));
+        } else {
+            panic!("Expected RiftScript response");
+        }
+    }
+
+    #[test]
+    fn test_token_bucket_rate_limiter_config() {
+        // Token bucket algorithm for rate limiting
+        let json = r##"{
+            "port": 4545,
+            "protocol": "http",
+            "_rift": {
+                "flowState": {"backend": "inmemory", "ttlSeconds": 300}
+            },
+            "stubs": [{
+                "predicates": [],
+                "responses": [{
+                    "_rift": {
+                        "script": {
+                            "engine": "rhai",
+                            "code": "let now = timestamp(); let tokens = flow.get_or_default(\"tokens\", 10); let last_refill = flow.get_or_default(\"last_refill\", now); let refill_rate = 1; let elapsed = now - last_refill; let new_tokens = min(10, tokens + elapsed * refill_rate); if new_tokens < 1 { #{\"statusCode\": 429, \"body\": \"Rate limited\"} } else { flow.set(\"tokens\", new_tokens - 1); flow.set(\"last_refill\", now); #{\"statusCode\": 200, \"body\": \"OK\"} }"
+                        }
+                    }
+                }]
+            }]
+        }"##;
+
+        let config: ImposterConfig = serde_json::from_str(json).unwrap();
+        if let StubResponse::RiftScript { rift } = &config.stubs[0].responses[0] {
+            let script = rift.script.as_ref().unwrap();
+            assert_eq!(script.engine, "rhai");
+            assert!(script.code.contains("tokens"));
+            assert!(script.code.contains("refill_rate"));
+        } else {
+            panic!("Expected RiftScript response");
+        }
+    }
+
+    #[test]
+    fn test_retry_counter_with_backoff_config() {
+        // Track retries and implement exponential backoff simulation
+        let json = r##"{
+            "port": 4545,
+            "protocol": "http",
+            "_rift": {
+                "flowState": {"backend": "inmemory"}
+            },
+            "stubs": [{
+                "predicates": [],
+                "responses": [{
+                    "_rift": {
+                        "script": {
+                            "engine": "rhai",
+                            "code": "let retries = flow.get_or_default(\"retries\", 0); let max_retries = 3; if retries >= max_retries { flow.set(\"retries\", 0); #{\"statusCode\": 200, \"body\": \"Success after retries\"} } else { flow.set(\"retries\", retries + 1); let delay = 100 * (2 ** retries); #{\"statusCode\": 503, \"headers\": #{\"Retry-After\": delay.to_string()}, \"body\": \"Retry \" + (retries + 1).to_string()} }"
+                        }
+                    }
+                }]
+            }]
+        }"##;
+
+        let config: ImposterConfig = serde_json::from_str(json).unwrap();
+        if let StubResponse::RiftScript { rift } = &config.stubs[0].responses[0] {
+            let script = rift.script.as_ref().unwrap();
+            assert!(script.code.contains("retries"));
+            assert!(script.code.contains("max_retries"));
+            assert!(script.code.contains("Retry-After"));
+        } else {
+            panic!("Expected RiftScript response");
+        }
+    }
+
+    #[test]
+    fn test_session_affinity_config() {
+        // Session affinity: route requests based on session ID stored in flow state
+        let json = r##"{
+            "port": 4545,
+            "protocol": "http",
+            "_rift": {
+                "flowState": {
+                    "backend": "inmemory",
+                    "mountebankStateMapping": {
+                        "enabled": true,
+                        "flowIdSource": "header:X-Session-Id"
+                    }
+                }
+            },
+            "stubs": [{
+                "predicates": [],
+                "responses": [{
+                    "_rift": {
+                        "script": {
+                            "engine": "rhai",
+                            "code": "let session_id = request.headers[\"x-session-id\"]; let server = flow.get_or_default(\"assigned_server\", \"\"); if server == \"\" { let servers = [\"server-a\", \"server-b\", \"server-c\"]; let idx = hash(session_id) % 3; server = servers[idx]; flow.set(\"assigned_server\", server); } #{\"statusCode\": 200, \"headers\": #{\"X-Served-By\": server}, \"body\": \"Routed to \" + server}"
+                        }
+                    }
+                }]
+            }]
+        }"##;
+
+        let config: ImposterConfig = serde_json::from_str(json).unwrap();
+        let flow_state = config.rift.as_ref().unwrap().flow_state.as_ref().unwrap();
+        let mapping = flow_state.mountebank_state_mapping.as_ref().unwrap();
+        assert!(mapping.enabled);
+        assert_eq!(mapping.flow_id_source, "header:X-Session-Id");
+    }
+
+    #[test]
+    fn test_cascading_failure_simulation_config() {
+        // Simulate cascading failures across multiple services
+        let json = r##"{
+            "port": 4545,
+            "protocol": "http",
+            "_rift": {
+                "flowState": {"backend": "inmemory"}
+            },
+            "stubs": [
+                {
+                    "predicates": [{"equals": {"path": "/service-a"}}],
+                    "responses": [{
+                        "_rift": {
+                            "script": {
+                                "engine": "rhai",
+                                "code": "let service_b_down = flow.get_or_default(\"service_b_down\", false); if service_b_down { flow.set(\"service_a_down\", true); #{\"statusCode\": 503, \"body\": \"Service A unavailable (dependency failed)\"} } else { #{\"statusCode\": 200, \"body\": \"Service A OK\"} }"
+                            }
+                        }
+                    }]
+                },
+                {
+                    "predicates": [{"equals": {"path": "/service-b"}}],
+                    "responses": [{
+                        "_rift": {
+                            "script": {
+                                "engine": "rhai",
+                                "code": "let failures = flow.get_or_default(\"service_b_failures\", 0); if failures >= 3 { flow.set(\"service_b_down\", true); #{\"statusCode\": 503, \"body\": \"Service B down\"} } else { flow.set(\"service_b_failures\", failures + 1); #{\"statusCode\": 200, \"body\": \"Service B degraded\"} }"
+                            }
+                        }
+                    }]
+                },
+                {
+                    "predicates": [{"equals": {"path": "/health"}}],
+                    "responses": [{
+                        "_rift": {
+                            "script": {
+                                "engine": "rhai",
+                                "code": "let a_down = flow.get_or_default(\"service_a_down\", false); let b_down = flow.get_or_default(\"service_b_down\", false); #{\"statusCode\": 200, \"body\": \"{ \\\"service_a\\\": \\\"\" + if a_down { \"down\" } else { \"up\" } + \"\\\", \\\"service_b\\\": \\\"\" + if b_down { \"down\" } else { \"up\" } + \"\\\" }\"}"
+                            }
+                        }
+                    }]
+                }
+            ]
+        }"##;
+
+        let config: ImposterConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.stubs.len(), 3);
+
+        // All three stubs should have RiftScript responses
+        for stub in &config.stubs {
+            if let StubResponse::RiftScript { rift } = &stub.responses[0] {
+                assert!(rift.script.is_some());
+                assert_eq!(rift.script.as_ref().unwrap().engine, "rhai");
+            } else {
+                panic!("Expected RiftScript response");
+            }
+        }
+    }
+
+    #[test]
+    fn test_request_deduplication_config() {
+        // Deduplicate requests using idempotency keys stored in flow state
+        let json = r##"{
+            "port": 4545,
+            "protocol": "http",
+            "_rift": {
+                "flowState": {"backend": "inmemory", "ttlSeconds": 3600}
+            },
+            "stubs": [{
+                "predicates": [{"equals": {"method": "POST"}}],
+                "responses": [{
+                    "_rift": {
+                        "script": {
+                            "engine": "rhai",
+                            "code": "let idempotency_key = request.headers[\"idempotency-key\"]; if idempotency_key == () { #{\"statusCode\": 400, \"body\": \"Missing Idempotency-Key header\"} } else { let cached = flow.get(\"processed_\" + idempotency_key); if cached != () { #{\"statusCode\": 200, \"headers\": #{\"X-Idempotent-Replay\": \"true\"}, \"body\": cached} } else { let result = \"Processed: \" + request.body; flow.set(\"processed_\" + idempotency_key, result); #{\"statusCode\": 201, \"body\": result} } }"
+                        }
+                    }
+                }]
+            }]
+        }"##;
+
+        let config: ImposterConfig = serde_json::from_str(json).unwrap();
+        let flow_state = config.rift.as_ref().unwrap().flow_state.as_ref().unwrap();
+        assert_eq!(flow_state.ttl_seconds, 3600); // 1 hour TTL for idempotency
+
+        if let StubResponse::RiftScript { rift } = &config.stubs[0].responses[0] {
+            let script = rift.script.as_ref().unwrap();
+            assert!(script.code.contains("idempotency-key"));
+            assert!(script.code.contains("X-Idempotent-Replay"));
+        } else {
+            panic!("Expected RiftScript response");
+        }
+    }
+
+    #[test]
+    fn test_ab_testing_config() {
+        // A/B testing: assign users to groups and return different responses
+        let json = r##"{
+            "port": 4545,
+            "protocol": "http",
+            "_rift": {
+                "flowState": {"backend": "inmemory"}
+            },
+            "stubs": [{
+                "predicates": [],
+                "responses": [{
+                    "_rift": {
+                        "script": {
+                            "engine": "rhai",
+                            "code": "let user_id = request.headers[\"x-user-id\"]; let group = flow.get(\"group_\" + user_id); if group == () { group = if rand() < 0.5 { \"A\" } else { \"B\" }; flow.set(\"group_\" + user_id, group); } if group == \"A\" { #{\"statusCode\": 200, \"headers\": #{\"X-AB-Group\": \"A\"}, \"body\": \"Feature variant A\"} } else { #{\"statusCode\": 200, \"headers\": #{\"X-AB-Group\": \"B\"}, \"body\": \"Feature variant B\"} }"
+                        }
+                    }
+                }]
+            }]
+        }"##;
+
+        let config: ImposterConfig = serde_json::from_str(json).unwrap();
+        if let StubResponse::RiftScript { rift } = &config.stubs[0].responses[0] {
+            let script = rift.script.as_ref().unwrap();
+            assert!(script.code.contains("X-AB-Group"));
+            assert!(script.code.contains("variant A"));
+            assert!(script.code.contains("variant B"));
+        } else {
+            panic!("Expected RiftScript response");
+        }
+    }
+
+    #[test]
+    fn test_gradual_rollout_config() {
+        // Gradual rollout: increase success rate over time
+        let json = r##"{
+            "port": 4545,
+            "protocol": "http",
+            "_rift": {
+                "flowState": {"backend": "inmemory"}
+            },
+            "stubs": [{
+                "predicates": [],
+                "responses": [{
+                    "_rift": {
+                        "script": {
+                            "engine": "rhai",
+                            "code": "let total_requests = flow.get_or_default(\"total\", 0); let rollout_percentage = min(100, total_requests / 10); flow.set(\"total\", total_requests + 1); if rand() * 100.0 < rollout_percentage { #{\"statusCode\": 200, \"headers\": #{\"X-Feature-Enabled\": \"true\"}, \"body\": \"New feature\"} } else { #{\"statusCode\": 200, \"headers\": #{\"X-Feature-Enabled\": \"false\"}, \"body\": \"Old feature\"} }"
+                        }
+                    }
+                }]
+            }]
+        }"##;
+
+        let config: ImposterConfig = serde_json::from_str(json).unwrap();
+        if let StubResponse::RiftScript { rift } = &config.stubs[0].responses[0] {
+            let script = rift.script.as_ref().unwrap();
+            assert!(script.code.contains("rollout_percentage"));
+            assert!(script.code.contains("X-Feature-Enabled"));
+        } else {
+            panic!("Expected RiftScript response");
+        }
+    }
+
+    #[test]
+    fn test_chaos_engineering_scenario_config() {
+        // Chaos engineering: randomly inject various faults
+        let json = r##"{
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [{
+                "predicates": [],
+                "responses": [{
+                    "is": {
+                        "statusCode": 200,
+                        "body": "Normal response"
+                    },
+                    "_rift": {
+                        "fault": {
+                            "latency": {
+                                "probability": 0.1,
+                                "minMs": 500,
+                                "maxMs": 2000
+                            },
+                            "error": {
+                                "probability": 0.05,
+                                "status": 500,
+                                "body": "Random server error"
+                            }
+                        }
+                    }
+                }]
+            }]
+        }"##;
+
+        let config: ImposterConfig = serde_json::from_str(json).unwrap();
+        if let StubResponse::Is { rift, .. } = &config.stubs[0].responses[0] {
+            let fault = rift.as_ref().unwrap().fault.as_ref().unwrap();
+
+            // Latency fault: 10% probability, 500-2000ms delay
+            let latency = fault.latency.as_ref().unwrap();
+            assert_eq!(latency.probability, 0.1);
+            assert_eq!(latency.min_ms, 500);
+            assert_eq!(latency.max_ms, 2000);
+
+            // Error fault: 5% probability, 500 status
+            let error = fault.error.as_ref().unwrap();
+            assert_eq!(error.probability, 0.05);
+            assert_eq!(error.status, 500);
+        } else {
+            panic!("Expected Is response with _rift");
+        }
+    }
+
+    #[test]
+    fn test_leaky_bucket_rate_limiter_lua() {
+        // Leaky bucket rate limiter implementation in Lua
+        let json = r##"{
+            "port": 4545,
+            "protocol": "http",
+            "_rift": {
+                "flowState": {"backend": "inmemory"}
+            },
+            "stubs": [{
+                "predicates": [],
+                "responses": [{
+                    "_rift": {
+                        "script": {
+                            "engine": "lua",
+                            "code": "local bucket_size = 10; local leak_rate = 1; local now = os.time(); local water = flow:get_or_default('water', 0); local last_leak = flow:get_or_default('last_leak', now); local leaked = (now - last_leak) * leak_rate; water = math.max(0, water - leaked); flow:set('last_leak', now); if water >= bucket_size then return {statusCode = 429, body = 'Bucket full'} else flow:set('water', water + 1); return {statusCode = 200, body = 'OK'} end"
+                        }
+                    }
+                }]
+            }]
+        }"##;
+
+        let config: ImposterConfig = serde_json::from_str(json).unwrap();
+        if let StubResponse::RiftScript { rift } = &config.stubs[0].responses[0] {
+            let script = rift.script.as_ref().unwrap();
+            assert_eq!(script.engine, "lua");
+            assert!(script.code.contains("bucket_size"));
+            assert!(script.code.contains("leak_rate"));
+        } else {
+            panic!("Expected RiftScript response");
+        }
+    }
+
+    #[test]
+    fn test_distributed_lock_simulation_config() {
+        // Simulate distributed lock using flow state
+        let json = r##"{
+            "port": 4545,
+            "protocol": "http",
+            "_rift": {
+                "flowState": {"backend": "inmemory", "ttlSeconds": 30}
+            },
+            "stubs": [
+                {
+                    "predicates": [{"equals": {"method": "POST", "path": "/lock"}}],
+                    "responses": [{
+                        "_rift": {
+                            "script": {
+                                "engine": "rhai",
+                                "code": "let resource = request.query[\"resource\"]; let lock_key = \"lock_\" + resource; let locked = flow.get(lock_key); if locked != () { #{\"statusCode\": 409, \"body\": \"Resource already locked\"} } else { let lock_id = random_string(16); flow.set(lock_key, lock_id); #{\"statusCode\": 200, \"headers\": #{\"X-Lock-Id\": lock_id}, \"body\": \"Lock acquired\"} }"
+                            }
+                        }
+                    }]
+                },
+                {
+                    "predicates": [{"equals": {"method": "DELETE", "path": "/lock"}}],
+                    "responses": [{
+                        "_rift": {
+                            "script": {
+                                "engine": "rhai",
+                                "code": "let resource = request.query[\"resource\"]; let lock_id = request.headers[\"x-lock-id\"]; let lock_key = \"lock_\" + resource; let current_lock = flow.get(lock_key); if current_lock == () { #{\"statusCode\": 404, \"body\": \"Lock not found\"} } else if current_lock != lock_id { #{\"statusCode\": 403, \"body\": \"Lock owned by another client\"} } else { flow.delete(lock_key); #{\"statusCode\": 200, \"body\": \"Lock released\"} }"
+                            }
+                        }
+                    }]
+                }
+            ]
+        }"##;
+
+        let config: ImposterConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.stubs.len(), 2);
+
+        // Lock TTL should be 30 seconds
+        let flow_state = config.rift.as_ref().unwrap().flow_state.as_ref().unwrap();
+        assert_eq!(flow_state.ttl_seconds, 30);
+    }
+
+    #[test]
+    fn test_request_coalescing_config() {
+        // Request coalescing: batch similar requests
+        let json = r##"{
+            "port": 4545,
+            "protocol": "http",
+            "_rift": {
+                "flowState": {"backend": "inmemory", "ttlSeconds": 5}
+            },
+            "stubs": [{
+                "predicates": [{"equals": {"path": "/batch-query"}}],
+                "responses": [{
+                    "_rift": {
+                        "script": {
+                            "engine": "rhai",
+                            "code": "let query_id = request.query[\"id\"]; let pending_key = \"pending_batch\"; let pending = flow.get_or_default(pending_key, []); pending.push(query_id); flow.set(pending_key, pending); if pending.len() >= 5 { let result = \"Batch processed: \" + pending.join(\",\"); flow.delete(pending_key); #{\"statusCode\": 200, \"body\": result} } else { #{\"statusCode\": 202, \"headers\": #{\"X-Batch-Size\": pending.len().to_string()}, \"body\": \"Queued for batching\"} }"
+                        }
+                    }
+                }]
+            }]
+        }"##;
+
+        let config: ImposterConfig = serde_json::from_str(json).unwrap();
+        if let StubResponse::RiftScript { rift } = &config.stubs[0].responses[0] {
+            let script = rift.script.as_ref().unwrap();
+            assert!(script.code.contains("pending_batch"));
+            assert!(script.code.contains("X-Batch-Size"));
+        } else {
+            panic!("Expected RiftScript response");
+        }
+    }
+
+    #[test]
+    fn test_multi_region_failover_config() {
+        // Multi-region failover simulation
+        let json = r##"{
+            "port": 4545,
+            "protocol": "http",
+            "_rift": {
+                "flowState": {"backend": "inmemory"}
+            },
+            "stubs": [{
+                "predicates": [],
+                "responses": [{
+                    "_rift": {
+                        "script": {
+                            "engine": "rhai",
+                            "code": "let regions = [\"us-east-1\", \"us-west-2\", \"eu-west-1\"]; let primary_down = flow.get_or_default(\"us-east-1_down\", false); let secondary_down = flow.get_or_default(\"us-west-2_down\", false); let active_region = if !primary_down { \"us-east-1\" } else if !secondary_down { \"us-west-2\" } else { \"eu-west-1\" }; #{\"statusCode\": 200, \"headers\": #{\"X-Region\": active_region, \"X-Failover\": if primary_down { \"true\" } else { \"false\" }}, \"body\": \"Served from \" + active_region}"
+                        }
+                    }
+                }]
+            }]
+        }"##;
+
+        let config: ImposterConfig = serde_json::from_str(json).unwrap();
+        if let StubResponse::RiftScript { rift } = &config.stubs[0].responses[0] {
+            let script = rift.script.as_ref().unwrap();
+            assert!(script.code.contains("us-east-1"));
+            assert!(script.code.contains("X-Region"));
+            assert!(script.code.contains("X-Failover"));
+        } else {
+            panic!("Expected RiftScript response");
+        }
+    }
+
+    #[test]
+    fn test_sliding_window_counter_config() {
+        // Sliding window rate limiting
+        let json = r##"{
+            "port": 4545,
+            "protocol": "http",
+            "_rift": {
+                "flowState": {"backend": "inmemory"}
+            },
+            "stubs": [{
+                "predicates": [],
+                "responses": [{
+                    "_rift": {
+                        "script": {
+                            "engine": "rhai",
+                            "code": "let window_size = 60; let limit = 100; let now = timestamp(); let window_key = \"window_\" + (now / window_size).to_string(); let prev_window_key = \"window_\" + ((now / window_size) - 1).to_string(); let current_count = flow.get_or_default(window_key, 0); let prev_count = flow.get_or_default(prev_window_key, 0); let weight = 1.0 - ((now % window_size) / window_size); let weighted_count = current_count + (prev_count * weight); if weighted_count >= limit { #{\"statusCode\": 429, \"body\": \"Rate limit exceeded\"} } else { flow.set(window_key, current_count + 1); #{\"statusCode\": 200, \"body\": \"OK\"} }"
+                        }
+                    }
+                }]
+            }]
+        }"##;
+
+        let config: ImposterConfig = serde_json::from_str(json).unwrap();
+        if let StubResponse::RiftScript { rift } = &config.stubs[0].responses[0] {
+            let script = rift.script.as_ref().unwrap();
+            assert!(script.code.contains("window_size"));
+            assert!(script.code.contains("weighted_count"));
+        } else {
+            panic!("Expected RiftScript response");
+        }
+    }
+
+    #[test]
+    fn test_saga_pattern_config() {
+        // Saga pattern: track multi-step transaction state
+        let json = r##"{
+            "port": 4545,
+            "protocol": "http",
+            "_rift": {
+                "flowState": {"backend": "inmemory", "ttlSeconds": 300}
+            },
+            "stubs": [
+                {
+                    "predicates": [{"equals": {"path": "/saga/start"}}],
+                    "responses": [{
+                        "_rift": {
+                            "script": {
+                                "engine": "rhai",
+                                "code": "let saga_id = random_string(16); flow.set(\"saga_\" + saga_id + \"_state\", \"started\"); flow.set(\"saga_\" + saga_id + \"_steps\", []); #{\"statusCode\": 201, \"headers\": #{\"X-Saga-Id\": saga_id}, \"body\": \"Saga started\"}"
+                            }
+                        }
+                    }]
+                },
+                {
+                    "predicates": [{"equals": {"path": "/saga/step"}}],
+                    "responses": [{
+                        "_rift": {
+                            "script": {
+                                "engine": "rhai",
+                                "code": "let saga_id = request.headers[\"x-saga-id\"]; let step = request.body; let state = flow.get(\"saga_\" + saga_id + \"_state\"); if state == () { #{\"statusCode\": 404, \"body\": \"Saga not found\"} } else if state == \"failed\" { #{\"statusCode\": 409, \"body\": \"Saga already failed\"} } else { let steps = flow.get(\"saga_\" + saga_id + \"_steps\"); steps.push(step); flow.set(\"saga_\" + saga_id + \"_steps\", steps); #{\"statusCode\": 200, \"body\": \"Step recorded\"} }"
+                            }
+                        }
+                    }]
+                },
+                {
+                    "predicates": [{"equals": {"path": "/saga/complete"}}],
+                    "responses": [{
+                        "_rift": {
+                            "script": {
+                                "engine": "rhai",
+                                "code": "let saga_id = request.headers[\"x-saga-id\"]; flow.set(\"saga_\" + saga_id + \"_state\", \"completed\"); #{\"statusCode\": 200, \"body\": \"Saga completed\"}"
+                            }
+                        }
+                    }]
+                },
+                {
+                    "predicates": [{"equals": {"path": "/saga/compensate"}}],
+                    "responses": [{
+                        "_rift": {
+                            "script": {
+                                "engine": "rhai",
+                                "code": "let saga_id = request.headers[\"x-saga-id\"]; let steps = flow.get(\"saga_\" + saga_id + \"_steps\"); flow.set(\"saga_\" + saga_id + \"_state\", \"compensating\"); #{\"statusCode\": 200, \"headers\": #{\"X-Compensation-Steps\": steps.len().to_string()}, \"body\": \"Compensating \" + steps.len().to_string() + \" steps\"}"
+                            }
+                        }
+                    }]
+                }
+            ]
+        }"##;
+
+        let config: ImposterConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.stubs.len(), 4);
+
+        // Verify saga TTL
+        let flow_state = config.rift.as_ref().unwrap().flow_state.as_ref().unwrap();
+        assert_eq!(flow_state.ttl_seconds, 300); // 5 minutes for saga
+    }
+
+    #[test]
+    fn test_health_check_with_dependencies_config() {
+        // Health check that tracks dependency status
+        let json = r##"{
+            "port": 4545,
+            "protocol": "http",
+            "_rift": {
+                "flowState": {"backend": "inmemory"}
+            },
+            "stubs": [{
+                "predicates": [{"equals": {"path": "/health"}}],
+                "responses": [{
+                    "_rift": {
+                        "script": {
+                            "engine": "rhai",
+                            "code": "let db_healthy = flow.get_or_default(\"db_healthy\", true); let cache_healthy = flow.get_or_default(\"cache_healthy\", true); let queue_healthy = flow.get_or_default(\"queue_healthy\", true); let all_healthy = db_healthy && cache_healthy && queue_healthy; let status = if all_healthy { 200 } else { 503 }; #{\"statusCode\": status, \"headers\": #{\"Content-Type\": \"application/json\"}, \"body\": \"{\\\"status\\\": \\\"\" + if all_healthy { \"healthy\" } else { \"unhealthy\" } + \"\\\", \\\"dependencies\\\": {\\\"database\\\": \" + db_healthy.to_string() + \", \\\"cache\\\": \" + cache_healthy.to_string() + \", \\\"queue\\\": \" + queue_healthy.to_string() + \"}}\"}"
+                        }
+                    }
+                }]
+            }]
+        }"##;
+
+        let config: ImposterConfig = serde_json::from_str(json).unwrap();
+        if let StubResponse::RiftScript { rift } = &config.stubs[0].responses[0] {
+            let script = rift.script.as_ref().unwrap();
+            assert!(script.code.contains("db_healthy"));
+            assert!(script.code.contains("cache_healthy"));
+            assert!(script.code.contains("queue_healthy"));
+        } else {
+            panic!("Expected RiftScript response");
+        }
     }
 }

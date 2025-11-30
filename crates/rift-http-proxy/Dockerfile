@@ -133,12 +133,6 @@ ENV MB_LOGLEVEL=info
 ENV RIFT_METRICS_PORT=9090
 # Prometheus metrics server port (--metrics-port)
 
-# RIFT_CONFIG_PATH=/path/to/config.yaml
-# Load Rift native YAML config (--rift-config) - alternative to Mountebank mode
-
-# RIFT_WORKERS=0
-# Number of worker threads, 0 = auto-detect (--workers)
-
 # ============================================================
 # Scripting Features (enabled by default)
 # ============================================================
@@ -150,31 +144,30 @@ ENV RIFT_METRICS_PORT=9090
 # Flow state storage:
 # - In-memory: Built-in, always available
 # - Redis: Enabled via --features redis-backend
+#
+# Rift Extensions (_rift namespace):
+# - Flow state for stateful testing scenarios
+# - Probabilistic fault injection (latency, error, TCP faults)
+# - Multi-engine scripting (Rhai, Lua, JavaScript)
 
-# Default command: Start in Mountebank mode
-# Override with --rift-config for native mode
+# Default command: Start Mountebank-compatible server
 #
 # Examples:
-#   # Mountebank mode (default)
+#   # Basic usage
 #   docker run -p 2525:2525 -p 9090:9090 rift-proxy
 #
-#   # Mountebank mode with injection enabled
+#   # With injection enabled (for JavaScript inject responses)
 #   docker run -p 2525:2525 -e MB_ALLOW_INJECTION=1 rift-proxy
 #
-#   # Mountebank mode with config file
+#   # With imposter config file
 #   docker run -p 2525:2525 -v ./imposters.json:/config/imposters.json \
 #     -e MB_CONFIGFILE=/config/imposters.json rift-proxy
-#
-#   # Rift native mode with YAML config
-#   docker run -p 8080:8080 -p 9090:9090 \
-#     -v ./config.yaml:/config/config.yaml \
-#     rift-proxy --rift-config /config/config.yaml
 #
 #   # With persistent data directory
 #   docker run -p 2525:2525 -v ./mb-data:/data \
 #     -e MB_DATADIR=/data rift-proxy
 #
-#   # With Redis backend for distributed state
+#   # With Redis backend for distributed flow state
 #   docker run -p 2525:2525 --network my-network \
 #     -e REDIS_URL=redis://redis:6379 rift-proxy
 #
@@ -186,9 +179,7 @@ ENV RIFT_METRICS_PORT=9090
 #   --allow-injection       Enable JS injection [env: MB_ALLOW_INJECTION]
 #   --local-only            Localhost only [env: MB_LOCAL_ONLY]
 #   --loglevel <LEVEL>      Log level [env: MB_LOGLEVEL] [default: info]
-#   --rift-config <FILE>    Rift native YAML config [env: RIFT_CONFIG_PATH]
 #   --metrics-port <PORT>   Metrics port [env: RIFT_METRICS_PORT] [default: 9090]
-#   --workers <N>           Worker threads [env: RIFT_WORKERS] [default: 0]
 #   --mock                  Run in mock mode
 #   --debug                 Enable debug mode
 #   --nologfile             Disable log file (stdout only)

@@ -14,36 +14,36 @@ Rift provides advanced features for service virtualization and chaos engineering
 
 ## Core Features
 
-### Service Virtualization (Mountebank Mode)
+### Mountebank Compatibility
 
 - **Imposters** - Mock HTTP/HTTPS servers
 - **Predicates** - Flexible request matching
 - **Responses** - Static, proxy, and dynamic responses
 - **Behaviors** - Response modification and delays
+- **JavaScript Injection** - Dynamic response generation
 
-### Chaos Engineering (Native Mode)
+### Rift Extensions (`_rift` Namespace)
 
-- **Fault Injection** - Probabilistic latency and error injection
-- **Scripting** - Rhai, Lua, and JavaScript engines
-- **Flow State** - Stateful scenarios across requests
+- **Fault Injection** - Probabilistic latency, error, and TCP fault injection
+- **Scripting** - Rhai and Lua engines for lightweight scripting
+- **Flow State** - Stateful scenarios with InMemory or Redis backends
 - **Metrics** - Prometheus integration
 
 ---
 
-## Feature Comparison
+## Feature Overview
 
-| Feature | Mountebank Mode | Native Mode |
-|:--------|:----------------|:------------|
-| HTTP/HTTPS Mocking | Yes | Yes |
-| Request Matching | Full predicates | Path/header matching |
-| Static Responses | Yes | Via proxy |
-| Proxy Recording | Yes | No |
-| JavaScript Injection | Yes | Yes |
-| Probabilistic Faults | Via injection | Built-in |
-| Rhai/Lua Scripting | No | Yes |
-| Flow State | Via injection | Built-in |
-| Prometheus Metrics | Yes | Yes |
-| Multi-upstream Routing | No | Yes |
+| Feature | Mountebank | Rift Extensions |
+|:--------|:-----------|:----------------|
+| HTTP/HTTPS Mocking | ✅ Full support | — |
+| Request Matching | ✅ Full predicates | — |
+| Static Responses | ✅ | — |
+| Proxy Recording | ✅ | — |
+| JavaScript Injection | ✅ | — |
+| Probabilistic Faults | Via injection | ✅ `_rift.fault` |
+| Rhai/Lua Scripting | — | ✅ `_rift.script` |
+| Flow State | Via injection | ✅ `_rift.flowState` |
+| Prometheus Metrics | ✅ | ✅ |
 
 ---
 
