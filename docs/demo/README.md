@@ -182,15 +182,73 @@ docker compose -f docker-compose-rift-features.yml down
 
 ---
 
+## Demo 4: Scripting with Flow State
+
+Demonstrates Rift's Rhai scripting engine with persistent flow state for stateful mock scenarios.
+
+### Start
+
+```bash
+docker compose -f docker-compose-scripting.yml up -d
+```
+
+### Test Counter API (Port 4550)
+
+```bash
+# Get counter (initial value)
+curl http://localhost:4550/api/counter
+
+# Increment counter
+curl -X POST http://localhost:4550/api/counter/increment
+curl -X POST http://localhost:4550/api/counter/increment
+
+# Get counter (should be 2)
+curl http://localhost:4550/api/counter
+
+# Reset counter
+curl -X DELETE http://localhost:4550/api/counter
+```
+
+### Test Rate Limiter
+
+```bash
+# First 5 requests succeed with remaining count
+for i in {1..5}; do curl http://localhost:4550/api/rate-limited; echo; done
+
+# 6th+ requests return 429 Too Many Requests
+curl http://localhost:4550/api/rate-limited
+
+# Reset rate limiter
+curl -X DELETE http://localhost:4550/api/rate-limited/reset
+```
+
+### Test Echo with Count
+
+```bash
+# Each request echoes back method/path with incrementing count
+curl -X POST http://localhost:4550/api/echo
+curl -X POST http://localhost:4550/api/echo
+```
+
+### Cleanup
+
+```bash
+docker compose -f docker-compose-scripting.yml down
+```
+
+---
+
 ## Configuration Files
 
 | File | Description |
 |:-----|:------------|
 | `imposters.json` | Mountebank HTTP imposter config |
-| `imposters-rift-features.json` | Rift-only features demo config |
+| `imposters-rift-features.json` | Fault injection demo config |
+| `imposters-scripting.json` | Scripting with flow state demo config |
 | `docker-compose.yml` | HTTP demo |
 | `docker-compose-https.yml` | HTTPS/TLS demo |
-| `docker-compose-rift-features.yml` | Rift-only features demo |
+| `docker-compose-rift-features.yml` | Fault injection demo |
+| `docker-compose-scripting.yml` | Scripting with flow state demo |
 | `generate-certs.sh` | Certificate generation script |
 
 ---

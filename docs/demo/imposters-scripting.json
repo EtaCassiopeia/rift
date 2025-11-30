@@ -1,0 +1,102 @@
+{
+  "imposters": [
+    {
+      "port": 4550,
+      "protocol": "http",
+      "name": "Rift Scripting Demo - Flow State",
+      "recordRequests": true,
+      "_rift": {
+        "flowState": {
+          "backend": "inmemory",
+          "ttlSeconds": 600
+        }
+      },
+      "stubs": [
+        {
+          "name": "Counter - Increment",
+          "predicates": [
+            { "equals": { "method": "POST", "path": "/api/counter/increment" } }
+          ],
+          "responses": [{
+            "_rift": {
+              "script": {
+                "engine": "rhai",
+                "code": "let fid = \"demo\"; let counter = flow_store.get(fid, \"counter\"); if counter == () { counter = 0; }; counter += 1; flow_store.set(fid, \"counter\", counter); #{inject: true, fault: \"error\", status: 200, body: `{\"counter\":${counter}}`, headers: #{\"Content-Type\": \"application/json\"}}"
+              }
+            }
+          }]
+        },
+        {
+          "name": "Counter - Get",
+          "predicates": [
+            { "equals": { "method": "GET", "path": "/api/counter" } }
+          ],
+          "responses": [{
+            "_rift": {
+              "script": {
+                "engine": "rhai",
+                "code": "let fid = \"demo\"; let counter = flow_store.get(fid, \"counter\"); if counter == () { counter = 0; }; #{inject: true, fault: \"error\", status: 200, body: `{\"counter\":${counter}}`, headers: #{\"Content-Type\": \"application/json\"}}"
+              }
+            }
+          }]
+        },
+        {
+          "name": "Counter - Reset",
+          "predicates": [
+            { "equals": { "method": "DELETE", "path": "/api/counter" } }
+          ],
+          "responses": [{
+            "_rift": {
+              "script": {
+                "engine": "rhai",
+                "code": "let fid = \"demo\"; flow_store.delete(fid, \"counter\"); #{inject: true, fault: \"error\", status: 200, body: \"{\\\"message\\\":\\\"Counter reset\\\"}\", headers: #{\"Content-Type\": \"application/json\"}}"
+              }
+            }
+          }]
+        },
+        {
+          "name": "Rate Limiter - Check",
+          "predicates": [
+            { "equals": { "path": "/api/rate-limited" } }
+          ],
+          "responses": [{
+            "_rift": {
+              "script": {
+                "engine": "rhai",
+                "code": "let fid = \"ratelimit\"; let count = flow_store.get(fid, \"requests\"); if count == () { count = 0; }; count += 1; flow_store.set(fid, \"requests\", count); if count > 5 { #{inject: true, fault: \"error\", status: 429, body: `{\"error\":\"Rate limit exceeded\",\"requests\":${count},\"limit\":5}`, headers: #{\"Content-Type\": \"application/json\", \"Retry-After\": \"60\"}} } else { let remaining = 5 - count; #{inject: true, fault: \"error\", status: 200, body: `{\"message\":\"OK\",\"requests\":${count},\"remaining\":${remaining}}`, headers: #{\"Content-Type\": \"application/json\", \"X-RateLimit-Remaining\": `${remaining}`}} }"
+              }
+            }
+          }]
+        },
+        {
+          "name": "Rate Limiter - Reset",
+          "predicates": [
+            { "equals": { "method": "DELETE", "path": "/api/rate-limited/reset" } }
+          ],
+          "responses": [{
+            "_rift": {
+              "script": {
+                "engine": "rhai",
+                "code": "let fid = \"ratelimit\"; flow_store.delete(fid, \"requests\"); #{inject: true, fault: \"error\", status: 200, body: \"{\\\"message\\\":\\\"Rate limit reset\\\"}\", headers: #{\"Content-Type\": \"application/json\"}}"
+              }
+            }
+          }]
+        },
+        {
+          "name": "Request Echo",
+          "predicates": [
+            { "equals": { "method": "POST", "path": "/api/echo" } }
+          ],
+          "responses": [{
+            "_rift": {
+              "script": {
+                "engine": "rhai",
+                "code": "let fid = \"echo\"; let count = flow_store.get(fid, \"count\"); if count == () { count = 0; }; count += 1; flow_store.set(fid, \"count\", count); #{inject: true, fault: \"error\", status: 200, body: `{\"method\":\"${request.method}\",\"path\":\"${request.path}\",\"echoCount\":${count}}`, headers: #{\"Content-Type\": \"application/json\"}}"
+              }
+            }
+          }]
+        }
+      ]
+    }
+  ]
+}
