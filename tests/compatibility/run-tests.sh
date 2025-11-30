@@ -138,17 +138,17 @@ test_api() {
     local rift_url="${RIFT_ADMIN}${path}"
 
     if [ -n "$data" ]; then
-        mb_result=$(curl -s -w "\n%{http_code}" -X "$method" -H "Content-Type: application/json" -d "$data" "$mb_url")
-        rift_result=$(curl -s -w "\n%{http_code}" -X "$method" -H "Content-Type: application/json" -d "$data" "$rift_url")
+        mb_result=$(curl -s -w $'\n%{http_code}' -X "$method" -H "Content-Type: application/json" -d "$data" "$mb_url")
+        rift_result=$(curl -s -w $'\n%{http_code}' -X "$method" -H "Content-Type: application/json" -d "$data" "$rift_url")
     else
-        mb_result=$(curl -s -w "\n%{http_code}" -X "$method" "$mb_url")
-        rift_result=$(curl -s -w "\n%{http_code}" -X "$method" "$rift_url")
+        mb_result=$(curl -s -w $'\n%{http_code}' -X "$method" "$mb_url")
+        rift_result=$(curl -s -w $'\n%{http_code}' -X "$method" "$rift_url")
     fi
 
-    mb_status=$(echo "$mb_result" | tail -n1)
+    mb_status=$(echo "$mb_result" | tail -n1 | tr -d '\r')
     mb_body=$(echo "$mb_result" | sed '$d')
 
-    rift_status=$(echo "$rift_result" | tail -n1)
+    rift_status=$(echo "$rift_result" | tail -n1 | tr -d '\r')
     rift_body=$(echo "$rift_result" | sed '$d')
 
     compare_status "$test_name" "$mb_status" "$rift_status"
@@ -167,24 +167,24 @@ test_imposter() {
     local mb_url="${MB_IMPOSTER_BASE}:${mb_port}${path}"
     local rift_url="${RIFT_IMPOSTER_BASE}:${rift_port}${path}"
 
-    local curl_opts="-s -w \n%{http_code}"
-
+    # Build curl commands - use proper escaping for newline separator
+    local header_opt=""
     if [ -n "$headers" ]; then
-        curl_opts="$curl_opts -H \"$headers\""
+        header_opt="-H \"$headers\""
     fi
 
     if [ -n "$data" ]; then
-        mb_result=$(eval curl $curl_opts -X "$method" -d "'$data'" "'$mb_url'")
-        rift_result=$(eval curl $curl_opts -X "$method" -d "'$data'" "'$rift_url'")
+        mb_result=$(eval curl -s -w '$'\''\n%{http_code}'\' $header_opt -X "$method" -d "'$data'" "'$mb_url'")
+        rift_result=$(eval curl -s -w '$'\''\n%{http_code}'\' $header_opt -X "$method" -d "'$data'" "'$rift_url'")
     else
-        mb_result=$(eval curl $curl_opts -X "$method" "'$mb_url'")
-        rift_result=$(eval curl $curl_opts -X "$method" "'$rift_url'")
+        mb_result=$(eval curl -s -w '$'\''\n%{http_code}'\' $header_opt -X "$method" "'$mb_url'")
+        rift_result=$(eval curl -s -w '$'\''\n%{http_code}'\' $header_opt -X "$method" "'$rift_url'")
     fi
 
-    mb_status=$(echo "$mb_result" | tail -n1)
+    mb_status=$(echo "$mb_result" | tail -n1 | tr -d '\r')
     mb_body=$(echo "$mb_result" | sed '$d')
 
-    rift_status=$(echo "$rift_result" | tail -n1)
+    rift_status=$(echo "$rift_result" | tail -n1 | tr -d '\r')
     rift_body=$(echo "$rift_result" | sed '$d')
 
     if compare_status "$test_name (status)" "$mb_status" "$rift_status"; then

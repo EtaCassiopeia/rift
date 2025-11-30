@@ -306,7 +306,9 @@ pub struct ProxyResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImposterConfig {
-    pub port: u16,
+    /// Port for the imposter. If not specified, an available port will be auto-assigned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
     #[serde(default = "default_protocol")]
     pub protocol: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1511,25 +1513,33 @@ impl ImposterManager {
     }
 
     /// Create and start an imposter
-    pub async fn create_imposter(&self, config: ImposterConfig) -> Result<(), ImposterError> {
-        let port = config.port;
-
-        // Check if port is already in use
-        {
-            let imposters = self.imposters.read();
-            if imposters.contains_key(&port) {
-                return Err(ImposterError::PortInUse(port));
-            }
-        }
-
-        // Validate protocol
+    /// Returns the assigned port (which may have been auto-assigned if not specified)
+    pub async fn create_imposter(&self, config: ImposterConfig) -> Result<u16, ImposterError> {
+        // Validate protocol first
         match config.protocol.as_str() {
             "http" | "https" => {}
             proto => return Err(ImposterError::InvalidProtocol(proto.to_string())),
         }
 
+        // Determine port - either from config or auto-assign
+        let port = if let Some(p) = config.port {
+            // Check if specified port is already in use
+            let imposters = self.imposters.read();
+            if imposters.contains_key(&p) {
+                return Err(ImposterError::PortInUse(p));
+            }
+            p
+        } else {
+            // Auto-assign port: find an available port starting from a base
+            self.find_available_port().await?
+        };
+
+        // Create config with resolved port
+        let mut resolved_config = config;
+        resolved_config.port = Some(port);
+
         // Create imposter
-        let mut imposter = Imposter::new(config);
+        let mut imposter = Imposter::new(resolved_config);
 
         // Create shutdown channel for this imposter
         let (shutdown_tx, _) = broadcast::channel(1);
@@ -1594,7 +1604,39 @@ impl ImposterManager {
             imposters.insert(port, imposter);
         }
 
-        Ok(())
+        Ok(port)
+    }
+
+    /// Find an available port for auto-assignment
+    /// Starts from port 49152 (start of dynamic/private port range) and finds first available
+    async fn find_available_port(&self) -> Result<u16, ImposterError> {
+        let existing_ports: std::collections::HashSet<u16> = {
+            let imposters = self.imposters.read();
+            imposters.keys().copied().collect()
+        };
+
+        // Start from dynamic port range (49152-65535)
+        // Try ports in this range until we find one that's available
+        for port in 49152..=65535u16 {
+            if existing_ports.contains(&port) {
+                continue;
+            }
+            // Try to bind to check if OS has it available
+            let addr = SocketAddr::from(([0, 0, 0, 0], port));
+            match TcpListener::bind(addr).await {
+                Ok(listener) => {
+                    // Port is available, drop the listener and return
+                    drop(listener);
+                    return Ok(port);
+                }
+                Err(_) => continue, // Port in use by OS, try next
+            }
+        }
+
+        Err(ImposterError::BindError(
+            0,
+            "No available ports in range 49152-65535".to_string(),
+        ))
     }
 
     /// Delete an imposter
@@ -1867,7 +1909,7 @@ async fn handle_imposter_request(
                 body: body_string.clone(),
             };
 
-            match execute_mountebank_inject(&inject_fn, &mb_request, imposter.config.port) {
+            match execute_mountebank_inject(&inject_fn, &mb_request, imposter.config.port.unwrap_or(0)) {
                 Ok(inject_response) => {
                     // Advance the cycler for this inject response
                     imposter.advance_cycler_for_inject(&stub, stub_index);
@@ -2100,10 +2142,19 @@ mod tests {
     fn test_imposter_config_default() {
         let json = r#"{"port": 8080}"#;
         let config: ImposterConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(config.port, 8080);
+        assert_eq!(config.port, Some(8080));
         assert_eq!(config.protocol, "http");
         assert!(!config.record_requests);
         assert!(config.stubs.is_empty());
+    }
+
+    #[test]
+    fn test_imposter_config_no_port() {
+        // Port should be optional for auto-assignment
+        let json = r#"{"protocol": "http"}"#;
+        let config: ImposterConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.port, None);
+        assert_eq!(config.protocol, "http");
     }
 
     #[test]
@@ -2140,7 +2191,7 @@ mod tests {
     #[test]
     fn test_execute_stub() {
         let config = ImposterConfig {
-            port: 8080,
+            port: Some(8080),
             protocol: "http".to_string(),
             name: Some("test".to_string()),
             record_requests: false,
@@ -2187,7 +2238,7 @@ mod tests {
 
         // Try to create an imposter on a high port (less likely to conflict)
         let config = ImposterConfig {
-            port: 19999,
+            port: Some(19999),
             protocol: "http".to_string(),
             name: Some("test".to_string()),
             record_requests: false,
@@ -2388,7 +2439,7 @@ mod tests {
         }"#;
 
         let config: ImposterConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(config.port, 8201);
+        assert_eq!(config.port, Some(8201));
         assert_eq!(config.stubs.len(), 1);
         assert_eq!(config.stubs[0].responses.len(), 1);
 
@@ -2878,7 +2929,7 @@ mod tests {
         }"#;
 
         let config: ImposterConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(config.port, 8201);
+        assert_eq!(config.port, Some(8201));
         assert_eq!(config.protocol, "http");
         assert!(config.allow_cors);
         assert_eq!(config.service_name, Some("LenderDetails_v1_lenders".to_string()));
@@ -3153,7 +3204,7 @@ mod tests {
     fn test_serialization_roundtrip() {
         // Test that we can serialize and deserialize without losing data
         let original = ImposterConfig {
-            port: 8080,
+            port: Some(8080),
             protocol: "http".to_string(),
             name: Some("test".to_string()),
             record_requests: false,

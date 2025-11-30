@@ -253,7 +253,7 @@ async fn handle_create_imposter(
         Err(e) => return error_response(StatusCode::BAD_REQUEST, &e),
     };
 
-    let config: ImposterConfig = match serde_json::from_slice(&body) {
+    let mut config: ImposterConfig = match serde_json::from_slice(&body) {
         Ok(c) => c,
         Err(e) => {
             return error_response(
@@ -263,10 +263,11 @@ async fn handle_create_imposter(
         }
     };
 
-    let port = config.port;
     match manager.create_imposter(config.clone()).await {
-        Ok(()) => {
-            info!("Created imposter on port {}", port);
+        Ok(assigned_port) => {
+            info!("Created imposter on port {}", assigned_port);
+            // Update config with assigned port for response
+            config.port = Some(assigned_port);
             json_response(StatusCode::CREATED, &config)
         }
         Err(ImposterError::PortInUse(p)) => error_response(
@@ -304,11 +305,13 @@ async fn handle_list_imposters(
         // Return summaries
         let summaries: Vec<ImposterSummary> = imposters
             .iter()
-            .map(|i| ImposterSummary {
-                port: i.config.port,
-                protocol: i.config.protocol.clone(),
-                name: i.config.name.clone(),
-                number_of_requests: i.get_request_count(),
+            .filter_map(|i| {
+                i.config.port.map(|port| ImposterSummary {
+                    port,
+                    protocol: i.config.protocol.clone(),
+                    name: i.config.name.clone(),
+                    number_of_requests: i.get_request_count(),
+                })
             })
             .collect();
 
@@ -346,11 +349,17 @@ async fn handle_replace_all_imposters(
 
     // Create new imposters
     let mut created = Vec::new();
-    for config in batch.imposters {
+    for mut config in batch.imposters {
         match manager.create_imposter(config.clone()).await {
-            Ok(()) => created.push(config),
+            Ok(assigned_port) => {
+                config.port = Some(assigned_port);
+                created.push(config);
+            }
             Err(e) => {
-                error!("Failed to create imposter on port {}: {}", config.port, e);
+                error!(
+                    "Failed to create imposter on port {:?}: {}",
+                    config.port, e
+                );
             }
         }
     }
@@ -365,11 +374,13 @@ async fn handle_delete_all_imposters(manager: Arc<ImposterManager>) -> Response<
 
     let summaries: Vec<ImposterSummary> = configs
         .iter()
-        .map(|c| ImposterSummary {
-            port: c.port,
-            protocol: c.protocol.clone(),
-            name: c.name.clone(),
-            number_of_requests: 0,
+        .filter_map(|c| {
+            c.port.map(|port| ImposterSummary {
+                port,
+                protocol: c.protocol.clone(),
+                name: c.name.clone(),
+                number_of_requests: 0,
+            })
         })
         .collect();
 
@@ -384,7 +395,7 @@ async fn handle_get_imposter(port: u16, manager: Arc<ImposterManager>) -> Respon
     match manager.get_imposter(port) {
         Ok(imposter) => {
             let detail = ImposterDetail {
-                port: imposter.config.port,
+                port: imposter.config.port.unwrap_or(port),
                 protocol: imposter.config.protocol.clone(),
                 name: imposter.config.name.clone(),
                 record_requests: imposter.config.record_requests,
@@ -608,11 +619,13 @@ async fn handle_metrics(manager: Arc<ImposterManager>) -> Response<Full<Bytes>> 
     metrics.push_str("# HELP rift_imposter_requests_total Total requests per imposter\n");
     metrics.push_str("# TYPE rift_imposter_requests_total counter\n");
     for imposter in &imposters {
-        metrics.push_str(&format!(
-            "rift_imposter_requests_total{{port=\"{}\"}} {}\n",
-            imposter.config.port,
-            imposter.get_request_count()
-        ));
+        if let Some(port) = imposter.config.port {
+            metrics.push_str(&format!(
+                "rift_imposter_requests_total{{port=\"{}\"}} {}\n",
+                port,
+                imposter.get_request_count()
+            ));
+        }
     }
 
     Response::builder()

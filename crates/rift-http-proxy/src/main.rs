@@ -409,9 +409,13 @@ async fn load_imposters_from_file(
     };
 
     for config in imposters {
-        info!("Creating imposter on port {} from configfile", config.port);
-        if let Err(e) = manager.create_imposter(config).await {
-            error!("Failed to create imposter: {}", e);
+        info!(
+            "Creating imposter on port {:?} from configfile",
+            config.port
+        );
+        match manager.create_imposter(config).await {
+            Ok(port) => info!("Created imposter on port {}", port),
+            Err(e) => error!("Failed to create imposter: {}", e),
         }
     }
 
@@ -437,9 +441,10 @@ async fn load_imposters_from_datadir(
         if path.extension().map(|e| e == "json").unwrap_or(false) {
             let content = std::fs::read_to_string(&path)?;
             if let Ok(config) = serde_json::from_str::<ImposterConfig>(&content) {
-                info!("Loading imposter on port {} from {:?}", config.port, path);
-                if let Err(e) = manager.create_imposter(config).await {
-                    error!("Failed to create imposter from {:?}: {}", path, e);
+                info!("Loading imposter on port {:?} from {:?}", config.port, path);
+                match manager.create_imposter(config).await {
+                    Ok(port) => info!("Created imposter on port {} from {:?}", port, path),
+                    Err(e) => error!("Failed to create imposter from {:?}: {}", path, e),
                 }
             }
         }
