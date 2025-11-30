@@ -1,22 +1,18 @@
 //! Rift HTTP Proxy - A Mountebank-compatible chaos engineering proxy
 //!
-//! Rift can run in two modes:
-//! 1. **Mountebank mode** (default): Start with admin API on port 2525, create imposters dynamically
-//! 2. **Rift native mode**: Load a Rift-specific YAML config file at startup
+//! Rift provides a Mountebank-compatible API with advanced features like:
+//! - Probabilistic fault injection via `_rift.fault` extensions
+//! - Multi-engine scripting (Rhai, Lua, JavaScript) via `_rift.script`
+//! - Stateful testing with flow store via `_rift.flowState`
 //!
 //! # Examples
 //!
-//! Start in Mountebank mode (default):
+//! Start Rift server:
 //! ```bash
 //! rift                                    # Admin API on port 2525
 //! rift --port 3000                        # Admin API on port 3000
 //! rift --configfile imposters.json        # Load imposters from file
 //! rift --datadir ./mb-data                # Persist imposters to directory
-//! ```
-//!
-//! Start in Rift native mode:
-//! ```bash
-//! rift --rift-config config.yaml          # Load Rift YAML config
 //! ```
 
 mod admin_api;
@@ -47,8 +43,8 @@ use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 /// Rift - A Mountebank-compatible HTTP chaos engineering proxy
 ///
-/// By default, Rift starts in Mountebank mode with an admin API on port 2525.
-/// Use --rift-config to start in Rift native mode with a YAML config file.
+/// Rift starts an admin API on port 2525 (configurable) for creating imposters
+/// with advanced fault injection, scripting, and stateful testing capabilities.
 #[derive(Parser, Debug)]
 #[command(name = "rift")]
 #[command(author, version, about, long_about = None)]
@@ -113,15 +109,6 @@ struct Cli {
     /// Enable debug mode
     #[arg(long)]
     debug: bool,
-
-    // === Rift-specific options ===
-    /// Load Rift native YAML config file (alternative to Mountebank mode)
-    #[arg(long, value_name = "FILE", env = "RIFT_CONFIG_PATH")]
-    rift_config: Option<PathBuf>,
-
-    /// Number of worker threads (Rift native mode only)
-    #[arg(long, default_value = "0", env = "RIFT_WORKERS")]
-    workers: usize,
 
     /// Metrics server port
     #[arg(long, default_value = "9090", env = "RIFT_METRICS_PORT")]
@@ -216,23 +203,13 @@ fn main() -> Result<(), anyhow::Error> {
             });
         }
         Some(Commands::Start) | None => {
-            // Default behavior - check which mode to use
+            // Default behavior - start in Mountebank mode
         }
     }
 
-    // Determine which mode to run
-    if let Some(ref config_path) = cli.rift_config {
-        // Rift native mode
-        info!(
-            "Starting in Rift native mode with config: {:?}",
-            config_path
-        );
-        run_rift_native_mode(&cli, config_path)
-    } else {
-        // Mountebank mode (default)
-        info!("Starting in Mountebank mode on port {}", cli.port);
-        run_mountebank_mode(cli)
-    }
+    // Start in Mountebank mode
+    info!("Starting Rift on port {}", cli.port);
+    run_mountebank_mode(cli)
 }
 
 /// Run in Mountebank-compatible mode
@@ -291,94 +268,6 @@ fn run_mountebank_mode(cli: Cli) -> Result<(), anyhow::Error> {
 
         Ok(())
     })
-}
-
-/// Run in Rift native mode with YAML config
-fn run_rift_native_mode(cli: &Cli, config_path: &PathBuf) -> Result<(), anyhow::Error> {
-    use config::Config;
-    use proxy::ProxyServer;
-
-    info!("Loading Rift configuration from: {:?}", config_path);
-
-    // Load initial configuration
-    let config = Config::from_file(config_path.to_str().unwrap())?;
-
-    // Start metrics server
-    let metrics_port = config.metrics.port;
-    std::thread::spawn(move || {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        runtime.block_on(async move {
-            if let Err(e) = run_metrics_server(metrics_port).await {
-                error!("Metrics server error: {}", e);
-            }
-        });
-    });
-
-    // Determine number of workers
-    let num_workers = if cli.workers == 0 {
-        if config.listen.workers == 0 {
-            num_cpus::get()
-        } else {
-            config.listen.workers
-        }
-    } else {
-        cli.workers
-    };
-
-    // Create shared flow store once if configured
-    let shared_flow_store: Option<std::sync::Arc<dyn flow_state::FlowStore>> =
-        if let Some(ref fs_config) = config.flow_state {
-            info!(
-                "Creating shared flow store ({} backend) for all workers",
-                fs_config.backend
-            );
-            Some(flow_state::create_flow_store(fs_config)?)
-        } else if !config.script_rules.is_empty() {
-            info!("Using shared NoOpFlowStore for all workers (flow_state not configured)");
-            Some(std::sync::Arc::new(flow_state::NoOpFlowStore))
-        } else {
-            None
-        };
-
-    info!("Starting {} worker threads", num_workers);
-
-    // Spawn worker threads with shared flow store
-    let handles: Vec<_> = (0..num_workers)
-        .map(|worker_id| {
-            let config_clone = config.clone();
-            let flow_store_clone = shared_flow_store.clone();
-            std::thread::spawn(move || {
-                let runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .unwrap();
-
-                runtime.block_on(async move {
-                    info!("Worker {} starting", worker_id);
-                    let server = if let Some(flow_store) = flow_store_clone {
-                        ProxyServer::new_with_shared_flow_store(config_clone, flow_store).await?
-                    } else {
-                        ProxyServer::new(config_clone).await?
-                    };
-                    server.run().await
-                })
-            })
-        })
-        .collect();
-
-    // Wait for all workers
-    for (idx, handle) in handles.into_iter().enumerate() {
-        match handle.join() {
-            Ok(Ok(())) => info!("Worker {} exited normally", idx),
-            Ok(Err(e)) => error!("Worker {} failed: {}", idx, e),
-            Err(e) => error!("Worker {} panicked: {:?}", idx, e),
-        }
-    }
-
-    Ok(())
 }
 
 /// Load imposters from a JSON config file
