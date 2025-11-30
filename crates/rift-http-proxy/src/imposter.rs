@@ -62,15 +62,19 @@ pub struct RecordedRequest {
 
 /// Stub definition (Mountebank-compatible)
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Stub {
     #[serde(default)]
     pub predicates: Vec<serde_json::Value>,
     pub responses: Vec<StubResponse>,
+    /// Optional scenario name for documentation/organization (Mountebank compatible)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scenario_name: Option<String>,
 }
 
-/// Response within a stub
+/// Response within a stub - wrapper type that handles various formats
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
+#[serde(from = "StubResponseRaw", into = "StubResponseRaw")]
 pub enum StubResponse {
     Is {
         is: IsResponse,
@@ -86,6 +90,172 @@ pub enum StubResponse {
     Fault {
         fault: String,
     },
+}
+
+/// Raw deserialization type that handles multiple JSON formats for stub responses
+/// Supports:
+/// - Standard Mountebank format with `is`, `proxy`, `inject`, or `fault` fields
+/// - Formats with `behaviors` (without underscore) or `_behaviors`
+/// - Formats with `proxy: null` alongside `is` (ignored)
+/// - `statusCode` as either string or number
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StubResponseRaw {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    is: Option<IsResponseRaw>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    proxy: Option<ProxyResponse>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    inject: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fault: Option<String>,
+    /// Mountebank-style behaviors (with underscore prefix)
+    #[serde(rename = "_behaviors", skip_serializing_if = "Option::is_none")]
+    underscore_behaviors: Option<serde_json::Value>,
+    /// Alternative behaviors field (without underscore, used by some tools)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    behaviors: Option<serde_json::Value>,
+}
+
+/// Raw IsResponse that handles statusCode as string or number
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct IsResponseRaw {
+    #[serde(default = "default_status_code_raw", deserialize_with = "deserialize_status_code")]
+    status_code: u16,
+    #[serde(default)]
+    headers: HashMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    body: Option<serde_json::Value>,
+}
+
+fn default_status_code_raw() -> u16 {
+    200
+}
+
+/// Deserialize statusCode from either a number or a string
+fn deserialize_status_code<'de, D>(deserializer: D) -> Result<u16, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+    let value = serde_json::Value::deserialize(deserializer)?;
+    match value {
+        serde_json::Value::Number(n) => n
+            .as_u64()
+            .and_then(|n| u16::try_from(n).ok())
+            .ok_or_else(|| D::Error::custom("invalid status code number")),
+        serde_json::Value::String(s) => s
+            .parse::<u16>()
+            .map_err(|_| D::Error::custom(format!("invalid status code string: {s}"))),
+        _ => Err(D::Error::custom("statusCode must be a number or string")),
+    }
+}
+
+impl From<StubResponseRaw> for StubResponse {
+    fn from(raw: StubResponseRaw) -> Self {
+        // Priority: is > proxy > inject > fault
+        if let Some(is_raw) = raw.is {
+            // Merge behaviors: prefer _behaviors, fall back to behaviors
+            let behaviors = raw.underscore_behaviors.or_else(|| {
+                // Convert array format to object format if needed
+                raw.behaviors.and_then(normalize_behaviors)
+            });
+            StubResponse::Is {
+                is: IsResponse {
+                    status_code: is_raw.status_code,
+                    headers: is_raw.headers,
+                    body: is_raw.body,
+                },
+                behaviors,
+            }
+        } else if let Some(proxy) = raw.proxy {
+            StubResponse::Proxy { proxy }
+        } else if let Some(inject) = raw.inject {
+            StubResponse::Inject { inject }
+        } else if let Some(fault) = raw.fault {
+            StubResponse::Fault { fault }
+        } else {
+            // Default to empty Is response
+            StubResponse::Is {
+                is: IsResponse {
+                    status_code: 200,
+                    headers: HashMap::new(),
+                    body: None,
+                },
+                behaviors: None,
+            }
+        }
+    }
+}
+
+impl From<StubResponse> for StubResponseRaw {
+    fn from(response: StubResponse) -> Self {
+        match response {
+            StubResponse::Is { is, behaviors } => StubResponseRaw {
+                is: Some(IsResponseRaw {
+                    status_code: is.status_code,
+                    headers: is.headers,
+                    body: is.body,
+                }),
+                proxy: None,
+                inject: None,
+                fault: None,
+                underscore_behaviors: behaviors,
+                behaviors: None,
+            },
+            StubResponse::Proxy { proxy } => StubResponseRaw {
+                is: None,
+                proxy: Some(proxy),
+                inject: None,
+                fault: None,
+                underscore_behaviors: None,
+                behaviors: None,
+            },
+            StubResponse::Inject { inject } => StubResponseRaw {
+                is: None,
+                proxy: None,
+                inject: Some(inject),
+                fault: None,
+                underscore_behaviors: None,
+                behaviors: None,
+            },
+            StubResponse::Fault { fault } => StubResponseRaw {
+                is: None,
+                proxy: None,
+                inject: None,
+                fault: Some(fault),
+                underscore_behaviors: None,
+                behaviors: None,
+            },
+        }
+    }
+}
+
+/// Normalize behaviors from array format to object format
+/// Some tools use `behaviors: [{"wait": ...}, {"decorate": ...}]` instead of
+/// `_behaviors: {"wait": ..., "decorate": ...}`
+fn normalize_behaviors(value: serde_json::Value) -> Option<serde_json::Value> {
+    match value {
+        serde_json::Value::Array(arr) => {
+            // Convert array of behavior objects to a single merged object
+            let mut merged = serde_json::Map::new();
+            for item in arr {
+                if let serde_json::Value::Object(obj) = item {
+                    for (k, v) in obj {
+                        merged.insert(k, v);
+                    }
+                }
+            }
+            if merged.is_empty() {
+                None
+            } else {
+                Some(serde_json::Value::Object(merged))
+            }
+        }
+        serde_json::Value::Object(_) => Some(value),
+        _ => None,
+    }
 }
 
 impl HasRepeatBehavior for StubResponse {
@@ -147,6 +317,15 @@ pub struct ImposterConfig {
     pub stubs: Vec<Stub>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_response: Option<IsResponse>,
+    /// Allow CORS headers (Mountebank compatible)
+    #[serde(default, skip_serializing_if = "std::ops::Not::not", alias = "allowCORS")]
+    pub allow_cors: bool,
+    /// Service name for documentation (optional metadata)
+    #[serde(skip_serializing_if = "Option::is_none", alias = "service_name")]
+    pub service_name: Option<String>,
+    /// Service info for documentation (optional metadata, stored as-is)
+    #[serde(skip_serializing_if = "Option::is_none", alias = "service_info")]
+    pub service_info: Option<serde_json::Value>,
 }
 
 fn default_protocol() -> String {
@@ -221,27 +400,50 @@ impl Imposter {
         &self,
         method: &str,
         path: &str,
-        _headers: &hyper::HeaderMap,
+        headers: &hyper::HeaderMap,
         query: Option<&str>,
+        body: Option<&str>,
     ) -> Option<(Stub, usize)> {
         let stubs = self.stubs.read();
+        let headers_map = Self::header_map_to_hashmap(headers);
         for (index, stub) in stubs.iter().enumerate() {
-            if Self::stub_matches(stub, method, path, query) {
+            if Self::stub_matches(stub, method, path, query, &headers_map, body) {
                 return Some((stub.clone(), index));
             }
         }
         None
     }
 
+    /// Convert hyper HeaderMap to HashMap<String, String>
+    fn header_map_to_hashmap(headers: &hyper::HeaderMap) -> HashMap<String, String> {
+        headers
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.as_str().to_string(),
+                    v.to_str().unwrap_or("").to_string(),
+                )
+            })
+            .collect()
+    }
+
     /// Check if a stub matches a request
-    fn stub_matches(stub: &Stub, method: &str, path: &str, query: Option<&str>) -> bool {
+    fn stub_matches(
+        stub: &Stub,
+        method: &str,
+        path: &str,
+        query: Option<&str>,
+        headers: &HashMap<String, String>,
+        body: Option<&str>,
+    ) -> bool {
         // If no predicates, match everything
         if stub.predicates.is_empty() {
             return true;
         }
 
+        // All predicates must match (implicit AND)
         for predicate in &stub.predicates {
-            if !Self::predicate_matches(predicate, method, path, query) {
+            if !Self::predicate_matches(predicate, method, path, query, headers, body) {
                 return false;
             }
         }
@@ -261,126 +463,464 @@ impl Imposter {
             .collect()
     }
 
-    /// Check if a single predicate matches
+    /// Check if a single predicate matches (Mountebank-compatible)
+    /// Supports: equals, deepEquals, contains, startsWith, endsWith, matches, exists, not, or, and
     fn predicate_matches(
         predicate: &serde_json::Value,
         method: &str,
         path: &str,
         query: Option<&str>,
+        headers: &HashMap<String, String>,
+        body: Option<&str>,
     ) -> bool {
-        // Note: Mountebank compares raw URL-encoded paths, so we don't decode
-        if let Some(obj) = predicate.as_object() {
-            // Check if case-sensitive matching is requested
-            // Note: Mountebank defaults to case-insensitive for path matching
-            let case_sensitive = obj
-                .get("caseSensitive")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
+        let obj = match predicate.as_object() {
+            Some(o) => o,
+            None => return true,
+        };
 
-            // Get the except pattern for stripping values before matching
-            let except_pattern = obj.get("except").and_then(|v| v.as_str());
+        // Get predicate options
+        let case_sensitive = obj
+            .get("caseSensitive")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
-            // Helper to apply except pattern to a value
-            let apply_except = |value: &str| -> String {
-                if let Some(pattern) = except_pattern {
-                    if let Ok(re) = regex::Regex::new(pattern) {
-                        return re.replace_all(value, "").to_string();
-                    }
+        let except_pattern = obj.get("except").and_then(|v| v.as_str());
+
+        // Helper to apply except pattern
+        let apply_except = |value: &str| -> String {
+            if let Some(pattern) = except_pattern {
+                if let Ok(re) = regex::Regex::new(pattern) {
+                    return re.replace_all(value, "").to_string();
                 }
-                value.to_string()
+            }
+            value.to_string()
+        };
+
+        // Helper for string comparison with case sensitivity
+        let str_equals = |expected: &str, actual: &str| -> bool {
+            if case_sensitive {
+                expected == actual
+            } else {
+                expected.eq_ignore_ascii_case(actual)
+            }
+        };
+
+        let str_contains = |haystack: &str, needle: &str| -> bool {
+            if case_sensitive {
+                haystack.contains(needle)
+            } else {
+                haystack.to_lowercase().contains(&needle.to_lowercase())
+            }
+        };
+
+        let str_starts_with = |haystack: &str, needle: &str| -> bool {
+            if case_sensitive {
+                haystack.starts_with(needle)
+            } else {
+                haystack.to_lowercase().starts_with(&needle.to_lowercase())
+            }
+        };
+
+        let str_ends_with = |haystack: &str, needle: &str| -> bool {
+            if case_sensitive {
+                haystack.ends_with(needle)
+            } else {
+                haystack.to_lowercase().ends_with(&needle.to_lowercase())
+            }
+        };
+
+        // Build request context for field access
+        let query_map = Self::parse_query(query);
+        let body_str = body.unwrap_or("");
+
+        // Handle logical "not" operator
+        if let Some(not_pred) = obj.get("not") {
+            return !Self::predicate_matches(not_pred, method, path, query, headers, body);
+        }
+
+        // Handle logical "or" operator
+        if let Some(or_preds) = obj.get("or").and_then(|v| v.as_array()) {
+            return or_preds
+                .iter()
+                .any(|p| Self::predicate_matches(p, method, path, query, headers, body));
+        }
+
+        // Handle logical "and" operator
+        if let Some(and_preds) = obj.get("and").and_then(|v| v.as_array()) {
+            return and_preds
+                .iter()
+                .all(|p| Self::predicate_matches(p, method, path, query, headers, body));
+        }
+
+        // Handle "equals" predicate (subset matching for objects)
+        if let Some(equals) = obj.get("equals") {
+            if !Self::check_predicate_fields(
+                equals,
+                method,
+                path,
+                &query_map,
+                headers,
+                body_str,
+                &apply_except,
+                |expected, actual| str_equals(expected, actual),
+                false, // not deep equals
+            ) {
+                return false;
+            }
+        }
+
+        // Handle "deepEquals" predicate (exact matching)
+        if let Some(deep_equals) = obj.get("deepEquals") {
+            if !Self::check_predicate_fields(
+                deep_equals,
+                method,
+                path,
+                &query_map,
+                headers,
+                body_str,
+                &apply_except,
+                |expected, actual| str_equals(expected, actual),
+                true, // deep equals
+            ) {
+                return false;
+            }
+        }
+
+        // Handle "contains" predicate
+        if let Some(contains) = obj.get("contains") {
+            if !Self::check_predicate_fields(
+                contains,
+                method,
+                path,
+                &query_map,
+                headers,
+                body_str,
+                &apply_except,
+                |expected, actual| str_contains(actual, expected),
+                false,
+            ) {
+                return false;
+            }
+        }
+
+        // Handle "startsWith" predicate
+        if let Some(starts_with) = obj.get("startsWith") {
+            if !Self::check_predicate_fields(
+                starts_with,
+                method,
+                path,
+                &query_map,
+                headers,
+                body_str,
+                &apply_except,
+                |expected, actual| str_starts_with(actual, expected),
+                false,
+            ) {
+                return false;
+            }
+        }
+
+        // Handle "endsWith" predicate
+        if let Some(ends_with) = obj.get("endsWith") {
+            if !Self::check_predicate_fields(
+                ends_with,
+                method,
+                path,
+                &query_map,
+                headers,
+                body_str,
+                &apply_except,
+                |expected, actual| str_ends_with(actual, expected),
+                false,
+            ) {
+                return false;
+            }
+        }
+
+        // Handle "matches" predicate (regex)
+        if let Some(matches) = obj.get("matches") {
+            if !Self::check_predicate_fields_regex(
+                matches,
+                method,
+                path,
+                &query_map,
+                headers,
+                body_str,
+                &apply_except,
+                case_sensitive,
+            ) {
+                return false;
+            }
+        }
+
+        // Handle "exists" predicate
+        if let Some(exists) = obj.get("exists") {
+            if !Self::check_exists_predicate(exists, &query_map, headers, body_str) {
+                return false;
+            }
+        }
+
+        true
+    }
+
+    /// Check predicate fields against request values
+    fn check_predicate_fields<F>(
+        predicate_value: &serde_json::Value,
+        method: &str,
+        path: &str,
+        query: &HashMap<String, String>,
+        headers: &HashMap<String, String>,
+        body: &str,
+        apply_except: &impl Fn(&str) -> String,
+        compare: F,
+        deep_equals: bool,
+    ) -> bool
+    where
+        F: Fn(&str, &str) -> bool,
+    {
+        let obj = match predicate_value.as_object() {
+            Some(o) => o,
+            None => return true,
+        };
+
+        // Check method
+        if let Some(expected) = obj.get("method").and_then(|v| v.as_str()) {
+            if !compare(expected, method) {
+                return false;
+            }
+        }
+
+        // Check path
+        if let Some(expected) = obj.get("path").and_then(|v| v.as_str()) {
+            let actual = apply_except(path);
+            if !compare(expected, &actual) {
+                return false;
+            }
+        }
+
+        // Check body
+        if let Some(expected) = obj.get("body") {
+            let expected_str = match expected {
+                serde_json::Value::String(s) => s.clone(),
+                _ => expected.to_string(),
             };
+            let actual = apply_except(body);
+            if !compare(&expected_str, &actual) {
+                return false;
+            }
+        }
 
-            // Handle "equals" predicate
-            if let Some(equals) = obj.get("equals").and_then(|v| v.as_object()) {
-                if let Some(m) = equals.get("method").and_then(|v| v.as_str()) {
-                    if !m.eq_ignore_ascii_case(method) {
-                        return false;
-                    }
+        // Check query parameters
+        if let Some(expected_query) = obj.get("query") {
+            if let Some(expected_obj) = expected_query.as_object() {
+                // For deepEquals, check exact match (same number of params)
+                if deep_equals && expected_obj.len() != query.len() {
+                    return false;
                 }
-                if let Some(p) = equals.get("path").and_then(|v| v.as_str()) {
-                    let actual_path = apply_except(path);
-                    let matches = if case_sensitive {
-                        p == actual_path
-                    } else {
-                        p.eq_ignore_ascii_case(&actual_path)
+
+                for (key, expected_val) in expected_obj {
+                    let expected_str = match expected_val {
+                        serde_json::Value::String(s) => s.clone(),
+                        _ => expected_val.to_string(),
                     };
-                    if !matches {
-                        return false;
-                    }
-                }
-                // Handle query matching for equals (subset match)
-                if let Some(expected_query) = equals.get("query").and_then(|q| q.as_object()) {
-                    let actual_query = Self::parse_query(query);
-                    for (key, expected_val) in expected_query {
-                        let expected_str = expected_val.as_str().unwrap_or("");
-                        if let Some(actual_val) = actual_query.get(key) {
-                            if actual_val != expected_str {
+                    match query.get(key) {
+                        Some(actual) => {
+                            let actual = apply_except(actual);
+                            if !compare(&expected_str, &actual) {
                                 return false;
                             }
-                        } else {
-                            return false;
                         }
-                    }
-                }
-            }
-
-            // Handle "deepEquals" predicate (exact match - no extra fields allowed)
-            if let Some(deep_equals) = obj.get("deepEquals").and_then(|v| v.as_object()) {
-                // Handle query matching for deepEquals (exact match)
-                if let Some(expected_query) = deep_equals.get("query").and_then(|q| q.as_object()) {
-                    let actual_query = Self::parse_query(query);
-
-                    // Check counts match first
-                    if expected_query.len() != actual_query.len() {
-                        return false;
-                    }
-
-                    // Check all expected fields exist and match
-                    for (key, expected_val) in expected_query {
-                        let expected_str = expected_val.as_str().unwrap_or("");
-                        if let Some(actual_val) = actual_query.get(key) {
-                            if actual_val != expected_str {
-                                return false;
-                            }
-                        } else {
-                            return false;
-                        }
-                    }
-                }
-            }
-
-            // Handle "startsWith" predicate
-            if let Some(starts) = obj.get("startsWith").and_then(|v| v.as_object()) {
-                if let Some(p) = starts.get("path").and_then(|v| v.as_str()) {
-                    let actual_path = apply_except(path);
-                    if !actual_path.starts_with(p) {
-                        return false;
-                    }
-                }
-            }
-
-            // Handle "contains" predicate
-            if let Some(contains) = obj.get("contains").and_then(|v| v.as_object()) {
-                if let Some(p) = contains.get("path").and_then(|v| v.as_str()) {
-                    let actual_path = apply_except(path);
-                    if !actual_path.contains(p) {
-                        return false;
-                    }
-                }
-            }
-
-            // Handle "matches" predicate (regex)
-            if let Some(matches) = obj.get("matches").and_then(|v| v.as_object()) {
-                if let Some(p) = matches.get("path").and_then(|v| v.as_str()) {
-                    if let Ok(re) = regex::Regex::new(p) {
-                        let actual_path = apply_except(path);
-                        if !re.is_match(&actual_path) {
-                            return false;
-                        }
+                        None => return false,
                     }
                 }
             }
         }
+
+        // Check headers
+        if let Some(expected_headers) = obj.get("headers") {
+            if let Some(expected_obj) = expected_headers.as_object() {
+                // For deepEquals, check exact match
+                if deep_equals && expected_obj.len() != headers.len() {
+                    return false;
+                }
+
+                for (key, expected_val) in expected_obj {
+                    let expected_str = match expected_val {
+                        serde_json::Value::String(s) => s.clone(),
+                        _ => expected_val.to_string(),
+                    };
+                    // Headers are case-insensitive for key lookup
+                    let actual = headers
+                        .iter()
+                        .find(|(k, _)| k.eq_ignore_ascii_case(key))
+                        .map(|(_, v)| v.as_str());
+
+                    match actual {
+                        Some(actual) => {
+                            let actual = apply_except(actual);
+                            if !compare(&expected_str, &actual) {
+                                return false;
+                            }
+                        }
+                        None => return false,
+                    }
+                }
+            }
+        }
+
+        true
+    }
+
+    /// Check predicate fields with regex matching
+    fn check_predicate_fields_regex(
+        predicate_value: &serde_json::Value,
+        method: &str,
+        path: &str,
+        query: &HashMap<String, String>,
+        headers: &HashMap<String, String>,
+        body: &str,
+        apply_except: &impl Fn(&str) -> String,
+        case_sensitive: bool,
+    ) -> bool {
+        let obj = match predicate_value.as_object() {
+            Some(o) => o,
+            None => return true,
+        };
+
+        let build_regex = |pattern: &str| -> Option<regex::Regex> {
+            if case_sensitive {
+                regex::Regex::new(pattern).ok()
+            } else {
+                regex::RegexBuilder::new(pattern)
+                    .case_insensitive(true)
+                    .build()
+                    .ok()
+            }
+        };
+
+        // Check method
+        if let Some(pattern) = obj.get("method").and_then(|v| v.as_str()) {
+            if let Some(re) = build_regex(pattern) {
+                if !re.is_match(method) {
+                    return false;
+                }
+            }
+        }
+
+        // Check path
+        if let Some(pattern) = obj.get("path").and_then(|v| v.as_str()) {
+            if let Some(re) = build_regex(pattern) {
+                let actual = apply_except(path);
+                if !re.is_match(&actual) {
+                    return false;
+                }
+            }
+        }
+
+        // Check body
+        if let Some(pattern) = obj.get("body").and_then(|v| v.as_str()) {
+            if let Some(re) = build_regex(pattern) {
+                let actual = apply_except(body);
+                if !re.is_match(&actual) {
+                    return false;
+                }
+            }
+        }
+
+        // Check query parameters
+        if let Some(expected_query) = obj.get("query").and_then(|v| v.as_object()) {
+            for (key, pattern_val) in expected_query {
+                let pattern = match pattern_val {
+                    serde_json::Value::String(s) => s.as_str(),
+                    _ => continue,
+                };
+                if let Some(re) = build_regex(pattern) {
+                    match query.get(key) {
+                        Some(actual) => {
+                            let actual = apply_except(actual);
+                            if !re.is_match(&actual) {
+                                return false;
+                            }
+                        }
+                        None => return false,
+                    }
+                }
+            }
+        }
+
+        // Check headers
+        if let Some(expected_headers) = obj.get("headers").and_then(|v| v.as_object()) {
+            for (key, pattern_val) in expected_headers {
+                let pattern = match pattern_val {
+                    serde_json::Value::String(s) => s.as_str(),
+                    _ => continue,
+                };
+                if let Some(re) = build_regex(pattern) {
+                    let actual = headers
+                        .iter()
+                        .find(|(k, _)| k.eq_ignore_ascii_case(key))
+                        .map(|(_, v)| v.as_str());
+
+                    match actual {
+                        Some(actual) => {
+                            let actual = apply_except(actual);
+                            if !re.is_match(&actual) {
+                                return false;
+                            }
+                        }
+                        None => return false,
+                    }
+                }
+            }
+        }
+
+        true
+    }
+
+    /// Check exists predicate - verifies field presence or absence
+    fn check_exists_predicate(
+        predicate_value: &serde_json::Value,
+        query: &HashMap<String, String>,
+        headers: &HashMap<String, String>,
+        body: &str,
+    ) -> bool {
+        let obj = match predicate_value.as_object() {
+            Some(o) => o,
+            None => return true,
+        };
+
+        // Check body exists
+        if let Some(should_exist) = obj.get("body").and_then(|v| v.as_bool()) {
+            let exists = !body.is_empty();
+            if exists != should_exist {
+                return false;
+            }
+        }
+
+        // Check query parameters exist
+        if let Some(expected_query) = obj.get("query").and_then(|v| v.as_object()) {
+            for (key, should_exist_val) in expected_query {
+                let should_exist = should_exist_val.as_bool().unwrap_or(true);
+                let exists = query.contains_key(key);
+                if exists != should_exist {
+                    return false;
+                }
+            }
+        }
+
+        // Check headers exist
+        if let Some(expected_headers) = obj.get("headers").and_then(|v| v.as_object()) {
+            for (key, should_exist_val) in expected_headers {
+                let should_exist = should_exist_val.as_bool().unwrap_or(true);
+                let exists = headers
+                    .iter()
+                    .any(|(k, _)| k.eq_ignore_ascii_case(key));
+                if exists != should_exist {
+                    return false;
+                }
+            }
+        }
+
         true
     }
 
@@ -690,6 +1230,7 @@ impl Imposter {
                 is: is_response,
                 behaviors,
             }],
+            scenario_name: None,
         }
     }
 
@@ -1256,7 +1797,7 @@ async fn handle_imposter_request(
     };
 
     if let Some((stub, stub_index)) =
-        imposter.find_matching_stub(method_str, path_str, &headers_for_context, query_opt)
+        imposter.find_matching_stub(method_str, path_str, &headers_for_context, query_opt, body_string.as_deref())
     {
         // Check if this is a proxy response
         if let Some(proxy_config) = imposter.get_proxy_response(&stub, stub_index) {
@@ -1582,15 +2123,18 @@ mod tests {
                 },
                 behaviors: None,
             }],
+            scenario_name: None,
         };
 
+        let empty_headers = HashMap::new();
+
         // Should match
-        assert!(Imposter::stub_matches(&stub, "GET", "/test", None));
-        assert!(Imposter::stub_matches(&stub, "get", "/test", None)); // case-insensitive method
+        assert!(Imposter::stub_matches(&stub, "GET", "/test", None, &empty_headers, None));
+        assert!(Imposter::stub_matches(&stub, "get", "/test", None, &empty_headers, None)); // case-insensitive method
 
         // Should not match
-        assert!(!Imposter::stub_matches(&stub, "POST", "/test", None));
-        assert!(!Imposter::stub_matches(&stub, "GET", "/other", None));
+        assert!(!Imposter::stub_matches(&stub, "POST", "/test", None, &empty_headers, None));
+        assert!(!Imposter::stub_matches(&stub, "GET", "/other", None, &empty_headers, None));
     }
 
     #[test]
@@ -1602,6 +2146,9 @@ mod tests {
             record_requests: false,
             stubs: vec![],
             default_response: None,
+            allow_cors: false,
+            service_name: None,
+            service_info: None,
         };
         let imposter = Imposter::new(config);
 
@@ -1615,6 +2162,7 @@ mod tests {
                 },
                 behaviors: None,
             }],
+            scenario_name: None,
         };
 
         let result = imposter.execute_stub(&stub, 0);
@@ -1645,6 +2193,9 @@ mod tests {
             record_requests: false,
             stubs: vec![],
             default_response: None,
+            allow_cors: false,
+            service_name: None,
+            service_info: None,
         };
 
         // This may fail if port is in use, which is fine for testing
@@ -1709,5 +2260,928 @@ mod tests {
             serialized.contains("addDecorateBehavior"),
             "Serialized JSON should contain addDecorateBehavior field"
         );
+    }
+
+    #[test]
+    fn test_alternative_response_format_with_behaviors_array() {
+        // Test format with: behaviors array (not _behaviors), statusCode as string, and proxy: null
+        let json = r#"{
+            "behaviors": [{"wait": 100}],
+            "is": {
+                "statusCode": "200",
+                "headers": {"Content-Type": "application/json"},
+                "body": "{\"message\": \"hello\"}"
+            },
+            "proxy": null
+        }"#;
+
+        let response: StubResponse = serde_json::from_str(json).unwrap();
+        if let StubResponse::Is { is, behaviors } = response {
+            assert_eq!(is.status_code, 200);
+            assert!(behaviors.is_some());
+            let behaviors = behaviors.unwrap();
+            assert_eq!(behaviors.get("wait").unwrap().as_u64(), Some(100));
+        } else {
+            panic!("Expected Is response");
+        }
+    }
+
+    #[test]
+    fn test_status_code_as_string() {
+        let json = r#"{
+            "is": {
+                "statusCode": "201",
+                "headers": {},
+                "body": null
+            }
+        }"#;
+
+        let response: StubResponse = serde_json::from_str(json).unwrap();
+        if let StubResponse::Is { is, .. } = response {
+            assert_eq!(is.status_code, 201);
+        } else {
+            panic!("Expected Is response");
+        }
+    }
+
+    #[test]
+    fn test_status_code_as_number() {
+        let json = r#"{
+            "is": {
+                "statusCode": 404,
+                "headers": {}
+            }
+        }"#;
+
+        let response: StubResponse = serde_json::from_str(json).unwrap();
+        if let StubResponse::Is { is, .. } = response {
+            assert_eq!(is.status_code, 404);
+        } else {
+            panic!("Expected Is response");
+        }
+    }
+
+    #[test]
+    fn test_behaviors_array_merged_to_object() {
+        // Test that behaviors array format is converted to object
+        let json = r#"{
+            "behaviors": [
+                {"wait": 50},
+                {"decorate": "function() {}"}
+            ],
+            "is": {
+                "statusCode": 200
+            }
+        }"#;
+
+        let response: StubResponse = serde_json::from_str(json).unwrap();
+        if let StubResponse::Is { behaviors, .. } = response {
+            let behaviors = behaviors.expect("behaviors should be present");
+            assert!(behaviors.get("wait").is_some());
+            assert!(behaviors.get("decorate").is_some());
+        } else {
+            panic!("Expected Is response");
+        }
+    }
+
+    #[test]
+    fn test_proxy_only_response() {
+        // When only proxy is present (not null), it should parse as Proxy variant
+        let json = r#"{
+            "proxy": {
+                "to": "http://example.com",
+                "mode": "proxyTransparent"
+            }
+        }"#;
+
+        let response: StubResponse = serde_json::from_str(json).unwrap();
+        if let StubResponse::Proxy { proxy } = response {
+            assert_eq!(proxy.to, "http://example.com");
+            assert_eq!(proxy.mode, "proxyTransparent");
+        } else {
+            panic!("Expected Proxy response");
+        }
+    }
+
+    #[test]
+    fn test_full_imposter_config_alternative_format() {
+        // Test a complete imposter config with the alternative format
+        let json = r#"{
+            "port": 8201,
+            "protocol": "http",
+            "stubs": [
+                {
+                    "predicates": [{"equals": {"method": "GET"}}],
+                    "responses": [
+                        {
+                            "behaviors": [{"wait": 0}],
+                            "is": {
+                                "statusCode": "200",
+                                "headers": {"Content-Type": "application/json"},
+                                "body": "{\"data\": \"test\"}"
+                            },
+                            "proxy": null
+                        }
+                    ]
+                }
+            ]
+        }"#;
+
+        let config: ImposterConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.port, 8201);
+        assert_eq!(config.stubs.len(), 1);
+        assert_eq!(config.stubs[0].responses.len(), 1);
+
+        if let StubResponse::Is { is, behaviors } = &config.stubs[0].responses[0] {
+            assert_eq!(is.status_code, 200);
+            assert!(behaviors.is_some());
+        } else {
+            panic!("Expected Is response");
+        }
+    }
+
+    // =============================================================================
+    // Comprehensive Predicate Tests (Mountebank Compatibility)
+    // =============================================================================
+
+    #[test]
+    fn test_predicate_ends_with() {
+        let stub = Stub {
+            predicates: vec![serde_json::json!({
+                "endsWith": {"path": "-details"}
+            })],
+            responses: vec![StubResponse::Is {
+                is: IsResponse {
+                    status_code: 200,
+                    headers: HashMap::new(),
+                    body: None,
+                },
+                behaviors: None,
+            }],
+            scenario_name: None,
+        };
+
+        let empty_headers = HashMap::new();
+
+        // Should match
+        assert!(Imposter::stub_matches(&stub, "GET", "/api/lender-details", None, &empty_headers, None));
+        assert!(Imposter::stub_matches(&stub, "GET", "/user-details", None, &empty_headers, None));
+
+        // Should not match
+        assert!(!Imposter::stub_matches(&stub, "GET", "/details/other", None, &empty_headers, None));
+        assert!(!Imposter::stub_matches(&stub, "GET", "/api/details/v1", None, &empty_headers, None));
+    }
+
+    #[test]
+    fn test_predicate_deep_equals_method() {
+        let stub = Stub {
+            predicates: vec![serde_json::json!({
+                "deepEquals": {"method": "GET"}
+            })],
+            responses: vec![StubResponse::Is {
+                is: IsResponse { status_code: 200, headers: HashMap::new(), body: None },
+                behaviors: None,
+            }],
+            scenario_name: None,
+        };
+
+        let empty_headers = HashMap::new();
+
+        assert!(Imposter::stub_matches(&stub, "GET", "/test", None, &empty_headers, None));
+        assert!(Imposter::stub_matches(&stub, "get", "/test", None, &empty_headers, None)); // case-insensitive
+        assert!(!Imposter::stub_matches(&stub, "POST", "/test", None, &empty_headers, None));
+    }
+
+    #[test]
+    fn test_predicate_deep_equals_body() {
+        let stub = Stub {
+            predicates: vec![serde_json::json!({
+                "deepEquals": {"body": ""}
+            })],
+            responses: vec![StubResponse::Is {
+                is: IsResponse { status_code: 200, headers: HashMap::new(), body: None },
+                behaviors: None,
+            }],
+            scenario_name: None,
+        };
+
+        let empty_headers = HashMap::new();
+
+        // Empty body should match
+        assert!(Imposter::stub_matches(&stub, "GET", "/test", None, &empty_headers, Some("")));
+        assert!(Imposter::stub_matches(&stub, "GET", "/test", None, &empty_headers, None));
+
+        // Non-empty body should not match
+        assert!(!Imposter::stub_matches(&stub, "GET", "/test", None, &empty_headers, Some("content")));
+    }
+
+    #[test]
+    fn test_predicate_deep_equals_path() {
+        let stub = Stub {
+            predicates: vec![serde_json::json!({
+                "deepEquals": {"path": "/kaizen/auto/financing/lender-information/lenders"}
+            })],
+            responses: vec![StubResponse::Is {
+                is: IsResponse { status_code: 200, headers: HashMap::new(), body: None },
+                behaviors: None,
+            }],
+            scenario_name: None,
+        };
+
+        let empty_headers = HashMap::new();
+
+        assert!(Imposter::stub_matches(&stub, "GET", "/kaizen/auto/financing/lender-information/lenders", None, &empty_headers, None));
+        assert!(!Imposter::stub_matches(&stub, "GET", "/other/path", None, &empty_headers, None));
+    }
+
+    #[test]
+    fn test_predicate_contains_query() {
+        let stub = Stub {
+            predicates: vec![serde_json::json!({
+                "contains": {"query": {"lenderIds": "CofTest"}}
+            })],
+            responses: vec![StubResponse::Is {
+                is: IsResponse { status_code: 200, headers: HashMap::new(), body: None },
+                behaviors: None,
+            }],
+            scenario_name: None,
+        };
+
+        let empty_headers = HashMap::new();
+
+        // Should match - query contains "CofTest"
+        assert!(Imposter::stub_matches(&stub, "GET", "/test", Some("lenderIds=CofTestWL"), &empty_headers, None));
+        assert!(Imposter::stub_matches(&stub, "GET", "/test", Some("lenderIds=CofTest"), &empty_headers, None));
+        assert!(Imposter::stub_matches(&stub, "GET", "/test", Some("lenderIds=123CofTest456"), &empty_headers, None));
+
+        // Should not match
+        assert!(!Imposter::stub_matches(&stub, "GET", "/test", Some("lenderIds=Other"), &empty_headers, None));
+        assert!(!Imposter::stub_matches(&stub, "GET", "/test", None, &empty_headers, None));
+    }
+
+    #[test]
+    fn test_predicate_equals_headers() {
+        let stub = Stub {
+            predicates: vec![serde_json::json!({
+                "equals": {"headers": {"Content-Type": "application/json"}}
+            })],
+            responses: vec![StubResponse::Is {
+                is: IsResponse { status_code: 200, headers: HashMap::new(), body: None },
+                behaviors: None,
+            }],
+            scenario_name: None,
+        };
+
+        let mut headers = HashMap::new();
+        headers.insert("Content-Type".to_string(), "application/json".to_string());
+
+        assert!(Imposter::stub_matches(&stub, "GET", "/test", None, &headers, None));
+
+        // Header key lookup is case-insensitive
+        let mut headers_lower = HashMap::new();
+        headers_lower.insert("content-type".to_string(), "application/json".to_string());
+        assert!(Imposter::stub_matches(&stub, "GET", "/test", None, &headers_lower, None));
+
+        // Wrong value
+        let mut wrong_headers = HashMap::new();
+        wrong_headers.insert("Content-Type".to_string(), "text/html".to_string());
+        assert!(!Imposter::stub_matches(&stub, "GET", "/test", None, &wrong_headers, None));
+
+        // Missing header
+        let empty_headers = HashMap::new();
+        assert!(!Imposter::stub_matches(&stub, "GET", "/test", None, &empty_headers, None));
+    }
+
+    #[test]
+    fn test_predicate_equals_body() {
+        let stub = Stub {
+            predicates: vec![serde_json::json!({
+                "equals": {"body": "{\"key\": \"value\"}"}
+            })],
+            responses: vec![StubResponse::Is {
+                is: IsResponse { status_code: 200, headers: HashMap::new(), body: None },
+                behaviors: None,
+            }],
+            scenario_name: None,
+        };
+
+        let empty_headers = HashMap::new();
+
+        assert!(Imposter::stub_matches(&stub, "POST", "/test", None, &empty_headers, Some("{\"key\": \"value\"}")));
+        assert!(!Imposter::stub_matches(&stub, "POST", "/test", None, &empty_headers, Some("{\"other\": \"data\"}")));
+    }
+
+    #[test]
+    fn test_predicate_exists() {
+        let stub = Stub {
+            predicates: vec![serde_json::json!({
+                "exists": {
+                    "query": {"token": true},
+                    "headers": {"Authorization": true},
+                    "body": true
+                }
+            })],
+            responses: vec![StubResponse::Is {
+                is: IsResponse { status_code: 200, headers: HashMap::new(), body: None },
+                behaviors: None,
+            }],
+            scenario_name: None,
+        };
+
+        let mut headers = HashMap::new();
+        headers.insert("Authorization".to_string(), "Bearer xyz".to_string());
+
+        // All exist
+        assert!(Imposter::stub_matches(&stub, "POST", "/test", Some("token=abc"), &headers, Some("body content")));
+
+        // Missing query param
+        assert!(!Imposter::stub_matches(&stub, "POST", "/test", None, &headers, Some("body content")));
+
+        // Missing header
+        let empty_headers = HashMap::new();
+        assert!(!Imposter::stub_matches(&stub, "POST", "/test", Some("token=abc"), &empty_headers, Some("body content")));
+
+        // Missing body
+        assert!(!Imposter::stub_matches(&stub, "POST", "/test", Some("token=abc"), &headers, None));
+    }
+
+    #[test]
+    fn test_predicate_exists_false() {
+        let stub = Stub {
+            predicates: vec![serde_json::json!({
+                "exists": {"query": {"debug": false}}
+            })],
+            responses: vec![StubResponse::Is {
+                is: IsResponse { status_code: 200, headers: HashMap::new(), body: None },
+                behaviors: None,
+            }],
+            scenario_name: None,
+        };
+
+        let empty_headers = HashMap::new();
+
+        // debug param should NOT exist
+        assert!(Imposter::stub_matches(&stub, "GET", "/test", None, &empty_headers, None));
+        assert!(Imposter::stub_matches(&stub, "GET", "/test", Some("other=value"), &empty_headers, None));
+        assert!(!Imposter::stub_matches(&stub, "GET", "/test", Some("debug=true"), &empty_headers, None));
+    }
+
+    #[test]
+    fn test_predicate_logical_not() {
+        let stub = Stub {
+            predicates: vec![serde_json::json!({
+                "not": {"equals": {"method": "DELETE"}}
+            })],
+            responses: vec![StubResponse::Is {
+                is: IsResponse { status_code: 200, headers: HashMap::new(), body: None },
+                behaviors: None,
+            }],
+            scenario_name: None,
+        };
+
+        let empty_headers = HashMap::new();
+
+        // Should match anything except DELETE
+        assert!(Imposter::stub_matches(&stub, "GET", "/test", None, &empty_headers, None));
+        assert!(Imposter::stub_matches(&stub, "POST", "/test", None, &empty_headers, None));
+        assert!(!Imposter::stub_matches(&stub, "DELETE", "/test", None, &empty_headers, None));
+    }
+
+    #[test]
+    fn test_predicate_logical_or() {
+        let stub = Stub {
+            predicates: vec![serde_json::json!({
+                "or": [
+                    {"equals": {"method": "GET"}},
+                    {"equals": {"method": "HEAD"}}
+                ]
+            })],
+            responses: vec![StubResponse::Is {
+                is: IsResponse { status_code: 200, headers: HashMap::new(), body: None },
+                behaviors: None,
+            }],
+            scenario_name: None,
+        };
+
+        let empty_headers = HashMap::new();
+
+        assert!(Imposter::stub_matches(&stub, "GET", "/test", None, &empty_headers, None));
+        assert!(Imposter::stub_matches(&stub, "HEAD", "/test", None, &empty_headers, None));
+        assert!(!Imposter::stub_matches(&stub, "POST", "/test", None, &empty_headers, None));
+    }
+
+    #[test]
+    fn test_predicate_logical_and() {
+        let stub = Stub {
+            predicates: vec![serde_json::json!({
+                "and": [
+                    {"equals": {"method": "GET"}},
+                    {"startsWith": {"path": "/api"}}
+                ]
+            })],
+            responses: vec![StubResponse::Is {
+                is: IsResponse { status_code: 200, headers: HashMap::new(), body: None },
+                behaviors: None,
+            }],
+            scenario_name: None,
+        };
+
+        let empty_headers = HashMap::new();
+
+        assert!(Imposter::stub_matches(&stub, "GET", "/api/users", None, &empty_headers, None));
+        assert!(!Imposter::stub_matches(&stub, "POST", "/api/users", None, &empty_headers, None));
+        assert!(!Imposter::stub_matches(&stub, "GET", "/other", None, &empty_headers, None));
+    }
+
+    #[test]
+    fn test_predicate_matches_regex_all_fields() {
+        let stub = Stub {
+            predicates: vec![serde_json::json!({
+                "matches": {
+                    "path": "^/api/v[0-9]+/",
+                    "method": "^(GET|POST)$"
+                }
+            })],
+            responses: vec![StubResponse::Is {
+                is: IsResponse { status_code: 200, headers: HashMap::new(), body: None },
+                behaviors: None,
+            }],
+            scenario_name: None,
+        };
+
+        let empty_headers = HashMap::new();
+
+        assert!(Imposter::stub_matches(&stub, "GET", "/api/v1/users", None, &empty_headers, None));
+        assert!(Imposter::stub_matches(&stub, "POST", "/api/v2/items", None, &empty_headers, None));
+        assert!(!Imposter::stub_matches(&stub, "DELETE", "/api/v1/users", None, &empty_headers, None));
+        assert!(!Imposter::stub_matches(&stub, "GET", "/other/path", None, &empty_headers, None));
+    }
+
+    #[test]
+    fn test_predicate_matches_body_regex() {
+        let stub = Stub {
+            predicates: vec![serde_json::json!({
+                "matches": {"body": "\"userId\":\\s*\"[a-f0-9-]+\""}
+            })],
+            responses: vec![StubResponse::Is {
+                is: IsResponse { status_code: 200, headers: HashMap::new(), body: None },
+                behaviors: None,
+            }],
+            scenario_name: None,
+        };
+
+        let empty_headers = HashMap::new();
+
+        assert!(Imposter::stub_matches(&stub, "POST", "/test", None, &empty_headers, Some(r#"{"userId": "abc-123-def"}"#)));
+        assert!(!Imposter::stub_matches(&stub, "POST", "/test", None, &empty_headers, Some(r#"{"userId": "invalid!"}"#)));
+    }
+
+    #[test]
+    fn test_predicate_case_sensitive() {
+        let stub = Stub {
+            predicates: vec![serde_json::json!({
+                "equals": {"path": "/API/Users"},
+                "caseSensitive": true
+            })],
+            responses: vec![StubResponse::Is {
+                is: IsResponse { status_code: 200, headers: HashMap::new(), body: None },
+                behaviors: None,
+            }],
+            scenario_name: None,
+        };
+
+        let empty_headers = HashMap::new();
+
+        assert!(Imposter::stub_matches(&stub, "GET", "/API/Users", None, &empty_headers, None));
+        assert!(!Imposter::stub_matches(&stub, "GET", "/api/users", None, &empty_headers, None));
+    }
+
+    #[test]
+    fn test_predicate_except_pattern() {
+        let stub = Stub {
+            predicates: vec![serde_json::json!({
+                "equals": {"path": "/api/users"},
+                "except": "\\?.*$"  // Strip query string before matching
+            })],
+            responses: vec![StubResponse::Is {
+                is: IsResponse { status_code: 200, headers: HashMap::new(), body: None },
+                behaviors: None,
+            }],
+            scenario_name: None,
+        };
+
+        let empty_headers = HashMap::new();
+
+        assert!(Imposter::stub_matches(&stub, "GET", "/api/users", None, &empty_headers, None));
+        assert!(Imposter::stub_matches(&stub, "GET", "/api/users?page=1", None, &empty_headers, None));
+    }
+
+    #[test]
+    fn test_predicate_complex_mountebank_format() {
+        // Test the exact format from user's JSON
+        let stub = Stub {
+            predicates: vec![
+                serde_json::json!({
+                    "endsWith": {"path": "lender-details"}
+                }),
+                serde_json::json!({
+                    "contains": {"query": {"lenderIds": "ALL"}}
+                }),
+                serde_json::json!({
+                    "deepEquals": {"method": "GET"}
+                }),
+            ],
+            responses: vec![StubResponse::Is {
+                is: IsResponse { status_code: 200, headers: HashMap::new(), body: None },
+                behaviors: None,
+            }],
+            scenario_name: Some("LenderDetails-v1-lenders_AllLenderDetails".to_string()),
+        };
+
+        let empty_headers = HashMap::new();
+
+        // Should match
+        assert!(Imposter::stub_matches(
+            &stub,
+            "GET",
+            "/kaizen/auto/financing/lender-information/lender-details",
+            Some("lenderIds=ALL"),
+            &empty_headers,
+            None
+        ));
+
+        // Should not match - wrong method
+        assert!(!Imposter::stub_matches(
+            &stub,
+            "POST",
+            "/kaizen/auto/financing/lender-information/lender-details",
+            Some("lenderIds=ALL"),
+            &empty_headers,
+            None
+        ));
+
+        // Should not match - path doesn't end with lender-details
+        assert!(!Imposter::stub_matches(
+            &stub,
+            "GET",
+            "/kaizen/auto/financing/lender-information/lenders",
+            Some("lenderIds=ALL"),
+            &empty_headers,
+            None
+        ));
+
+        // Should not match - query doesn't contain ALL
+        assert!(!Imposter::stub_matches(
+            &stub,
+            "GET",
+            "/kaizen/auto/financing/lender-information/lender-details",
+            Some("lenderIds=LENDER1"),
+            &empty_headers,
+            None
+        ));
+    }
+
+    // =============================================================================
+    // Real-World JSON Format Parsing Tests
+    // =============================================================================
+
+    #[test]
+    fn test_parse_real_world_imposter_json() {
+        // Test parsing of a complete real-world imposter JSON with all alternative formats
+        let json = r#"{
+            "allowCORS": true,
+            "protocol": "http",
+            "port": 8201,
+            "stubs": [{
+                "scenarioName": "LenderDetails-v1-lenders_Lender1",
+                "predicates": [
+                    {"equals": {"query": {"lenderIds": "LENDER1"}}},
+                    {"deepEquals": {"method": "GET"}}
+                ],
+                "responses": [{
+                    "behaviors": [{"wait": " function() { var min = Math.ceil(0); var max = Math.floor(0); return min; } "}],
+                    "is": {
+                        "statusCode": "200",
+                        "headers": {"Accept": "application/json", "Content-Type": "application/json"},
+                        "body": "{\"lenders\": [{\"lenderId\": \"111111\"}]}"
+                    },
+                    "proxy": null
+                }]
+            }],
+            "service_name": "LenderDetails_v1_lenders",
+            "service_info": {
+                "virtualServiceInfo": {
+                    "serviceName": "LenderDetails-v1-lenders",
+                    "realEndpoint": "https://api.example.com/lenders"
+                }
+            }
+        }"#;
+
+        let config: ImposterConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.port, 8201);
+        assert_eq!(config.protocol, "http");
+        assert!(config.allow_cors);
+        assert_eq!(config.service_name, Some("LenderDetails_v1_lenders".to_string()));
+        assert!(config.service_info.is_some());
+        assert_eq!(config.stubs.len(), 1);
+
+        let stub = &config.stubs[0];
+        assert_eq!(stub.scenario_name, Some("LenderDetails-v1-lenders_Lender1".to_string()));
+        assert_eq!(stub.predicates.len(), 2);
+
+        if let StubResponse::Is { is, behaviors } = &stub.responses[0] {
+            assert_eq!(is.status_code, 200);
+            assert!(behaviors.is_some());
+            assert!(is.body.is_some());
+        } else {
+            panic!("Expected Is response");
+        }
+    }
+
+    #[test]
+    fn test_parse_proxy_response_with_mode() {
+        let json = r#"{
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [{
+                "predicates": [{"equals": {"path": "/redirect"}}],
+                "responses": [{
+                    "proxy": {
+                        "to": "https://api.example.com",
+                        "mode": "proxyTransparent"
+                    }
+                }]
+            }]
+        }"#;
+
+        let config: ImposterConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.stubs.len(), 1);
+
+        if let StubResponse::Proxy { proxy } = &config.stubs[0].responses[0] {
+            assert_eq!(proxy.to, "https://api.example.com");
+            assert_eq!(proxy.mode, "proxyTransparent");
+        } else {
+            panic!("Expected Proxy response");
+        }
+    }
+
+    #[test]
+    fn test_parse_mixed_responses_with_proxy_only_stub() {
+        // Test that we can have both is responses and proxy responses in different stubs
+        let json = r#"{
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [
+                {
+                    "predicates": [{"equals": {"path": "/local"}}],
+                    "responses": [{
+                        "behaviors": [{"wait": 0}],
+                        "is": {"statusCode": "200", "body": "local"},
+                        "proxy": null
+                    }]
+                },
+                {
+                    "predicates": [{"equals": {"path": "/proxy"}}],
+                    "responses": [{
+                        "proxy": {
+                            "to": "http://backend:8080",
+                            "mode": "proxyTransparent"
+                        }
+                    }]
+                }
+            ]
+        }"#;
+
+        let config: ImposterConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.stubs.len(), 2);
+
+        // First stub should be Is
+        assert!(matches!(&config.stubs[0].responses[0], StubResponse::Is { .. }));
+
+        // Second stub should be Proxy
+        assert!(matches!(&config.stubs[1].responses[0], StubResponse::Proxy { .. }));
+    }
+
+    #[test]
+    fn test_predicate_contains_in_headers() {
+        let stub = Stub {
+            predicates: vec![serde_json::json!({
+                "contains": {"headers": {"Authorization": "Bearer"}}
+            })],
+            responses: vec![StubResponse::Is {
+                is: IsResponse { status_code: 200, headers: HashMap::new(), body: None },
+                behaviors: None,
+            }],
+            scenario_name: None,
+        };
+
+        let mut headers = HashMap::new();
+        headers.insert("Authorization".to_string(), "Bearer abc123token".to_string());
+
+        assert!(Imposter::stub_matches(&stub, "GET", "/", None, &headers, None));
+
+        // Wrong token type
+        let mut headers_basic = HashMap::new();
+        headers_basic.insert("Authorization".to_string(), "Basic xyz".to_string());
+        assert!(!Imposter::stub_matches(&stub, "GET", "/", None, &headers_basic, None));
+    }
+
+    #[test]
+    fn test_predicate_starts_with_in_query() {
+        let stub = Stub {
+            predicates: vec![serde_json::json!({
+                "startsWith": {"query": {"filter": "status_"}}
+            })],
+            responses: vec![StubResponse::Is {
+                is: IsResponse { status_code: 200, headers: HashMap::new(), body: None },
+                behaviors: None,
+            }],
+            scenario_name: None,
+        };
+
+        let empty_headers = HashMap::new();
+
+        assert!(Imposter::stub_matches(&stub, "GET", "/", Some("filter=status_active"), &empty_headers, None));
+        assert!(Imposter::stub_matches(&stub, "GET", "/", Some("filter=status_pending"), &empty_headers, None));
+        assert!(!Imposter::stub_matches(&stub, "GET", "/", Some("filter=type_user"), &empty_headers, None));
+    }
+
+    #[test]
+    fn test_predicate_ends_with_in_query() {
+        let stub = Stub {
+            predicates: vec![serde_json::json!({
+                "endsWith": {"query": {"filename": ".json"}}
+            })],
+            responses: vec![StubResponse::Is {
+                is: IsResponse { status_code: 200, headers: HashMap::new(), body: None },
+                behaviors: None,
+            }],
+            scenario_name: None,
+        };
+
+        let empty_headers = HashMap::new();
+
+        assert!(Imposter::stub_matches(&stub, "GET", "/", Some("filename=data.json"), &empty_headers, None));
+        assert!(Imposter::stub_matches(&stub, "GET", "/", Some("filename=config.json"), &empty_headers, None));
+        assert!(!Imposter::stub_matches(&stub, "GET", "/", Some("filename=data.xml"), &empty_headers, None));
+    }
+
+    #[test]
+    fn test_predicate_matches_regex_in_query() {
+        let stub = Stub {
+            predicates: vec![serde_json::json!({
+                "matches": {"query": {"id": "^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$"}}
+            })],
+            responses: vec![StubResponse::Is {
+                is: IsResponse { status_code: 200, headers: HashMap::new(), body: None },
+                behaviors: None,
+            }],
+            scenario_name: None,
+        };
+
+        let empty_headers = HashMap::new();
+
+        // Valid UUID
+        assert!(Imposter::stub_matches(&stub, "GET", "/", Some("id=550e8400-e29b-41d4-a716-446655440000"), &empty_headers, None));
+
+        // Invalid UUID
+        assert!(!Imposter::stub_matches(&stub, "GET", "/", Some("id=not-a-uuid"), &empty_headers, None));
+    }
+
+    #[test]
+    fn test_predicate_matches_regex_in_headers() {
+        let stub = Stub {
+            predicates: vec![serde_json::json!({
+                "matches": {"headers": {"User-Agent": "Mozilla.*Firefox"}}
+            })],
+            responses: vec![StubResponse::Is {
+                is: IsResponse { status_code: 200, headers: HashMap::new(), body: None },
+                behaviors: None,
+            }],
+            scenario_name: None,
+        };
+
+        let mut firefox_headers = HashMap::new();
+        firefox_headers.insert("User-Agent".to_string(), "Mozilla/5.0 (Windows NT 10.0; rv:91.0) Gecko/20100101 Firefox/91.0".to_string());
+
+        assert!(Imposter::stub_matches(&stub, "GET", "/", None, &firefox_headers, None));
+
+        let mut chrome_headers = HashMap::new();
+        chrome_headers.insert("User-Agent".to_string(), "Mozilla/5.0 Chrome/96.0".to_string());
+
+        assert!(!Imposter::stub_matches(&stub, "GET", "/", None, &chrome_headers, None));
+    }
+
+    #[test]
+    fn test_predicate_deep_equals_headers() {
+        let stub = Stub {
+            predicates: vec![serde_json::json!({
+                "deepEquals": {"headers": {"Content-Type": "application/json"}}
+            })],
+            responses: vec![StubResponse::Is {
+                is: IsResponse { status_code: 200, headers: HashMap::new(), body: None },
+                behaviors: None,
+            }],
+            scenario_name: None,
+        };
+
+        // Exact match with only one header
+        let mut exact_headers = HashMap::new();
+        exact_headers.insert("Content-Type".to_string(), "application/json".to_string());
+
+        assert!(Imposter::stub_matches(&stub, "POST", "/", None, &exact_headers, None));
+
+        // Extra headers should fail deepEquals
+        let mut extra_headers = HashMap::new();
+        extra_headers.insert("Content-Type".to_string(), "application/json".to_string());
+        extra_headers.insert("Accept".to_string(), "application/json".to_string());
+
+        assert!(!Imposter::stub_matches(&stub, "POST", "/", None, &extra_headers, None));
+    }
+
+    #[test]
+    fn test_complex_nested_logical_predicates() {
+        // Complex: (GET OR POST) AND (/api/* path) AND NOT (/api/admin/*)
+        let stub = Stub {
+            predicates: vec![serde_json::json!({
+                "and": [
+                    {"or": [
+                        {"equals": {"method": "GET"}},
+                        {"equals": {"method": "POST"}}
+                    ]},
+                    {"startsWith": {"path": "/api/"}},
+                    {"not": {"startsWith": {"path": "/api/admin/"}}}
+                ]
+            })],
+            responses: vec![StubResponse::Is {
+                is: IsResponse { status_code: 200, headers: HashMap::new(), body: None },
+                behaviors: None,
+            }],
+            scenario_name: None,
+        };
+
+        let empty_headers = HashMap::new();
+
+        // Should match: GET /api/users
+        assert!(Imposter::stub_matches(&stub, "GET", "/api/users", None, &empty_headers, None));
+
+        // Should match: POST /api/data
+        assert!(Imposter::stub_matches(&stub, "POST", "/api/data", None, &empty_headers, None));
+
+        // Should NOT match: DELETE /api/users
+        assert!(!Imposter::stub_matches(&stub, "DELETE", "/api/users", None, &empty_headers, None));
+
+        // Should NOT match: GET /api/admin/config
+        assert!(!Imposter::stub_matches(&stub, "GET", "/api/admin/config", None, &empty_headers, None));
+
+        // Should NOT match: GET /other/path
+        assert!(!Imposter::stub_matches(&stub, "GET", "/other/path", None, &empty_headers, None));
+    }
+
+    #[test]
+    fn test_wait_behavior_js_function_parsing() {
+        // Test that the JS wait function from user's JSON is accepted
+        let json = r#"{
+            "wait": " function() { var min = Math.ceil(0); var max = Math.floor(0); var num = Math.floor(Math.random() * (max - min + 1)); var wait = (num + min); return wait; } "
+        }"#;
+
+        let behaviors: crate::behaviors::ResponseBehaviors = serde_json::from_str(json).unwrap();
+        assert!(behaviors.wait.is_some());
+    }
+
+    #[test]
+    fn test_serialization_roundtrip() {
+        // Test that we can serialize and deserialize without losing data
+        let original = ImposterConfig {
+            port: 8080,
+            protocol: "http".to_string(),
+            name: Some("test".to_string()),
+            record_requests: false,
+            stubs: vec![Stub {
+                predicates: vec![serde_json::json!({"equals": {"path": "/test"}})],
+                responses: vec![StubResponse::Is {
+                    is: IsResponse {
+                        status_code: 200,
+                        headers: HashMap::new(),
+                        body: Some(serde_json::json!("test body")),
+                    },
+                    behaviors: Some(serde_json::json!({"wait": 100})),
+                }],
+                scenario_name: Some("test-scenario".to_string()),
+            }],
+            default_response: None,
+            allow_cors: true,
+            service_name: Some("test-service".to_string()),
+            service_info: Some(serde_json::json!({"version": "1.0"})),
+        };
+
+        let serialized = serde_json::to_string(&original).unwrap();
+        let deserialized: ImposterConfig = serde_json::from_str(&serialized).unwrap();
+
+        assert_eq!(deserialized.port, original.port);
+        assert_eq!(deserialized.allow_cors, original.allow_cors);
+        assert_eq!(deserialized.service_name, original.service_name);
+        assert_eq!(deserialized.stubs.len(), 1);
+        assert_eq!(deserialized.stubs[0].scenario_name, original.stubs[0].scenario_name);
     }
 }
