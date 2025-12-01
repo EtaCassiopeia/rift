@@ -126,6 +126,24 @@ compare_json_response() {
     fi
 }
 
+# Helper function to remap ports in JSON data for Rift (add 1000 to ports)
+remap_ports_for_rift() {
+    local data="$1"
+    # Replace port numbers: 4545->5545, 4546->5546, 4547->5547
+    echo "$data" | sed -e 's/"port"[[:space:]]*:[[:space:]]*4545/"port": 5545/g' \
+                      -e 's/"port"[[:space:]]*:[[:space:]]*4546/"port": 5546/g' \
+                      -e 's/"port"[[:space:]]*:[[:space:]]*4547/"port": 5547/g'
+}
+
+# Helper function to remap ports in API path for Rift (add 1000 to ports)
+remap_path_for_rift() {
+    local path="$1"
+    # Replace port numbers in path: /imposters/4545 -> /imposters/5545
+    echo "$path" | sed -e 's|/imposters/4545|/imposters/5545|g' \
+                      -e 's|/imposters/4546|/imposters/5546|g' \
+                      -e 's|/imposters/4547|/imposters/5547|g'
+}
+
 # Generic API test
 test_api() {
     local test_name="$1"
@@ -135,11 +153,18 @@ test_api() {
     local expected_status="$5"
 
     local mb_url="${MB_ADMIN}${path}"
-    local rift_url="${RIFT_ADMIN}${path}"
+    local rift_path=$(remap_path_for_rift "$path")
+    local rift_url="${RIFT_ADMIN}${rift_path}"
+
+    # Remap ports in data for Rift
+    local rift_data=""
+    if [ -n "$data" ]; then
+        rift_data=$(remap_ports_for_rift "$data")
+    fi
 
     if [ -n "$data" ]; then
         mb_result=$(curl -s -w $'\n%{http_code}' -X "$method" -H "Content-Type: application/json" -d "$data" "$mb_url")
-        rift_result=$(curl -s -w $'\n%{http_code}' -X "$method" -H "Content-Type: application/json" -d "$data" "$rift_url")
+        rift_result=$(curl -s -w $'\n%{http_code}' -X "$method" -H "Content-Type: application/json" -d "$rift_data" "$rift_url")
     else
         mb_result=$(curl -s -w $'\n%{http_code}' -X "$method" "$mb_url")
         rift_result=$(curl -s -w $'\n%{http_code}' -X "$method" "$rift_url")
@@ -246,8 +271,9 @@ test_stub_management() {
         "protocol": "http",
         "stubs": []
     }'
+    local rift_imposter=$(remap_ports_for_rift "$imposter")
     curl -s -X POST -H "Content-Type: application/json" -d "$imposter" "$MB_ADMIN/imposters" > /dev/null
-    curl -s -X POST -H "Content-Type: application/json" -d "$imposter" "$RIFT_ADMIN/imposters" > /dev/null
+    curl -s -X POST -H "Content-Type: application/json" -d "$rift_imposter" "$RIFT_ADMIN/imposters" > /dev/null
 
     # Add stub
     local stub='{"stub": {"predicates": [], "responses": [{"is": {"statusCode": 200}}]}}'
@@ -262,7 +288,7 @@ test_stub_management() {
 
     # Cleanup
     curl -s -X DELETE "$MB_ADMIN/imposters/4545" > /dev/null
-    curl -s -X DELETE "$RIFT_ADMIN/imposters/4545" > /dev/null
+    curl -s -X DELETE "$RIFT_ADMIN/imposters/5545" > /dev/null
 }
 
 # =============================================================================
@@ -275,11 +301,12 @@ test_predicates() {
     # Load test imposters
     local config=$(cat configs/basic-imposters.json)
 
-    # Create imposters on both systems
+    # Create imposters on both systems (with port remapping for Rift)
     local imposters=$(echo "$config" | jq -c '.imposters[]')
     while IFS= read -r imposter; do
+        local rift_imposter=$(remap_ports_for_rift "$imposter")
         curl -s -X POST -H "Content-Type: application/json" -d "$imposter" "$MB_ADMIN/imposters" > /dev/null
-        curl -s -X POST -H "Content-Type: application/json" -d "$imposter" "$RIFT_ADMIN/imposters" > /dev/null
+        curl -s -X POST -H "Content-Type: application/json" -d "$rift_imposter" "$RIFT_ADMIN/imposters" > /dev/null
     done <<< "$imposters"
 
     sleep 1  # Wait for imposters to start
@@ -324,12 +351,13 @@ test_predicates() {
 test_response_behaviors() {
     log_section "Response Behavior Tests"
 
-    # Create behavior test imposter
+    # Create behavior test imposter (with port remapping for Rift)
     local config=$(cat configs/basic-imposters.json)
     local imposter=$(echo "$config" | jq '.imposters[2]')
+    local rift_imposter=$(remap_ports_for_rift "$imposter")
 
     curl -s -X POST -H "Content-Type: application/json" -d "$imposter" "$MB_ADMIN/imposters" > /dev/null
-    curl -s -X POST -H "Content-Type: application/json" -d "$imposter" "$RIFT_ADMIN/imposters" > /dev/null
+    curl -s -X POST -H "Content-Type: application/json" -d "$rift_imposter" "$RIFT_ADMIN/imposters" > /dev/null
 
     sleep 1
 
@@ -369,7 +397,7 @@ test_response_behaviors() {
 test_request_recording() {
     log_section "Request Recording Tests"
 
-    # Create imposter with recording
+    # Create imposter with recording (with port remapping for Rift)
     local imposter='{
         "port": 4545,
         "protocol": "http",
@@ -379,20 +407,21 @@ test_request_recording() {
             "responses": [{"is": {"statusCode": 200, "body": "ok"}}]
         }]
     }'
+    local rift_imposter=$(remap_ports_for_rift "$imposter")
     curl -s -X POST -H "Content-Type: application/json" -d "$imposter" "$MB_ADMIN/imposters" > /dev/null
-    curl -s -X POST -H "Content-Type: application/json" -d "$imposter" "$RIFT_ADMIN/imposters" > /dev/null
+    curl -s -X POST -H "Content-Type: application/json" -d "$rift_imposter" "$RIFT_ADMIN/imposters" > /dev/null
 
     sleep 1
 
-    # Make some requests
+    # Make some requests (using correct ports for each service)
     curl -s "http://localhost:4545/test1" > /dev/null
     curl -s "http://localhost:4545/test2" > /dev/null
     curl -s "http://localhost:5545/test1" > /dev/null
     curl -s "http://localhost:5545/test2" > /dev/null
 
-    # Check recorded requests count
+    # Check recorded requests count (using correct ports for each service)
     mb_count=$(curl -s "$MB_ADMIN/imposters/4545" | jq '.numberOfRequests')
-    rift_count=$(curl -s "$RIFT_ADMIN/imposters/4545" | jq '.numberOfRequests')
+    rift_count=$(curl -s "$RIFT_ADMIN/imposters/5545" | jq '.numberOfRequests')
 
     if [ "$mb_count" == "$rift_count" ]; then
         log_success "Request count matches ($mb_count requests)"
@@ -450,9 +479,9 @@ test_error_handling() {
     # Invalid protocol
     test_api "POST /imposters (invalid protocol)" "POST" "/imposters" '{"port": 4545, "protocol": "ftp"}' ""
 
-    # Duplicate port
+    # Duplicate port (with port remapping for Rift)
     curl -s -X POST -H "Content-Type: application/json" -d '{"port": 4545}' "$MB_ADMIN/imposters" > /dev/null
-    curl -s -X POST -H "Content-Type: application/json" -d '{"port": 4545}' "$RIFT_ADMIN/imposters" > /dev/null
+    curl -s -X POST -H "Content-Type: application/json" -d '{"port": 5545}' "$RIFT_ADMIN/imposters" > /dev/null
     test_api "POST /imposters (duplicate port)" "POST" "/imposters" '{"port": 4545}' ""
 
     # Cleanup

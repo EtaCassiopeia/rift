@@ -142,69 +142,98 @@ rm -rf certs/  # Optional: remove generated certificates
 
 ---
 
-## Demo 3: Native Mode (Advanced Features)
+## Demo 3: Rift-Only Features (Fault Injection)
 
-Demonstrates features not available in Mountebank format:
-- Probabilistic fault injection
-- Flow state for stateful scenarios
-- Rhai scripting
+Demonstrates Rift's probabilistic fault injection via the `_rift.fault` extension - not available in Mountebank.
 
 ### Start
 
 ```bash
-docker compose -f docker-compose-native.yml up -d
+docker compose -f docker-compose-rift-features.yml up -d
 ```
 
-### Test Probabilistic Faults
+### Test Fault Injection (Port 4547)
 
 ```bash
-# Basic proxy request
-curl http://localhost:8080/get
+# Healthy baseline endpoint (no faults)
+curl http://localhost:4547/api/healthy
 
-# Latency injection (30% probability on /delay/*)
-echo "Testing latency injection..."
-for i in {1..5}; do
-  START=$(date +%s%3N)
-  curl -s http://localhost:8080/delay/1 -o /dev/null
-  END=$(date +%s%3N)
-  echo "Request $i: $((END - START))ms"
-done
+# Random latency injection (500-2000ms, 100% probability)
+time curl http://localhost:4547/api/slow-random
 
-# Error injection (10% probability on POST)
-echo "Testing error injection..."
-for i in {1..10}; do
-  STATUS=$(curl -s -X POST http://localhost:8080/post \
-    -d "test" -w "%{http_code}" -o /dev/null)
-  echo "Request $i: HTTP $STATUS"
-done
-```
+# Probabilistic latency (50% chance of 1s delay)
+time curl http://localhost:4547/api/sometimes-slow
 
-### Test Conditional Faults
+# Error injection (30% chance of 503)
+for i in {1..5}; do curl -w " [%{http_code}]\n" http://localhost:4547/api/flaky; done
 
-```bash
-# Normal request
-curl http://localhost:8080/anything/conditional \
-  -X POST -d "test"
+# Combined chaos (70% latency + 20% errors)
+time curl -w " [%{http_code}]\n" http://localhost:4547/api/chaos
 
-# Slow mode (2s delay)
-time curl http://localhost:8080/anything/conditional \
-  -X POST -H "X-Test-Mode: slow" -d "test"
-
-# Fail mode
-curl http://localhost:8080/anything/conditional \
-  -X POST -H "X-Test-Mode: fail" -d "test"
-```
-
-### View Metrics
-
-```bash
-curl http://localhost:9090/metrics | grep rift
+# TCP connection reset
+curl http://localhost:4547/api/tcp-reset
 ```
 
 ### Cleanup
 
 ```bash
-docker compose -f docker-compose-native.yml down
+docker compose -f docker-compose-rift-features.yml down
+```
+
+---
+
+## Demo 4: Scripting with Flow State
+
+Demonstrates Rift's Rhai scripting engine with persistent flow state for stateful mock scenarios.
+
+### Start
+
+```bash
+docker compose -f docker-compose-scripting.yml up -d
+```
+
+### Test Counter API (Port 4550)
+
+```bash
+# Get counter (initial value)
+curl http://localhost:4550/api/counter
+
+# Increment counter
+curl -X POST http://localhost:4550/api/counter/increment
+curl -X POST http://localhost:4550/api/counter/increment
+
+# Get counter (should be 2)
+curl http://localhost:4550/api/counter
+
+# Reset counter
+curl -X DELETE http://localhost:4550/api/counter
+```
+
+### Test Rate Limiter
+
+```bash
+# First 5 requests succeed with remaining count
+for i in {1..5}; do curl http://localhost:4550/api/rate-limited; echo; done
+
+# 6th+ requests return 429 Too Many Requests
+curl http://localhost:4550/api/rate-limited
+
+# Reset rate limiter
+curl -X DELETE http://localhost:4550/api/rate-limited/reset
+```
+
+### Test Echo with Count
+
+```bash
+# Each request echoes back method/path with incrementing count
+curl -X POST http://localhost:4550/api/echo
+curl -X POST http://localhost:4550/api/echo
+```
+
+### Cleanup
+
+```bash
+docker compose -f docker-compose-scripting.yml down
 ```
 
 ---
@@ -214,30 +243,45 @@ docker compose -f docker-compose-native.yml down
 | File | Description |
 |:-----|:------------|
 | `imposters.json` | Mountebank HTTP imposter config |
-| `native-config.yaml` | Native Rift config with advanced features |
-| `native-config-https.yaml` | Native Rift config with TLS |
-| `docker-compose.yml` | HTTP demo (Mountebank mode) |
+| `imposters-rift-features.json` | Fault injection demo config |
+| `imposters-scripting.json` | Scripting with flow state demo config |
+| `docker-compose.yml` | HTTP demo |
 | `docker-compose-https.yml` | HTTPS/TLS demo |
-| `docker-compose-native.yml` | Native mode demo |
+| `docker-compose-rift-features.yml` | Fault injection demo |
+| `docker-compose-scripting.yml` | Scripting with flow state demo |
 | `generate-certs.sh` | Certificate generation script |
 
 ---
 
-## When to Use Each Mode
+## Rift Extensions (`_rift` namespace)
 
-**Mountebank Mode** (recommended for most users):
-- Compatible with existing Mountebank configurations
-- Standard API mocking for integration tests
-- Simple configuration with JSON format
+Rift extends Mountebank with advanced features through the `_rift` namespace:
 
-**HTTPS/TLS Mode** (secure testing):
-- Testing with TLS-enabled endpoints
-- Simulating production HTTPS environments
-- Testing client certificate handling
-- Verifying TLS configuration
+- **Flow State**: Stateful testing with in-memory or Redis backends
+- **Fault Injection**: Probabilistic latency, error, and TCP faults
+- **Scripting**: Multi-engine scripting (Rhai, Lua, JavaScript)
 
-**Native Mode** (advanced use cases):
-- Chaos engineering with probabilistic faults
-- Stateful testing with flow state
-- Complex conditional logic with scripting
-- Custom fault injection scenarios
+Example imposter with `_rift` extensions:
+
+```json
+{
+  "port": 4545,
+  "protocol": "http",
+  "_rift": {
+    "flowState": {"backend": "inmemory", "ttlSeconds": 300}
+  },
+  "stubs": [{
+    "predicates": [{"equals": {"path": "/api/test"}}],
+    "responses": [{
+      "is": {"statusCode": 200, "body": "OK"},
+      "_rift": {
+        "fault": {
+          "latency": {"probability": 0.3, "minMs": 100, "maxMs": 500}
+        }
+      }
+    }]
+  }]
+}
+```
+
+See the [Rift Extensions documentation](/docs/features/rift-extensions.md) for more details.

@@ -830,3 +830,13 @@ async fn check_recorded_1_request(world: &mut CompatibilityWorld) {
     assert_eq!(mb_count, 1, "Mountebank should have recorded 1 request");
     assert_eq!(rift_count, 1, "Rift should have recorded 1 request");
 }
+
+// ============================================
+// Mountebank-only step definitions
+// ============================================
+
+#[then(expr = "Mountebank should return status {int}")]
+async fn check_mb_status(world: &mut CompatibilityWorld, expected: u16) {
+    let response = world.last_response.as_ref().expect("No response recorded");
+    assert_eq!(response.mb_status, expected, "Mountebank status mismatch");
+}

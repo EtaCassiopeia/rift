@@ -1,0 +1,90 @@
+{
+  "imposters": [
+    {
+      "port": 4560,
+      "protocol": "http",
+      "name": "Scripting Engines Demo",
+      "_rift": {
+        "flowState": {
+          "backend": "inmemory",
+          "ttlSeconds": 600
+        }
+      },
+      "stubs": [
+        {
+          "name": "Rhai Script - Counter",
+          "predicates": [{ "equals": { "method": "GET", "path": "/rhai/counter" } }],
+          "responses": [{
+            "_rift": {
+              "script": {
+                "engine": "rhai",
+                "code": "let fid = \"rhai\"; let count = flow_store.get(fid, \"count\"); if count == () { count = 0; }; count += 1; flow_store.set(fid, \"count\", count); #{inject: true, fault: \"error\", status: 200, body: `{\"engine\":\"rhai\",\"count\":${count}}`, headers: #{\"Content-Type\": \"application/json\"}}"
+              }
+            }
+          }]
+        },
+        {
+          "name": "Rhai Script - Echo",
+          "predicates": [{ "equals": { "method": "POST", "path": "/rhai/echo" } }],
+          "responses": [{
+            "_rift": {
+              "script": {
+                "engine": "rhai",
+                "code": "#{inject: true, fault: \"error\", status: 200, body: `{\"engine\":\"rhai\",\"echo\":{\"method\":\"${request.method}\",\"path\":\"${request.path}\"}}`, headers: #{\"Content-Type\": \"application/json\"}}"
+              }
+            }
+          }]
+        },
+        {
+          "name": "Lua Script - Counter",
+          "predicates": [{ "equals": { "method": "GET", "path": "/lua/counter" } }],
+          "responses": [{
+            "_rift": {
+              "script": {
+                "engine": "lua",
+                "code": "function should_inject_fault(request, flow_store)\n  local fid = 'lua'\n  local count = flow_store:get(fid, 'count') or 0\n  count = count + 1\n  flow_store:set(fid, 'count', count)\n  return {\n    inject = true,\n    fault = 'error',\n    status = 200,\n    body = '{\"engine\":\"lua\",\"count\":' .. count .. '}',\n    headers = {['Content-Type'] = 'application/json'}\n  }\nend"
+              }
+            }
+          }]
+        },
+        {
+          "name": "Lua Script - Echo",
+          "predicates": [{ "equals": { "method": "POST", "path": "/lua/echo" } }],
+          "responses": [{
+            "_rift": {
+              "script": {
+                "engine": "lua",
+                "code": "function should_inject_fault(request, flow_store)\n  return {\n    inject = true,\n    fault = 'error',\n    status = 200,\n    body = '{\"engine\":\"lua\",\"echo\":{\"method\":\"' .. request.method .. '\",\"path\":\"' .. request.path .. '\"}}',\n    headers = {['Content-Type'] = 'application/json'}\n  }\nend"
+              }
+            }
+          }]
+        },
+        {
+          "name": "JavaScript Inject - Counter",
+          "predicates": [{ "equals": { "method": "GET", "path": "/js/counter" } }],
+          "responses": [{
+            "inject": "function(config, state) { state.count = (state.count || 0) + 1; return { statusCode: 200, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ engine: 'javascript', count: state.count }) }; }"
+          }]
+        },
+        {
+          "name": "JavaScript Inject - Echo",
+          "predicates": [{ "equals": { "method": "POST", "path": "/js/echo" } }],
+          "responses": [{
+            "inject": "function(config, state) { var req = config.request || config; return { statusCode: 200, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ engine: 'javascript', echo: { method: req.method, path: req.path } }) }; }"
+          }]
+        },
+        {
+          "name": "Health Check",
+          "predicates": [{ "equals": { "method": "GET", "path": "/health" } }],
+          "responses": [{
+            "is": {
+              "statusCode": 200,
+              "headers": { "Content-Type": "application/json" },
+              "body": "{\"status\": \"ok\", \"engines\": [\"rhai\", \"lua\", \"javascript\"]}"
+            }
+          }]
+        }
+      ]
+    }
+  ]
+}

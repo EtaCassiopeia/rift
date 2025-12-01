@@ -5,6 +5,12 @@ use boa_engine::{
     js_string, native_function::NativeFunction, object::builtins::JsArray, property::PropertyKey,
     Context, JsNativeError, JsObject, JsResult, JsValue, Source,
 };
+
+/// Create a JavaScript object with proper Object.prototype
+/// This ensures the object has toString, valueOf, etc. for proper JS operations
+fn create_js_object(context: &Context) -> JsObject {
+    JsObject::with_object_proto(context.intrinsics())
+}
 use serde_json::Value;
 use std::cell::RefCell;
 use std::sync::Arc;
@@ -182,7 +188,7 @@ fn execute_js_script_inner(
 
 /// Create request object from ScriptRequest
 fn create_request_object(context: &mut Context, request: &ScriptRequest) -> Result<JsValue> {
-    let obj = JsObject::with_null_proto();
+    let obj = create_js_object(context);
 
     // Set method
     obj.set(
@@ -203,7 +209,7 @@ fn create_request_object(context: &mut Context, request: &ScriptRequest) -> Resu
     .map_err(|e| anyhow!("Failed to set path: {e}"))?;
 
     // Set headers
-    let headers_obj = JsObject::with_null_proto();
+    let headers_obj = create_js_object(context);
     for (k, v) in &request.headers {
         headers_obj
             .set(
@@ -223,7 +229,7 @@ fn create_request_object(context: &mut Context, request: &ScriptRequest) -> Resu
         .map_err(|e| anyhow!("Failed to set body: {e}"))?;
 
     // Set query parameters
-    let query_obj = JsObject::with_null_proto();
+    let query_obj = create_js_object(context);
     for (k, v) in &request.query {
         query_obj
             .set(
@@ -238,7 +244,7 @@ fn create_request_object(context: &mut Context, request: &ScriptRequest) -> Resu
         .map_err(|e| anyhow!("Failed to set query: {e}"))?;
 
     // Set path parameters
-    let path_params_obj = JsObject::with_null_proto();
+    let path_params_obj = create_js_object(context);
     for (k, v) in &request.path_params {
         path_params_obj
             .set(
@@ -375,7 +381,7 @@ fn flow_store_set_ttl(_this: &JsValue, args: &[JsValue], _ctx: &mut Context) -> 
 
 /// Create flow_store object with methods using thread-local storage
 fn create_flow_store_object(context: &mut Context) -> Result<JsValue> {
-    let obj = JsObject::with_null_proto();
+    let obj = create_js_object(context);
 
     // Register get method
     obj.set(
@@ -573,7 +579,7 @@ fn json_to_js_result(context: &mut Context, value: &Value) -> JsResult<JsValue> 
             Ok(js_arr.into())
         }
         Value::Object(obj) => {
-            let js_obj = JsObject::with_null_proto();
+            let js_obj = create_js_object(context);
             for (k, v) in obj {
                 let js_val = json_to_js_result(context, v)?;
                 js_obj.set(js_string!(k.clone()), js_val, false, context)?;
@@ -774,7 +780,7 @@ fn create_mountebank_request_object(
     context: &mut Context,
     request: &MountebankRequest,
 ) -> Result<JsValue> {
-    let obj = JsObject::with_null_proto();
+    let obj = create_js_object(context);
 
     // Set method
     obj.set(
@@ -795,7 +801,7 @@ fn create_mountebank_request_object(
     .map_err(|e| anyhow!("Failed to set path: {e}"))?;
 
     // Set query
-    let query_obj = JsObject::with_null_proto();
+    let query_obj = create_js_object(context);
     for (k, v) in &request.query {
         query_obj
             .set(
@@ -810,7 +816,7 @@ fn create_mountebank_request_object(
         .map_err(|e| anyhow!("Failed to set query: {e}"))?;
 
     // Set headers
-    let headers_obj = JsObject::with_null_proto();
+    let headers_obj = create_js_object(context);
     for (k, v) in &request.headers {
         headers_obj
             .set(
@@ -824,22 +830,16 @@ fn create_mountebank_request_object(
     obj.set(js_string!("headers"), headers_obj, false, context)
         .map_err(|e| anyhow!("Failed to set headers: {e}"))?;
 
-    // Set body
+    // Set body - always as a string to match Mountebank behavior
+    // Users should call JSON.parse(request.body) themselves if they want parsed JSON
     if let Some(body) = &request.body {
-        // Try to parse as JSON first
-        if let Ok(json_val) = serde_json::from_str::<Value>(body) {
-            let js_body = json_to_js(context, &json_val)?;
-            obj.set(js_string!("body"), js_body, false, context)
-                .map_err(|e| anyhow!("Failed to set body: {e}"))?;
-        } else {
-            obj.set(
-                js_string!("body"),
-                JsValue::from(js_string!(body.clone())),
-                false,
-                context,
-            )
-            .map_err(|e| anyhow!("Failed to set body: {e}"))?;
-        }
+        obj.set(
+            js_string!("body"),
+            JsValue::from(js_string!(body.clone())),
+            false,
+            context,
+        )
+        .map_err(|e| anyhow!("Failed to set body: {e}"))?;
     } else {
         obj.set(js_string!("body"), JsValue::undefined(), false, context)
             .map_err(|e| anyhow!("Failed to set body: {e}"))?;
@@ -935,7 +935,7 @@ pub fn execute_mountebank_decorate(
     let request_obj = create_mountebank_request_object(&mut context, request)?;
 
     // Create response object
-    let response_obj = JsObject::with_null_proto();
+    let response_obj = create_js_object(&context);
 
     response_obj
         .set(
@@ -956,7 +956,7 @@ pub fn execute_mountebank_decorate(
         .map_err(|e| anyhow!("Failed to set body: {e}"))?;
 
     // Create headers object for response
-    let headers_obj = JsObject::with_null_proto();
+    let headers_obj = create_js_object(&context);
     for (k, v) in response_headers {
         headers_obj
             .set(

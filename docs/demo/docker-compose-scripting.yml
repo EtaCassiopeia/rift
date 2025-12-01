@@ -1,0 +1,17 @@
+services:
+  rift:
+    image: rift-proxy:local
+    ports:
+      - "2525:2525"   # Admin API
+      - "4550:4550"   # Scripting demo
+    volumes:
+      - ./imposters-scripting.json:/imposters.json:ro
+    environment:
+      - RUST_LOG=info
+      - MB_PORT=2525
+    command: ["--configfile", "/imposters.json"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:2525/"]
+      interval: 5s
+      timeout: 3s
+      retries: 5

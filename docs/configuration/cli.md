@@ -7,39 +7,46 @@ nav_order: 3
 
 # Command Line Reference
 
-Rift provides both Mountebank-compatible and native CLI options.
+Rift provides Mountebank-compatible CLI options for easy migration.
 
 ---
 
 ## Basic Usage
 
 ```bash
-# Mountebank-compatible mode (default)
+# Start the server
 rift-http-proxy
 
 # With configuration file
 rift-http-proxy --configfile imposters.json
 
-# Native mode with YAML config
-rift-http-proxy config.yaml
+# With custom port
+rift-http-proxy --port 3525
 ```
 
 ---
 
-## Mountebank-Compatible Options
-
-These options mirror Mountebank's CLI:
+## CLI Options
 
 ```bash
 rift-http-proxy [OPTIONS]
 
 Options:
       --port <PORT>          Admin API port [default: 2525]
+      --host <HOST>          Bind hostname [default: 0.0.0.0]
       --configfile <FILE>    Load imposters from JSON file
-      --allowInjection       Enable JavaScript injection in responses
+      --datadir <DIR>        Directory for persistent imposter storage
+      --allow-injection      Enable JavaScript injection in responses
+      --local-only           Only accept connections from localhost
       --loglevel <LEVEL>     Log level: debug, info, warn, error
-      --localOnly            Only accept connections from localhost
-      --ipWhitelist <IPS>    Comma-separated allowed IPs
+      --metrics-port <PORT>  Prometheus metrics port [default: 9090]
+      --ip-whitelist <IPS>   Comma-separated allowed IPs
+      --mock                 Run in mock mode
+      --debug                Enable debug mode
+      --nologfile            Disable log file (stdout only)
+      --log <FILE>           Log file path
+      --pidfile <FILE>       PID file path
+      --origin <ORIGIN>      CORS allowed origin
   -h, --help                 Print help
   -V, --version              Print version
 ```
@@ -51,14 +58,17 @@ Options:
 rift-http-proxy --port 3525
 
 # Load configuration and enable injection
-rift-http-proxy --configfile imposters.json --allowInjection
+rift-http-proxy --configfile imposters.json --allow-injection
 
 # Debug logging
 rift-http-proxy --loglevel debug
 
 # Restrict access
-rift-http-proxy --localOnly
-rift-http-proxy --ipWhitelist "192.168.1.0/24,10.0.0.0/8"
+rift-http-proxy --local-only
+rift-http-proxy --ip-whitelist "192.168.1.0/24,10.0.0.0/8"
+
+# With persistent data directory
+rift-http-proxy --datadir ./mb-data
 ```
 
 ---
@@ -70,12 +80,14 @@ Environment variables override CLI defaults:
 | Variable | Description | Default |
 |:---------|:------------|:--------|
 | `MB_PORT` | Admin API port | `2525` |
+| `MB_HOST` | Bind hostname | `0.0.0.0` |
+| `MB_CONFIGFILE` | Imposter config file | |
+| `MB_DATADIR` | Persistent storage directory | |
 | `MB_ALLOW_INJECTION` | Enable injection (`true`/`false`) | `false` |
 | `MB_LOCAL_ONLY` | Localhost only | `false` |
-| `MB_IP_WHITELIST` | Allowed IPs (comma-separated) | |
-| `RUST_LOG` | Log level | `info` |
+| `MB_LOGLEVEL` | Log level | `info` |
 | `RIFT_METRICS_PORT` | Prometheus metrics port | `9090` |
-| `RIFT_METRICS_ENABLED` | Enable metrics | `true` |
+| `RUST_LOG` | Detailed log configuration | `info` |
 
 ### Docker Example
 
@@ -107,37 +119,6 @@ services:
     volumes:
       - ./imposters.json:/imposters.json
     command: ["--configfile", "/imposters.json"]
-```
-
----
-
-## Native Mode Options
-
-When using YAML configuration:
-
-```bash
-rift-http-proxy [OPTIONS] <CONFIG_FILE>
-
-Arguments:
-  <CONFIG_FILE>    YAML configuration file
-
-Options:
-      --validate       Validate config and exit
-      --dry-run        Print effective config and exit
-  -h, --help           Print help
-```
-
-### Examples
-
-```bash
-# Run with native config
-rift-http-proxy config.yaml
-
-# Validate configuration
-rift-http-proxy --validate config.yaml
-
-# Show effective configuration
-rift-http-proxy --dry-run config.yaml
 ```
 
 ---
@@ -197,7 +178,6 @@ curl http://localhost:9090/metrics
 |:-------|:-------|
 | `SIGTERM` | Graceful shutdown |
 | `SIGINT` | Graceful shutdown (Ctrl+C) |
-| `SIGHUP` | Reload configuration (planned) |
 
 ```bash
 # Graceful shutdown

@@ -131,6 +131,29 @@ impl CompatibilityWorld {
         Ok((status, body, headers, duration))
     }
 
+    /// Send a request to Mountebank only (for Mountebank-only tests)
+    pub async fn send_to_mountebank(
+        &mut self,
+        method: &str,
+        path: &str,
+        body: Option<&str>,
+    ) -> Result<(u16, String), Box<dyn std::error::Error + Send + Sync>> {
+        let mb_url = format!("{}{}", self.config.mb_admin_url, path);
+        let result = self.send_request(&mb_url, method, body, None).await?;
+        // Store in last_response with Mountebank data only (Rift fields will be 0/empty)
+        self.last_response = Some(DualResponse {
+            mb_status: result.0,
+            mb_body: result.1.clone(),
+            mb_headers: result.2,
+            mb_duration: result.3,
+            rift_status: 0,
+            rift_body: String::new(),
+            rift_headers: std::collections::HashMap::new(),
+            rift_duration: std::time::Duration::ZERO,
+        });
+        Ok((result.0, result.1))
+    }
+
     /// Create an imposter on both services
     pub async fn create_imposter_on_both(
         &mut self,

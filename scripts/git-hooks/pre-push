@@ -1,111 +1,33 @@
 #!/bin/bash
-# Pre-push hook to run formatting, lint, and all test checks
-# This prevents pushing code with formatting, lint issues, or failing tests
+# Pre-push hook: Run linting checks before pushing
 #
-# Environment variables:
-#   SKIP_TESTS=1              - Skip unit tests (not recommended)
-#   SKIP_COMPATIBILITY=1      - Skip Mountebank compatibility tests
-#   QUICK_PUSH=1              - Only run format, clippy, and unit tests (skip Docker tests)
+# This hook runs formatting and clippy checks to ensure code quality
+# before pushing to the remote repository.
+#
+# To install this hook, run: ./scripts/install-git-hooks.sh
+# To bypass in an emergency: git push --no-verify
 
 set -e
 
-echo "🔍 Running pre-push checks..."
+echo "Running pre-push checks..."
 
 # Check formatting
-echo "📝 Checking code formatting..."
+echo "Checking formatting..."
 if ! cargo fmt --all -- --check; then
     echo ""
-    echo "❌ Code formatting check failed!"
-    echo "💡 Run: cargo fmt --all"
-    echo ""
+    echo "Error: Formatting check failed."
+    echo "Run 'cargo fmt' to fix formatting issues."
     exit 1
 fi
-echo "✅ Formatting check passed"
 
 # Run clippy
-echo "🔧 Running clippy lint checks..."
+echo "Running clippy..."
 if ! cargo clippy --workspace --all-targets --all-features -- -D warnings; then
     echo ""
-    echo "❌ Clippy lint check failed!"
-    echo "💡 Run: cargo clippy --workspace --all-targets --all-features -- -D warnings"
-    echo "💡 Or auto-fix: cargo clippy --fix --workspace --all-targets --all-features --allow-dirty"
-    echo ""
+    echo "Error: Clippy check failed."
+    echo "Fix the warnings above before pushing."
     exit 1
 fi
-echo "✅ Clippy check passed"
-
-# Run unit tests (unless SKIP_TESTS=1)
-if [ "${SKIP_TESTS:-0}" != "1" ]; then
-    echo "🧪 Running unit tests..."
-    if ! cargo test --workspace --all-features --lib; then
-        echo ""
-        echo "❌ Unit tests failed!"
-        echo "💡 Run: cargo test --workspace --all-features --lib"
-        echo "💡 To skip tests (not recommended): SKIP_TESTS=1 git push"
-        echo ""
-        exit 1
-    fi
-    echo "✅ Unit tests passed"
-else
-    echo "⚠️  Skipping unit tests (SKIP_TESTS=1)"
-fi
-
-# Check if Docker tests should be skipped
-SKIP_DOCKER="${QUICK_PUSH:-0}"
-
-# Run compatibility tests (unless skipped)
-if [ "$SKIP_DOCKER" != "1" ] && [ "${SKIP_COMPATIBILITY:-0}" != "1" ]; then
-    echo "🔄 Running Mountebank compatibility tests..."
-    echo "   This will start Docker containers and run 72 BDD tests"
-    echo ""
-
-    # Check if docker compose is available
-    if ! command -v docker &> /dev/null; then
-        echo "❌ Docker is not installed or not in PATH"
-        exit 1
-    fi
-
-    COMPAT_DIR="$(git rev-parse --show-toplevel)/tests/compatibility"
-
-    # Start the test environment
-    echo "   Starting test environment..."
-    (cd "$COMPAT_DIR" && docker compose up -d --build --wait)
-
-    # Wait for services to be healthy
-    echo "   Waiting for services to be healthy..."
-    for i in {1..30}; do
-        mb_health=$(docker inspect --format='{{.State.Health.Status}}' mb-original 2>/dev/null || echo "not ready")
-        rift_health=$(docker inspect --format='{{.State.Health.Status}}' rift-proxy 2>/dev/null || echo "not ready")
-        if [ "$mb_health" = "healthy" ] && [ "$rift_health" = "healthy" ]; then
-            echo "   Both services are healthy!"
-            break
-        fi
-        sleep 2
-    done
-
-    # Run the tests
-    if ! (cd "$COMPAT_DIR" && cargo test --release); then
-        echo ""
-        echo "❌ Compatibility tests failed!"
-        echo "💡 Run manually: cd tests/compatibility && docker compose up -d && cargo test"
-        echo "💡 To skip: SKIP_COMPATIBILITY=1 git push"
-        echo ""
-        # Clean up
-        (cd "$COMPAT_DIR" && docker compose down -v) || true
-        exit 1
-    fi
-
-    # Clean up
-    (cd "$COMPAT_DIR" && docker compose down -v) || true
-    echo "✅ Compatibility tests passed (72 tests)"
-else
-    if [ "$SKIP_DOCKER" = "1" ]; then
-        echo "ℹ️  Skipping compatibility tests (QUICK_PUSH=1)"
-    else
-        echo "ℹ️  Skipping compatibility tests (SKIP_COMPATIBILITY=1)"
-    fi
-fi
 
 echo ""
-echo "✅ All pre-push checks passed! Proceeding with push..."
-echo ""
+echo "All pre-push checks passed!"

@@ -8,14 +8,11 @@ permalink: /configuration/
 
 # Configuration
 
-Rift supports two configuration formats:
-
-1. **Mountebank Format** (JSON) - Compatible with Mountebank, recommended for most users
-2. **Native Rift Format** (YAML) - Extended features for advanced chaos engineering
+Rift uses Mountebank-compatible JSON configuration with optional `_rift` extensions for advanced features.
 
 ---
 
-## Mountebank Format (Recommended)
+## Mountebank Format
 
 Use the standard Mountebank JSON format for creating imposters:
 
@@ -55,37 +52,44 @@ curl -X POST http://localhost:2525/imposters \
 
 ---
 
-## Native Rift Format
+## Rift Extensions (`_rift` namespace)
 
-Use YAML for advanced chaos engineering scenarios with extended features:
+Extend Mountebank configurations with advanced chaos engineering features:
 
-```yaml
-mode: sidecar
-listen:
-  port: 8080
-upstream:
-  host: "localhost"
-  port: 8081
-rules:
-  - id: "latency-injection"
-    match:
-      methods: ["GET"]
-      path:
-        prefix: "/api"
-    fault:
-      latency:
-        probability: 0.3
-        min_ms: 100
-        max_ms: 500
+```json
+{
+  "port": 4545,
+  "protocol": "http",
+  "_rift": {
+    "flowState": {
+      "backend": "inmemory",
+      "ttlSeconds": 300
+    }
+  },
+  "stubs": [{
+    "predicates": [{ "equals": { "path": "/api/users" } }],
+    "responses": [{
+      "is": { "statusCode": 200, "body": "[]" },
+      "_rift": {
+        "fault": {
+          "latency": {
+            "probability": 0.3,
+            "minMs": 100,
+            "maxMs": 500
+          }
+        }
+      }
+    }]
+  }]
+}
 ```
 
-Run with native config:
+Available `_rift` features:
+- **Flow State**: Stateful testing with in-memory or Redis backends
+- **Fault Injection**: Probabilistic latency, error, and TCP faults
+- **Scripting**: Multi-engine scripting (Rhai, Lua, JavaScript)
 
-```bash
-./rift-http-proxy config.yaml
-```
-
-[Full Native Format Reference]({{ site.baseurl }}/configuration/native/)
+[Full Rift Extensions Reference]({{ site.baseurl }}/configuration/native/)
 
 ---
 
@@ -95,10 +99,15 @@ Configure Rift behavior via environment variables:
 
 | Variable | Description | Default |
 |:---------|:------------|:--------|
-| `MB_PORT` | Admin API port (Mountebank mode) | `2525` |
+| `MB_PORT` | Admin API port | `2525` |
+| `MB_HOST` | Bind hostname | `0.0.0.0` |
+| `MB_CONFIGFILE` | Imposter config file | |
+| `MB_DATADIR` | Persistent storage directory | |
 | `MB_ALLOW_INJECTION` | Enable JavaScript injection | `false` |
-| `RUST_LOG` | Log level (trace, debug, info, warn, error) | `info` |
+| `MB_LOCAL_ONLY` | Localhost only | `false` |
+| `MB_LOGLEVEL` | Log level | `info` |
 | `RIFT_METRICS_PORT` | Prometheus metrics port | `9090` |
+| `RUST_LOG` | Detailed log configuration | `info` |
 
 ```bash
 docker run -e MB_PORT=2525 -e MB_ALLOW_INJECTION=true \
@@ -110,31 +119,37 @@ docker run -e MB_PORT=2525 -e MB_ALLOW_INJECTION=true \
 ## Command Line Options
 
 ```bash
-rift-http-proxy [OPTIONS] [CONFIG_FILE]
-
-Arguments:
-  [CONFIG_FILE]  Path to configuration file (YAML for native, JSON for Mountebank)
+rift-http-proxy [OPTIONS]
 
 Options:
-      --configfile <FILE>  Mountebank-compatible config file
-      --port <PORT>        Admin API port (default: 2525)
-      --allowInjection     Enable JavaScript injection
-  -h, --help               Print help
-  -V, --version            Print version
+      --port <PORT>          Admin API port [default: 2525]
+      --host <HOST>          Bind hostname [default: 0.0.0.0]
+      --configfile <FILE>    Load imposters from JSON file
+      --datadir <DIR>        Persistent storage directory
+      --allow-injection      Enable JavaScript injection
+      --local-only           Localhost only
+      --loglevel <LEVEL>     Log level [default: info]
+      --metrics-port <PORT>  Prometheus metrics port [default: 9090]
+  -h, --help                 Print help
+  -V, --version              Print version
 ```
+
+[Full CLI Reference]({{ site.baseurl }}/configuration/cli/)
 
 ---
 
-## When to Use Each Format
+## Use Cases
 
-### Use Mountebank Format When:
+### Standard API Mocking
+Use Mountebank JSON format for:
 - Migrating from Mountebank
-- Creating API mocks for testing
+- Creating API mocks for integration tests
 - Working with existing Mountebank tooling
-- Need service virtualization
+- Service virtualization
 
-### Use Native Rift Format When:
-- Running chaos engineering experiments
-- Need advanced fault injection (probabilistic, scripted)
-- Deploying as a sidecar in Kubernetes
-- Need per-upstream routing rules
+### Advanced Chaos Engineering
+Add `_rift` extensions for:
+- Probabilistic fault injection
+- Stateful testing scenarios
+- Complex conditional logic with scripting
+- Distributed state with Redis backend

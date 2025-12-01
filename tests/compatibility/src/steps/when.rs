@@ -267,3 +267,14 @@ async fn send_get_with_header_value(world: &mut CompatibilityWorld, key: String,
     world.send_to_imposter(port, "GET", "/", None, Some(&headers)).await
         .expect("Failed to send GET request with header");
 }
+
+// ============================================
+// Mountebank-only step definitions
+// ============================================
+
+#[when(expr = "I POST to {string} with missing required fields on Mountebank:")]
+async fn post_missing_fields_mb_only(world: &mut CompatibilityWorld, path: String, step: &cucumber::gherkin::Step) {
+    let body = step.docstring().expect("Missing docstring").to_string();
+    world.send_to_mountebank("POST", &path, Some(&body)).await
+        .expect("Failed to send POST to Mountebank");
+}

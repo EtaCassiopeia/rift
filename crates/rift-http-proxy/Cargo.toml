@@ -95,7 +95,7 @@ once_cell = "1.19"
 port_check = "0.2"
 
 [features]
-default = ["redis-backend"]
+default = ["redis-backend", "lua", "javascript"]
 redis-backend = ["redis", "r2d2"]
 lua = ["mlua"]
 javascript = ["boa_engine"]

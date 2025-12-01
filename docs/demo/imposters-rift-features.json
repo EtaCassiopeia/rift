@@ -1,0 +1,134 @@
+{
+  "imposters": [
+    {
+      "port": 4547,
+      "protocol": "http",
+      "name": "Rift Features Demo - Fault Injection",
+      "recordRequests": true,
+      "stubs": [
+        {
+          "name": "Latency Injection - Random Delay",
+          "predicates": [
+            { "equals": { "path": "/api/slow-random" } }
+          ],
+          "responses": [{
+            "is": {
+              "statusCode": 200,
+              "headers": { "Content-Type": "application/json" },
+              "body": { "message": "Response with random latency (500-2000ms)", "endpoint": "/api/slow-random" }
+            },
+            "_rift": {
+              "fault": {
+                "latency": {
+                  "probability": 1.0,
+                  "minMs": 500,
+                  "maxMs": 2000
+                }
+              }
+            }
+          }]
+        },
+        {
+          "name": "Latency Injection - Probabilistic",
+          "predicates": [
+            { "equals": { "path": "/api/sometimes-slow" } }
+          ],
+          "responses": [{
+            "is": {
+              "statusCode": 200,
+              "headers": { "Content-Type": "application/json" },
+              "body": { "message": "50% chance of 1s delay", "endpoint": "/api/sometimes-slow" }
+            },
+            "_rift": {
+              "fault": {
+                "latency": {
+                  "probability": 0.5,
+                  "ms": 1000
+                }
+              }
+            }
+          }]
+        },
+        {
+          "name": "Error Injection - Probabilistic 503",
+          "predicates": [
+            { "equals": { "path": "/api/flaky" } }
+          ],
+          "responses": [{
+            "is": {
+              "statusCode": 200,
+              "headers": { "Content-Type": "application/json" },
+              "body": { "message": "30% chance of failure", "endpoint": "/api/flaky" }
+            },
+            "_rift": {
+              "fault": {
+                "error": {
+                  "probability": 0.3,
+                  "status": 503,
+                  "body": "{\"error\": \"Service temporarily unavailable\", \"code\": \"FLAKY_ERROR\"}"
+                }
+              }
+            }
+          }]
+        },
+        {
+          "name": "Combined Faults - Latency + Error",
+          "predicates": [
+            { "equals": { "path": "/api/chaos" } }
+          ],
+          "responses": [{
+            "is": {
+              "statusCode": 200,
+              "headers": { "Content-Type": "application/json" },
+              "body": { "message": "Chaos endpoint - 70% latency + 20% errors", "endpoint": "/api/chaos" }
+            },
+            "_rift": {
+              "fault": {
+                "latency": {
+                  "probability": 0.7,
+                  "minMs": 200,
+                  "maxMs": 800
+                },
+                "error": {
+                  "probability": 0.2,
+                  "status": 500,
+                  "body": "{\"error\": \"Internal chaos error\"}"
+                }
+              }
+            }
+          }]
+        },
+        {
+          "name": "TCP Fault - Connection Reset",
+          "predicates": [
+            { "equals": { "path": "/api/tcp-reset" } }
+          ],
+          "responses": [{
+            "is": {
+              "statusCode": 200,
+              "body": "You won't see this"
+            },
+            "_rift": {
+              "fault": {
+                "tcp": "CONNECTION_RESET_BY_PEER"
+              }
+            }
+          }]
+        },
+        {
+          "name": "Healthy Endpoint (Baseline)",
+          "predicates": [
+            { "equals": { "path": "/api/healthy" } }
+          ],
+          "responses": [{
+            "is": {
+              "statusCode": 200,
+              "headers": { "Content-Type": "application/json" },
+              "body": { "status": "healthy", "message": "No faults injected" }
+            }
+          }]
+        }
+      ]
+    }
+  ]
+}

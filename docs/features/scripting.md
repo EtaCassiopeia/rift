@@ -13,15 +13,15 @@ Rift supports multiple scripting engines for dynamic behavior.
 
 ## Available Engines
 
-| Engine | Mode | Use Case |
-|:-------|:-----|:---------|
-| **JavaScript** | Mountebank | Injection responses, decorate behaviors |
-| **Rhai** | Native | Lightweight fault logic |
-| **Lua** | Native | High-performance scripting |
+| Engine | Feature | Use Case |
+|:-------|:--------|:---------|
+| **JavaScript** | Built-in | Mountebank-compatible injection responses |
+| **Rhai** | `_rift.script` | Lightweight fault logic |
+| **Lua** | `_rift.script` | High-performance scripting |
 
 ---
 
-## JavaScript (Mountebank Mode)
+## JavaScript (Mountebank Inject)
 
 ### Injection Responses
 
@@ -101,32 +101,30 @@ function(request, state, logger) {
 
 ---
 
-## Rhai (Native Mode)
+## Rhai (`_rift.script`)
 
 Rhai is a lightweight embedded scripting language optimized for Rust.
 
 ### Basic Script
 
-```yaml
-rules:
-  - id: "rhai-fault"
-    fault:
-      script:
-        engine: rhai
-        code: |
-          // Access request
-          let path = request.path;
-          let method = request.method;
-
-          // Conditional logic
-          if path.contains("admin") {
-            #{
-              latency_ms: 100,
-              inject: true
-            }
-          } else {
-            #{ inject: false }
-          }
+```json
+{
+  "port": 4545,
+  "protocol": "http",
+  "_rift": {
+    "flowState": {"backend": "inmemory"}
+  },
+  "stubs": [{
+    "responses": [{
+      "_rift": {
+        "script": {
+          "engine": "rhai",
+          "code": "let path = request.path; if path.contains(\"admin\") { #{ latency_ms: 100, inject: true } } else { #{ inject: false } }"
+        }
+      }
+    }]
+  }]
+}
 ```
 
 ### Available Variables
@@ -204,29 +202,30 @@ if flow.exists("key") {
 
 ---
 
-## Lua (Native Mode)
+## Lua (`_rift.script`)
 
 Lua provides high-performance scripting with pre-compiled bytecode.
 
 ### Basic Script
 
-```yaml
-rules:
-  - id: "lua-fault"
-    fault:
-      script:
-        engine: lua
-        code: |
-          local path = request.path
-
-          if string.find(path, "slow") then
-            return {
-              latency_ms = 1000,
-              inject = true
-            }
-          end
-
-          return { inject = false }
+```json
+{
+  "port": 4545,
+  "protocol": "http",
+  "_rift": {
+    "flowState": {"backend": "inmemory"}
+  },
+  "stubs": [{
+    "responses": [{
+      "_rift": {
+        "script": {
+          "engine": "lua",
+          "code": "local path = request.path; if string.find(path, 'slow') then return { latency_ms = 1000, inject = true } end; return { inject = false }"
+        }
+      }
+    }]
+  }]
+}
 ```
 
 ### Available Variables
@@ -279,71 +278,40 @@ end
 
 ### Rate Limiting
 
-```rhai
-let user_id = request.headers["X-User-Id"];
-let key = "rate:" + user_id;
-let count = flow.get(key).unwrap_or(0);
-
-flow.set(key, count + 1);
-flow.expire(key, 60);  // Reset every minute
-
-if count > 100 {
-  #{
-    error_status: 429,
-    error_body: `{"error": "Rate limit exceeded", "retry_after": 60}`,
-    inject: true
+```json
+{
+  "_rift": {
+    "script": {
+      "engine": "rhai",
+      "code": "let user_id = request.headers[\"X-User-Id\"]; let key = \"rate:\" + user_id; let count = flow.get(key).unwrap_or(0); flow.set(key, count + 1); flow.expire(key, 60); if count > 100 { #{ error_status: 429, error_body: \"{\\\"error\\\": \\\"Rate limit exceeded\\\"}\", inject: true } } else { #{ inject: false } }"
+    }
   }
-} else {
-  #{ inject: false }
 }
 ```
 
 ### A/B Testing
 
-```rhai
-let user_id = request.headers["X-User-Id"];
-let bucket_key = "ab_bucket:" + user_id;
-
-// Assign bucket if not exists
-let bucket = flow.get(bucket_key);
-if bucket == () {
-  bucket = if rand() < 0.5 { "A" } else { "B" };
-  flow.set(bucket_key, bucket);
-}
-
-// Different behavior per bucket
-if bucket == "A" {
-  #{
-    latency_ms: 0,
-    inject: true
-  }
-} else {
-  #{
-    latency_ms: 100,
-    inject: true
+```json
+{
+  "_rift": {
+    "script": {
+      "engine": "rhai",
+      "code": "let user_id = request.headers[\"X-User-Id\"]; let bucket_key = \"ab_bucket:\" + user_id; let bucket = flow.get(bucket_key); if bucket == () { bucket = if rand() < 0.5 { \"A\" } else { \"B\" }; flow.set(bucket_key, bucket); }; if bucket == \"A\" { #{ latency_ms: 0, inject: true } } else { #{ latency_ms: 100, inject: true } }"
+    }
   }
 }
 ```
 
 ### Retry Simulation
 
-```rhai
-let request_id = request.headers["X-Request-Id"];
-let attempt_key = "attempt:" + request_id;
-let attempts = flow.get(attempt_key).unwrap_or(0);
-
-flow.set(attempt_key, attempts + 1);
-flow.expire(attempt_key, 300);
-
-// Fail first 2 attempts
-if attempts < 2 {
-  #{
-    error_status: 503,
-    error_body: `{"error": "Temporary failure", "attempt": ${attempts + 1}}`,
-    inject: true
+```json
+{
+  "_rift": {
+    "script": {
+      "engine": "rhai",
+      "code": "let request_id = request.headers[\"X-Request-Id\"]; let attempt_key = \"attempt:\" + request_id; let attempts = flow.get(attempt_key).unwrap_or(0); flow.set(attempt_key, attempts + 1); flow.expire(attempt_key, 300); if attempts < 2 { #{ error_status: 503, error_body: \"Temporary failure\", inject: true } } else { #{ inject: false } }"
+    }
   }
-} else {
-  #{ inject: false }
 }
 ```
 

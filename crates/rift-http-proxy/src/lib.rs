@@ -1,4 +1,6 @@
 // Library exports for benchmarking and testing
+// Allow dead_code for library targets - functions are used by the binary but not by tests
+#![allow(dead_code)]
 
 pub mod admin_api;
 pub mod behaviors;
