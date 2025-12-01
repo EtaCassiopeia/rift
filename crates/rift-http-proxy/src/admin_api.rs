@@ -356,10 +356,7 @@ async fn handle_replace_all_imposters(
                 created.push(config);
             }
             Err(e) => {
-                error!(
-                    "Failed to create imposter on port {:?}: {}",
-                    config.port, e
-                );
+                error!("Failed to create imposter on port {:?}: {}", config.port, e);
             }
         }
     }

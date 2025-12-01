@@ -42,7 +42,7 @@ async fn start_rift_server(admin_port: u16) -> tokio::process::Child {
     let client = Client::new();
     for _ in 0..50 {
         if client
-            .get(format!("{}:{}/", ADMIN_URL, admin_port))
+            .get(format!("{ADMIN_URL}:{admin_port}/"))
             .timeout(Duration::from_millis(200))
             .send()
             .await
@@ -58,7 +58,7 @@ async fn start_rift_server(admin_port: u16) -> tokio::process::Child {
 /// Create an imposter via the admin API
 async fn create_imposter(client: &Client, admin_port: u16, config: serde_json::Value) -> u16 {
     let response = client
-        .post(format!("{}:{}/imposters", ADMIN_URL, admin_port))
+        .post(format!("{ADMIN_URL}:{admin_port}/imposters"))
         .json(&config)
         .send()
         .await
@@ -77,7 +77,7 @@ async fn create_imposter(client: &Client, admin_port: u16, config: serde_json::V
 /// Delete all imposters
 async fn clear_imposters(client: &Client, admin_port: u16) {
     let _ = client
-        .delete(format!("{}:{}/imposters", ADMIN_URL, admin_port))
+        .delete(format!("{ADMIN_URL}:{admin_port}/imposters"))
         .send()
         .await;
 }
@@ -91,10 +91,7 @@ async fn clear_imposters(client: &Client, admin_port: u16) {
 async fn test_rift_flow_state_inmemory_basic() {
     let (admin_port, imposter_port) = get_test_ports();
     let mut server = start_rift_server(admin_port).await;
-    let client = Client::builder()
-        .timeout(TEST_TIMEOUT)
-        .build()
-        .unwrap();
+    let client = Client::builder().timeout(TEST_TIMEOUT).build().unwrap();
 
     // Create imposter with flow state and inject script that uses state
     let config = json!({
@@ -119,14 +116,14 @@ async fn test_rift_flow_state_inmemory_basic() {
     // Make multiple requests and verify state is maintained
     for i in 1..=3 {
         let response = client
-            .get(format!("{}:{}/test", ADMIN_URL, imposter_port))
+            .get(format!("{ADMIN_URL}:{imposter_port}/test"))
             .send()
             .await
             .expect("Request failed");
 
         assert_eq!(response.status(), 200);
         let body = response.text().await.unwrap();
-        assert_eq!(body, format!("Count: {}", i));
+        assert_eq!(body, format!("Count: {i}"));
     }
 
     clear_imposters(&client, admin_port).await;
@@ -138,10 +135,7 @@ async fn test_rift_flow_state_inmemory_basic() {
 async fn test_rift_flow_state_persistence_across_requests() {
     let (admin_port, imposter_port) = get_test_ports();
     let mut server = start_rift_server(admin_port).await;
-    let client = Client::builder()
-        .timeout(TEST_TIMEOUT)
-        .build()
-        .unwrap();
+    let client = Client::builder().timeout(TEST_TIMEOUT).build().unwrap();
 
     // Create imposter with flow state that stores user data
     let config = json!({
@@ -172,7 +166,7 @@ async fn test_rift_flow_state_persistence_across_requests() {
 
     // First retrieve - should be empty
     let response = client
-        .get(format!("{}:{}/retrieve", ADMIN_URL, imposter_port))
+        .get(format!("{ADMIN_URL}:{imposter_port}/retrieve"))
         .send()
         .await
         .expect("Request failed");
@@ -180,7 +174,7 @@ async fn test_rift_flow_state_persistence_across_requests() {
 
     // Store a value
     let response = client
-        .post(format!("{}:{}/store", ADMIN_URL, imposter_port))
+        .post(format!("{ADMIN_URL}:{imposter_port}/store"))
         .body(r#"{"value": "test-data"}"#)
         .send()
         .await
@@ -189,7 +183,7 @@ async fn test_rift_flow_state_persistence_across_requests() {
 
     // Retrieve again - should have stored value
     let response = client
-        .get(format!("{}:{}/retrieve", ADMIN_URL, imposter_port))
+        .get(format!("{ADMIN_URL}:{imposter_port}/retrieve"))
         .send()
         .await
         .expect("Request failed");
@@ -208,10 +202,7 @@ async fn test_rift_flow_state_persistence_across_requests() {
 async fn test_rift_fault_latency_100_percent() {
     let (admin_port, imposter_port) = get_test_ports();
     let mut server = start_rift_server(admin_port).await;
-    let client = Client::builder()
-        .timeout(TEST_TIMEOUT)
-        .build()
-        .unwrap();
+    let client = Client::builder().timeout(TEST_TIMEOUT).build().unwrap();
 
     // Create imposter with 100% probability latency fault
     let config = json!({
@@ -240,7 +231,7 @@ async fn test_rift_fault_latency_100_percent() {
 
     let start = Instant::now();
     let response = client
-        .get(format!("{}:{}/test", ADMIN_URL, imposter_port))
+        .get(format!("{ADMIN_URL}:{imposter_port}/test"))
         .send()
         .await
         .expect("Request failed");
@@ -250,8 +241,7 @@ async fn test_rift_fault_latency_100_percent() {
     assert_eq!(response.text().await.unwrap(), "delayed response");
     assert!(
         elapsed >= Duration::from_millis(180),
-        "Expected at least 180ms delay, got {:?}",
-        elapsed
+        "Expected at least 180ms delay, got {elapsed:?}"
     );
 
     clear_imposters(&client, admin_port).await;
@@ -263,10 +253,7 @@ async fn test_rift_fault_latency_100_percent() {
 async fn test_rift_fault_latency_range() {
     let (admin_port, imposter_port) = get_test_ports();
     let mut server = start_rift_server(admin_port).await;
-    let client = Client::builder()
-        .timeout(TEST_TIMEOUT)
-        .build()
-        .unwrap();
+    let client = Client::builder().timeout(TEST_TIMEOUT).build().unwrap();
 
     // Create imposter with latency range
     let config = json!({
@@ -296,7 +283,7 @@ async fn test_rift_fault_latency_range() {
 
     let start = Instant::now();
     let response = client
-        .get(format!("{}:{}/test", ADMIN_URL, imposter_port))
+        .get(format!("{ADMIN_URL}:{imposter_port}/test"))
         .send()
         .await
         .expect("Request failed");
@@ -305,13 +292,11 @@ async fn test_rift_fault_latency_range() {
     assert_eq!(response.status(), 200);
     assert!(
         elapsed >= Duration::from_millis(90),
-        "Expected at least 90ms delay, got {:?}",
-        elapsed
+        "Expected at least 90ms delay, got {elapsed:?}"
     );
     assert!(
         elapsed <= Duration::from_millis(300),
-        "Expected at most 300ms delay, got {:?}",
-        elapsed
+        "Expected at most 300ms delay, got {elapsed:?}"
     );
 
     clear_imposters(&client, admin_port).await;
@@ -323,10 +308,7 @@ async fn test_rift_fault_latency_range() {
 async fn test_rift_fault_error_100_percent() {
     let (admin_port, imposter_port) = get_test_ports();
     let mut server = start_rift_server(admin_port).await;
-    let client = Client::builder()
-        .timeout(TEST_TIMEOUT)
-        .build()
-        .unwrap();
+    let client = Client::builder().timeout(TEST_TIMEOUT).build().unwrap();
 
     // Create imposter with 100% error fault
     let config = json!({
@@ -355,7 +337,7 @@ async fn test_rift_fault_error_100_percent() {
     create_imposter(&client, admin_port, config).await;
 
     let response = client
-        .get(format!("{}:{}/test", ADMIN_URL, imposter_port))
+        .get(format!("{ADMIN_URL}:{imposter_port}/test"))
         .send()
         .await
         .expect("Request failed");
@@ -372,10 +354,7 @@ async fn test_rift_fault_error_100_percent() {
 async fn test_rift_fault_probabilistic() {
     let (admin_port, imposter_port) = get_test_ports();
     let mut server = start_rift_server(admin_port).await;
-    let client = Client::builder()
-        .timeout(TEST_TIMEOUT)
-        .build()
-        .unwrap();
+    let client = Client::builder().timeout(TEST_TIMEOUT).build().unwrap();
 
     // Create imposter with 50% error probability
     let config = json!({
@@ -409,7 +388,7 @@ async fn test_rift_fault_probabilistic() {
     // Make 100 requests to get a statistical sample
     for _ in 0..100 {
         let response = client
-            .get(format!("{}:{}/test", ADMIN_URL, imposter_port))
+            .get(format!("{ADMIN_URL}:{imposter_port}/test"))
             .send()
             .await
             .expect("Request failed");
@@ -424,10 +403,8 @@ async fn test_rift_fault_probabilistic() {
     // With 50% probability, we should see roughly equal distribution
     // Allow for some statistical variance (expect between 25% and 75% of either)
     assert!(
-        success_count >= 25 && success_count <= 75,
-        "Expected roughly 50% success rate, got {} successes and {} errors",
-        success_count,
-        error_count
+        (25..=75).contains(&success_count),
+        "Expected roughly 50% success rate, got {success_count} successes and {error_count} errors"
     );
 
     clear_imposters(&client, admin_port).await;
@@ -443,10 +420,7 @@ async fn test_rift_fault_probabilistic() {
 async fn test_mountebank_behaviors_with_rift_fault() {
     let (admin_port, imposter_port) = get_test_ports();
     let mut server = start_rift_server(admin_port).await;
-    let client = Client::builder()
-        .timeout(TEST_TIMEOUT)
-        .build()
-        .unwrap();
+    let client = Client::builder().timeout(TEST_TIMEOUT).build().unwrap();
 
     // Create imposter with both Mountebank _behaviors and _rift fault
     let config = json!({
@@ -479,7 +453,7 @@ async fn test_mountebank_behaviors_with_rift_fault() {
 
     let start = Instant::now();
     let response = client
-        .get(format!("{}:{}/test", ADMIN_URL, imposter_port))
+        .get(format!("{ADMIN_URL}:{imposter_port}/test"))
         .send()
         .await
         .expect("Request failed");
@@ -487,14 +461,16 @@ async fn test_mountebank_behaviors_with_rift_fault() {
 
     assert_eq!(response.status(), 200);
     assert_eq!(
-        response.headers().get("X-Custom").map(|v| v.to_str().unwrap()),
+        response
+            .headers()
+            .get("X-Custom")
+            .map(|v| v.to_str().unwrap()),
         Some("header")
     );
     // Both waits should apply: 50ms from _behaviors + 50ms from _rift
     assert!(
         elapsed >= Duration::from_millis(80),
-        "Expected at least 80ms combined delay, got {:?}",
-        elapsed
+        "Expected at least 80ms combined delay, got {elapsed:?}"
     );
 
     clear_imposters(&client, admin_port).await;
@@ -506,10 +482,7 @@ async fn test_mountebank_behaviors_with_rift_fault() {
 async fn test_mountebank_predicates_with_rift_extensions() {
     let (admin_port, imposter_port) = get_test_ports();
     let mut server = start_rift_server(admin_port).await;
-    let client = Client::builder()
-        .timeout(TEST_TIMEOUT)
-        .build()
-        .unwrap();
+    let client = Client::builder().timeout(TEST_TIMEOUT).build().unwrap();
 
     // Create imposter with complex Mountebank predicates and _rift extensions
     let config = json!({
@@ -553,7 +526,7 @@ async fn test_mountebank_predicates_with_rift_extensions() {
     // Test GET /api/* - should match first stub with _rift latency
     let start = Instant::now();
     let response = client
-        .get(format!("{}:{}/api/users", ADMIN_URL, imposter_port))
+        .get(format!("{ADMIN_URL}:{imposter_port}/api/users"))
         .send()
         .await
         .expect("Request failed");
@@ -564,7 +537,7 @@ async fn test_mountebank_predicates_with_rift_extensions() {
 
     // Test POST - should match second stub without _rift
     let response = client
-        .post(format!("{}:{}/create", ADMIN_URL, imposter_port))
+        .post(format!("{ADMIN_URL}:{imposter_port}/create"))
         .send()
         .await
         .expect("Request failed");
@@ -579,10 +552,7 @@ async fn test_mountebank_predicates_with_rift_extensions() {
 async fn test_response_cycling_with_rift_extensions() {
     let (admin_port, imposter_port) = get_test_ports();
     let mut server = start_rift_server(admin_port).await;
-    let client = Client::builder()
-        .timeout(TEST_TIMEOUT)
-        .build()
-        .unwrap();
+    let client = Client::builder().timeout(TEST_TIMEOUT).build().unwrap();
 
     // Create imposter with multiple responses that cycle, each with different _rift configs
     let config = json!({
@@ -613,7 +583,7 @@ async fn test_response_cycling_with_rift_extensions() {
         let c = client.clone();
         let port = imposter_port;
         async move {
-            c.get(format!("{}:{}/test", ADMIN_URL, port))
+            c.get(format!("{ADMIN_URL}:{port}/test"))
                 .send()
                 .await
                 .unwrap()
@@ -624,7 +594,10 @@ async fn test_response_cycling_with_rift_extensions() {
     }))
     .await;
 
-    assert_eq!(bodies, vec!["first", "second", "third", "first", "second", "third"]);
+    assert_eq!(
+        bodies,
+        vec!["first", "second", "third", "first", "second", "third"]
+    );
 
     clear_imposters(&client, admin_port).await;
     server.kill().await.ok();
@@ -635,10 +608,7 @@ async fn test_response_cycling_with_rift_extensions() {
 async fn test_default_response_with_rift_config() {
     let (admin_port, imposter_port) = get_test_ports();
     let mut server = start_rift_server(admin_port).await;
-    let client = Client::builder()
-        .timeout(TEST_TIMEOUT)
-        .build()
-        .unwrap();
+    let client = Client::builder().timeout(TEST_TIMEOUT).build().unwrap();
 
     // Create imposter with default response and _rift flow state
     let config = json!({
@@ -663,7 +633,7 @@ async fn test_default_response_with_rift_config() {
 
     // Request to existing path
     let response = client
-        .get(format!("{}:{}/exists", ADMIN_URL, imposter_port))
+        .get(format!("{ADMIN_URL}:{imposter_port}/exists"))
         .send()
         .await
         .expect("Request failed");
@@ -672,7 +642,7 @@ async fn test_default_response_with_rift_config() {
 
     // Request to non-existing path - should use default response
     let response = client
-        .get(format!("{}:{}/nonexistent", ADMIN_URL, imposter_port))
+        .get(format!("{ADMIN_URL}:{imposter_port}/nonexistent"))
         .send()
         .await
         .expect("Request failed");

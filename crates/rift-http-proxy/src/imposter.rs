@@ -14,10 +14,9 @@ use crate::behaviors::{
 };
 use crate::flow_state::{FlowStore, NoOpFlowStore};
 use crate::recording::{ProxyMode, RecordedResponse, RecordingStore, RequestSignature};
-use crate::scripting::{FaultDecision, ScriptEngine, ScriptRequest};
 #[cfg(feature = "javascript")]
 use crate::scripting::{execute_mountebank_inject, MountebankRequest};
-use rand::Rng;
+use crate::scripting::{FaultDecision, ScriptEngine, ScriptRequest};
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
@@ -26,6 +25,7 @@ use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use parking_lot::RwLock;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -135,7 +135,10 @@ struct StubResponseRaw {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct IsResponseRaw {
-    #[serde(default = "default_status_code_raw", deserialize_with = "deserialize_status_code")]
+    #[serde(
+        default = "default_status_code_raw",
+        deserialize_with = "deserialize_status_code"
+    )]
     status_code: u16,
     #[serde(default)]
     headers: HashMap<String, String>,
@@ -357,7 +360,11 @@ pub struct ImposterConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_response: Option<IsResponse>,
     /// Allow CORS headers (Mountebank compatible)
-    #[serde(default, skip_serializing_if = "std::ops::Not::not", alias = "allowCORS")]
+    #[serde(
+        default,
+        skip_serializing_if = "std::ops::Not::not",
+        alias = "allowCORS"
+    )]
     pub allow_cors: bool,
     /// Service name for documentation (optional metadata)
     #[serde(skip_serializing_if = "Option::is_none", alias = "service_name")]
@@ -789,12 +796,7 @@ impl Imposter {
     fn header_map_to_hashmap(headers: &hyper::HeaderMap) -> HashMap<String, String> {
         headers
             .iter()
-            .map(|(k, v)| {
-                (
-                    k.as_str().to_string(),
-                    v.to_str().unwrap_or("").to_string(),
-                )
-            })
+            .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
             .collect()
     }
 
@@ -954,7 +956,7 @@ impl Imposter {
                 headers,
                 effective_body,
                 &apply_except,
-                |expected, actual| str_equals(expected, actual),
+                str_equals,
                 false, // not deep equals
             ) {
                 return false;
@@ -971,7 +973,7 @@ impl Imposter {
                 headers,
                 effective_body,
                 &apply_except,
-                |expected, actual| str_equals(expected, actual),
+                str_equals,
                 true, // deep equals
             ) {
                 return false;
@@ -1056,6 +1058,7 @@ impl Imposter {
     }
 
     /// Check predicate fields against request values
+    #[allow(clippy::too_many_arguments)]
     fn check_predicate_fields<F>(
         predicate_value: &serde_json::Value,
         method: &str,
@@ -1164,6 +1167,7 @@ impl Imposter {
     }
 
     /// Check predicate fields with regex matching
+    #[allow(clippy::too_many_arguments)]
     fn check_predicate_fields_regex(
         predicate_value: &serde_json::Value,
         method: &str,
@@ -1304,9 +1308,7 @@ impl Imposter {
         if let Some(expected_headers) = obj.get("headers").and_then(|v| v.as_object()) {
             for (key, should_exist_val) in expected_headers {
                 let should_exist = should_exist_val.as_bool().unwrap_or(true);
-                let exists = headers
-                    .iter()
-                    .any(|(k, _)| k.eq_ignore_ascii_case(key));
+                let exists = headers.iter().any(|(k, _)| k.eq_ignore_ascii_case(key));
                 if exists != should_exist {
                     return false;
                 }
@@ -1448,14 +1450,9 @@ impl Imposter {
                     false,
                 ))
             }
-            StubResponse::Fault { fault } => Some((
-                0,
-                HashMap::new(),
-                fault.clone(),
-                None,
-                None,
-                true,
-            )),
+            StubResponse::Fault { fault } => {
+                Some((0, HashMap::new(), fault.clone(), None, None, true))
+            }
             StubResponse::Proxy { .. } => None,
             StubResponse::Inject { .. } => None,
             StubResponse::RiftScript { .. } => None,
@@ -2337,9 +2334,13 @@ async fn handle_imposter_request(
         Some(query_str.as_str())
     };
 
-    if let Some((stub, stub_index)) =
-        imposter.find_matching_stub(method_str, path_str, &headers_for_context, query_opt, body_string.as_deref())
-    {
+    if let Some((stub, stub_index)) = imposter.find_matching_stub(
+        method_str,
+        path_str,
+        &headers_for_context,
+        query_opt,
+        body_string.as_deref(),
+    ) {
         // Check if this is a proxy response
         if let Some(proxy_config) = imposter.get_proxy_response(&stub, stub_index) {
             debug!("Handling proxy request to {}", proxy_config.to);
@@ -2408,7 +2409,11 @@ async fn handle_imposter_request(
                 body: body_string.clone(),
             };
 
-            match execute_mountebank_inject(&inject_fn, &mb_request, imposter.config.port.unwrap_or(0)) {
+            match execute_mountebank_inject(
+                &inject_fn,
+                &mb_request,
+                imposter.config.port.unwrap_or(0),
+            ) {
                 Ok(inject_response) => {
                     // Advance the cycler for this inject response
                     imposter.advance_cycler_for_inject(&stub, stub_index);
@@ -2442,7 +2447,10 @@ async fn handle_imposter_request(
 
         // Check if this is a RiftScript response (_rift.script)
         if let Some(script_config) = imposter.get_rift_script_response(&stub, stub_index) {
-            debug!("Handling Rift script response (engine: {})", script_config.engine);
+            debug!(
+                "Handling Rift script response (engine: {})",
+                script_config.engine
+            );
 
             // Build script request
             let script_request = ScriptRequest {
@@ -2458,11 +2466,20 @@ async fn handle_imposter_request(
             };
 
             // Create script engine and execute
-            match ScriptEngine::new(&script_config.engine, &script_config.code, format!("rift_script_{stub_index}")) {
+            match ScriptEngine::new(
+                &script_config.engine,
+                &script_config.code,
+                format!("rift_script_{stub_index}"),
+            ) {
                 Ok(engine) => {
                     let flow_store = imposter.flow_store.clone();
                     match engine.should_inject_fault(&script_request, flow_store) {
-                        Ok(FaultDecision::Error { status, body, headers, .. }) => {
+                        Ok(FaultDecision::Error {
+                            status,
+                            body,
+                            headers,
+                            ..
+                        }) => {
                             imposter.advance_cycler_for_rift_script(&stub, stub_index);
 
                             let mut response = Response::builder().status(status);
@@ -2851,12 +2868,40 @@ mod tests {
         let empty_headers = HashMap::new();
 
         // Should match
-        assert!(Imposter::stub_matches(&stub, "GET", "/test", None, &empty_headers, None));
-        assert!(Imposter::stub_matches(&stub, "get", "/test", None, &empty_headers, None)); // case-insensitive method
+        assert!(Imposter::stub_matches(
+            &stub,
+            "GET",
+            "/test",
+            None,
+            &empty_headers,
+            None
+        ));
+        assert!(Imposter::stub_matches(
+            &stub,
+            "get",
+            "/test",
+            None,
+            &empty_headers,
+            None
+        )); // case-insensitive method
 
         // Should not match
-        assert!(!Imposter::stub_matches(&stub, "POST", "/test", None, &empty_headers, None));
-        assert!(!Imposter::stub_matches(&stub, "GET", "/other", None, &empty_headers, None));
+        assert!(!Imposter::stub_matches(
+            &stub,
+            "POST",
+            "/test",
+            None,
+            &empty_headers,
+            None
+        ));
+        assert!(!Imposter::stub_matches(
+            &stub,
+            "GET",
+            "/other",
+            None,
+            &empty_headers,
+            None
+        ));
     }
 
     #[test]
@@ -3150,12 +3195,40 @@ mod tests {
         let empty_headers = HashMap::new();
 
         // Should match
-        assert!(Imposter::stub_matches(&stub, "GET", "/api/lender-details", None, &empty_headers, None));
-        assert!(Imposter::stub_matches(&stub, "GET", "/user-details", None, &empty_headers, None));
+        assert!(Imposter::stub_matches(
+            &stub,
+            "GET",
+            "/api/lender-details",
+            None,
+            &empty_headers,
+            None
+        ));
+        assert!(Imposter::stub_matches(
+            &stub,
+            "GET",
+            "/user-details",
+            None,
+            &empty_headers,
+            None
+        ));
 
         // Should not match
-        assert!(!Imposter::stub_matches(&stub, "GET", "/details/other", None, &empty_headers, None));
-        assert!(!Imposter::stub_matches(&stub, "GET", "/api/details/v1", None, &empty_headers, None));
+        assert!(!Imposter::stub_matches(
+            &stub,
+            "GET",
+            "/details/other",
+            None,
+            &empty_headers,
+            None
+        ));
+        assert!(!Imposter::stub_matches(
+            &stub,
+            "GET",
+            "/api/details/v1",
+            None,
+            &empty_headers,
+            None
+        ));
     }
 
     #[test]
@@ -3165,7 +3238,11 @@ mod tests {
                 "deepEquals": {"method": "GET"}
             })],
             responses: vec![StubResponse::Is {
-                is: IsResponse { status_code: 200, headers: HashMap::new(), body: None },
+                is: IsResponse {
+                    status_code: 200,
+                    headers: HashMap::new(),
+                    body: None,
+                },
                 behaviors: None,
                 rift: None,
             }],
@@ -3174,9 +3251,30 @@ mod tests {
 
         let empty_headers = HashMap::new();
 
-        assert!(Imposter::stub_matches(&stub, "GET", "/test", None, &empty_headers, None));
-        assert!(Imposter::stub_matches(&stub, "get", "/test", None, &empty_headers, None)); // case-insensitive
-        assert!(!Imposter::stub_matches(&stub, "POST", "/test", None, &empty_headers, None));
+        assert!(Imposter::stub_matches(
+            &stub,
+            "GET",
+            "/test",
+            None,
+            &empty_headers,
+            None
+        ));
+        assert!(Imposter::stub_matches(
+            &stub,
+            "get",
+            "/test",
+            None,
+            &empty_headers,
+            None
+        )); // case-insensitive
+        assert!(!Imposter::stub_matches(
+            &stub,
+            "POST",
+            "/test",
+            None,
+            &empty_headers,
+            None
+        ));
     }
 
     #[test]
@@ -3186,7 +3284,11 @@ mod tests {
                 "deepEquals": {"body": ""}
             })],
             responses: vec![StubResponse::Is {
-                is: IsResponse { status_code: 200, headers: HashMap::new(), body: None },
+                is: IsResponse {
+                    status_code: 200,
+                    headers: HashMap::new(),
+                    body: None,
+                },
                 behaviors: None,
                 rift: None,
             }],
@@ -3196,11 +3298,32 @@ mod tests {
         let empty_headers = HashMap::new();
 
         // Empty body should match
-        assert!(Imposter::stub_matches(&stub, "GET", "/test", None, &empty_headers, Some("")));
-        assert!(Imposter::stub_matches(&stub, "GET", "/test", None, &empty_headers, None));
+        assert!(Imposter::stub_matches(
+            &stub,
+            "GET",
+            "/test",
+            None,
+            &empty_headers,
+            Some("")
+        ));
+        assert!(Imposter::stub_matches(
+            &stub,
+            "GET",
+            "/test",
+            None,
+            &empty_headers,
+            None
+        ));
 
         // Non-empty body should not match
-        assert!(!Imposter::stub_matches(&stub, "GET", "/test", None, &empty_headers, Some("content")));
+        assert!(!Imposter::stub_matches(
+            &stub,
+            "GET",
+            "/test",
+            None,
+            &empty_headers,
+            Some("content")
+        ));
     }
 
     #[test]
@@ -3210,7 +3333,11 @@ mod tests {
                 "deepEquals": {"path": "/kaizen/auto/financing/lender-information/lenders"}
             })],
             responses: vec![StubResponse::Is {
-                is: IsResponse { status_code: 200, headers: HashMap::new(), body: None },
+                is: IsResponse {
+                    status_code: 200,
+                    headers: HashMap::new(),
+                    body: None,
+                },
                 behaviors: None,
                 rift: None,
             }],
@@ -3219,8 +3346,22 @@ mod tests {
 
         let empty_headers = HashMap::new();
 
-        assert!(Imposter::stub_matches(&stub, "GET", "/kaizen/auto/financing/lender-information/lenders", None, &empty_headers, None));
-        assert!(!Imposter::stub_matches(&stub, "GET", "/other/path", None, &empty_headers, None));
+        assert!(Imposter::stub_matches(
+            &stub,
+            "GET",
+            "/kaizen/auto/financing/lender-information/lenders",
+            None,
+            &empty_headers,
+            None
+        ));
+        assert!(!Imposter::stub_matches(
+            &stub,
+            "GET",
+            "/other/path",
+            None,
+            &empty_headers,
+            None
+        ));
     }
 
     #[test]
@@ -3230,7 +3371,11 @@ mod tests {
                 "contains": {"query": {"lenderIds": "CofTest"}}
             })],
             responses: vec![StubResponse::Is {
-                is: IsResponse { status_code: 200, headers: HashMap::new(), body: None },
+                is: IsResponse {
+                    status_code: 200,
+                    headers: HashMap::new(),
+                    body: None,
+                },
                 behaviors: None,
                 rift: None,
             }],
@@ -3240,13 +3385,48 @@ mod tests {
         let empty_headers = HashMap::new();
 
         // Should match - query contains "CofTest"
-        assert!(Imposter::stub_matches(&stub, "GET", "/test", Some("lenderIds=CofTestWL"), &empty_headers, None));
-        assert!(Imposter::stub_matches(&stub, "GET", "/test", Some("lenderIds=CofTest"), &empty_headers, None));
-        assert!(Imposter::stub_matches(&stub, "GET", "/test", Some("lenderIds=123CofTest456"), &empty_headers, None));
+        assert!(Imposter::stub_matches(
+            &stub,
+            "GET",
+            "/test",
+            Some("lenderIds=CofTestWL"),
+            &empty_headers,
+            None
+        ));
+        assert!(Imposter::stub_matches(
+            &stub,
+            "GET",
+            "/test",
+            Some("lenderIds=CofTest"),
+            &empty_headers,
+            None
+        ));
+        assert!(Imposter::stub_matches(
+            &stub,
+            "GET",
+            "/test",
+            Some("lenderIds=123CofTest456"),
+            &empty_headers,
+            None
+        ));
 
         // Should not match
-        assert!(!Imposter::stub_matches(&stub, "GET", "/test", Some("lenderIds=Other"), &empty_headers, None));
-        assert!(!Imposter::stub_matches(&stub, "GET", "/test", None, &empty_headers, None));
+        assert!(!Imposter::stub_matches(
+            &stub,
+            "GET",
+            "/test",
+            Some("lenderIds=Other"),
+            &empty_headers,
+            None
+        ));
+        assert!(!Imposter::stub_matches(
+            &stub,
+            "GET",
+            "/test",
+            None,
+            &empty_headers,
+            None
+        ));
     }
 
     #[test]
@@ -3256,7 +3436,11 @@ mod tests {
                 "equals": {"headers": {"Content-Type": "application/json"}}
             })],
             responses: vec![StubResponse::Is {
-                is: IsResponse { status_code: 200, headers: HashMap::new(), body: None },
+                is: IsResponse {
+                    status_code: 200,
+                    headers: HashMap::new(),
+                    body: None,
+                },
                 behaviors: None,
                 rift: None,
             }],
@@ -3266,21 +3450,44 @@ mod tests {
         let mut headers = HashMap::new();
         headers.insert("Content-Type".to_string(), "application/json".to_string());
 
-        assert!(Imposter::stub_matches(&stub, "GET", "/test", None, &headers, None));
+        assert!(Imposter::stub_matches(
+            &stub, "GET", "/test", None, &headers, None
+        ));
 
         // Header key lookup is case-insensitive
         let mut headers_lower = HashMap::new();
         headers_lower.insert("content-type".to_string(), "application/json".to_string());
-        assert!(Imposter::stub_matches(&stub, "GET", "/test", None, &headers_lower, None));
+        assert!(Imposter::stub_matches(
+            &stub,
+            "GET",
+            "/test",
+            None,
+            &headers_lower,
+            None
+        ));
 
         // Wrong value
         let mut wrong_headers = HashMap::new();
         wrong_headers.insert("Content-Type".to_string(), "text/html".to_string());
-        assert!(!Imposter::stub_matches(&stub, "GET", "/test", None, &wrong_headers, None));
+        assert!(!Imposter::stub_matches(
+            &stub,
+            "GET",
+            "/test",
+            None,
+            &wrong_headers,
+            None
+        ));
 
         // Missing header
         let empty_headers = HashMap::new();
-        assert!(!Imposter::stub_matches(&stub, "GET", "/test", None, &empty_headers, None));
+        assert!(!Imposter::stub_matches(
+            &stub,
+            "GET",
+            "/test",
+            None,
+            &empty_headers,
+            None
+        ));
     }
 
     #[test]
@@ -3290,7 +3497,11 @@ mod tests {
                 "equals": {"body": "{\"key\": \"value\"}"}
             })],
             responses: vec![StubResponse::Is {
-                is: IsResponse { status_code: 200, headers: HashMap::new(), body: None },
+                is: IsResponse {
+                    status_code: 200,
+                    headers: HashMap::new(),
+                    body: None,
+                },
                 behaviors: None,
                 rift: None,
             }],
@@ -3299,8 +3510,22 @@ mod tests {
 
         let empty_headers = HashMap::new();
 
-        assert!(Imposter::stub_matches(&stub, "POST", "/test", None, &empty_headers, Some("{\"key\": \"value\"}")));
-        assert!(!Imposter::stub_matches(&stub, "POST", "/test", None, &empty_headers, Some("{\"other\": \"data\"}")));
+        assert!(Imposter::stub_matches(
+            &stub,
+            "POST",
+            "/test",
+            None,
+            &empty_headers,
+            Some("{\"key\": \"value\"}")
+        ));
+        assert!(!Imposter::stub_matches(
+            &stub,
+            "POST",
+            "/test",
+            None,
+            &empty_headers,
+            Some("{\"other\": \"data\"}")
+        ));
     }
 
     #[test]
@@ -3314,7 +3539,11 @@ mod tests {
                 }
             })],
             responses: vec![StubResponse::Is {
-                is: IsResponse { status_code: 200, headers: HashMap::new(), body: None },
+                is: IsResponse {
+                    status_code: 200,
+                    headers: HashMap::new(),
+                    body: None,
+                },
                 behaviors: None,
                 rift: None,
             }],
@@ -3325,17 +3554,45 @@ mod tests {
         headers.insert("Authorization".to_string(), "Bearer xyz".to_string());
 
         // All exist
-        assert!(Imposter::stub_matches(&stub, "POST", "/test", Some("token=abc"), &headers, Some("body content")));
+        assert!(Imposter::stub_matches(
+            &stub,
+            "POST",
+            "/test",
+            Some("token=abc"),
+            &headers,
+            Some("body content")
+        ));
 
         // Missing query param
-        assert!(!Imposter::stub_matches(&stub, "POST", "/test", None, &headers, Some("body content")));
+        assert!(!Imposter::stub_matches(
+            &stub,
+            "POST",
+            "/test",
+            None,
+            &headers,
+            Some("body content")
+        ));
 
         // Missing header
         let empty_headers = HashMap::new();
-        assert!(!Imposter::stub_matches(&stub, "POST", "/test", Some("token=abc"), &empty_headers, Some("body content")));
+        assert!(!Imposter::stub_matches(
+            &stub,
+            "POST",
+            "/test",
+            Some("token=abc"),
+            &empty_headers,
+            Some("body content")
+        ));
 
         // Missing body
-        assert!(!Imposter::stub_matches(&stub, "POST", "/test", Some("token=abc"), &headers, None));
+        assert!(!Imposter::stub_matches(
+            &stub,
+            "POST",
+            "/test",
+            Some("token=abc"),
+            &headers,
+            None
+        ));
     }
 
     #[test]
@@ -3345,7 +3602,11 @@ mod tests {
                 "exists": {"query": {"debug": false}}
             })],
             responses: vec![StubResponse::Is {
-                is: IsResponse { status_code: 200, headers: HashMap::new(), body: None },
+                is: IsResponse {
+                    status_code: 200,
+                    headers: HashMap::new(),
+                    body: None,
+                },
                 behaviors: None,
                 rift: None,
             }],
@@ -3355,9 +3616,30 @@ mod tests {
         let empty_headers = HashMap::new();
 
         // debug param should NOT exist
-        assert!(Imposter::stub_matches(&stub, "GET", "/test", None, &empty_headers, None));
-        assert!(Imposter::stub_matches(&stub, "GET", "/test", Some("other=value"), &empty_headers, None));
-        assert!(!Imposter::stub_matches(&stub, "GET", "/test", Some("debug=true"), &empty_headers, None));
+        assert!(Imposter::stub_matches(
+            &stub,
+            "GET",
+            "/test",
+            None,
+            &empty_headers,
+            None
+        ));
+        assert!(Imposter::stub_matches(
+            &stub,
+            "GET",
+            "/test",
+            Some("other=value"),
+            &empty_headers,
+            None
+        ));
+        assert!(!Imposter::stub_matches(
+            &stub,
+            "GET",
+            "/test",
+            Some("debug=true"),
+            &empty_headers,
+            None
+        ));
     }
 
     #[test]
@@ -3367,7 +3649,11 @@ mod tests {
                 "not": {"equals": {"method": "DELETE"}}
             })],
             responses: vec![StubResponse::Is {
-                is: IsResponse { status_code: 200, headers: HashMap::new(), body: None },
+                is: IsResponse {
+                    status_code: 200,
+                    headers: HashMap::new(),
+                    body: None,
+                },
                 behaviors: None,
                 rift: None,
             }],
@@ -3377,9 +3663,30 @@ mod tests {
         let empty_headers = HashMap::new();
 
         // Should match anything except DELETE
-        assert!(Imposter::stub_matches(&stub, "GET", "/test", None, &empty_headers, None));
-        assert!(Imposter::stub_matches(&stub, "POST", "/test", None, &empty_headers, None));
-        assert!(!Imposter::stub_matches(&stub, "DELETE", "/test", None, &empty_headers, None));
+        assert!(Imposter::stub_matches(
+            &stub,
+            "GET",
+            "/test",
+            None,
+            &empty_headers,
+            None
+        ));
+        assert!(Imposter::stub_matches(
+            &stub,
+            "POST",
+            "/test",
+            None,
+            &empty_headers,
+            None
+        ));
+        assert!(!Imposter::stub_matches(
+            &stub,
+            "DELETE",
+            "/test",
+            None,
+            &empty_headers,
+            None
+        ));
     }
 
     #[test]
@@ -3392,7 +3699,11 @@ mod tests {
                 ]
             })],
             responses: vec![StubResponse::Is {
-                is: IsResponse { status_code: 200, headers: HashMap::new(), body: None },
+                is: IsResponse {
+                    status_code: 200,
+                    headers: HashMap::new(),
+                    body: None,
+                },
                 behaviors: None,
                 rift: None,
             }],
@@ -3401,9 +3712,30 @@ mod tests {
 
         let empty_headers = HashMap::new();
 
-        assert!(Imposter::stub_matches(&stub, "GET", "/test", None, &empty_headers, None));
-        assert!(Imposter::stub_matches(&stub, "HEAD", "/test", None, &empty_headers, None));
-        assert!(!Imposter::stub_matches(&stub, "POST", "/test", None, &empty_headers, None));
+        assert!(Imposter::stub_matches(
+            &stub,
+            "GET",
+            "/test",
+            None,
+            &empty_headers,
+            None
+        ));
+        assert!(Imposter::stub_matches(
+            &stub,
+            "HEAD",
+            "/test",
+            None,
+            &empty_headers,
+            None
+        ));
+        assert!(!Imposter::stub_matches(
+            &stub,
+            "POST",
+            "/test",
+            None,
+            &empty_headers,
+            None
+        ));
     }
 
     #[test]
@@ -3416,7 +3748,11 @@ mod tests {
                 ]
             })],
             responses: vec![StubResponse::Is {
-                is: IsResponse { status_code: 200, headers: HashMap::new(), body: None },
+                is: IsResponse {
+                    status_code: 200,
+                    headers: HashMap::new(),
+                    body: None,
+                },
                 behaviors: None,
                 rift: None,
             }],
@@ -3425,9 +3761,30 @@ mod tests {
 
         let empty_headers = HashMap::new();
 
-        assert!(Imposter::stub_matches(&stub, "GET", "/api/users", None, &empty_headers, None));
-        assert!(!Imposter::stub_matches(&stub, "POST", "/api/users", None, &empty_headers, None));
-        assert!(!Imposter::stub_matches(&stub, "GET", "/other", None, &empty_headers, None));
+        assert!(Imposter::stub_matches(
+            &stub,
+            "GET",
+            "/api/users",
+            None,
+            &empty_headers,
+            None
+        ));
+        assert!(!Imposter::stub_matches(
+            &stub,
+            "POST",
+            "/api/users",
+            None,
+            &empty_headers,
+            None
+        ));
+        assert!(!Imposter::stub_matches(
+            &stub,
+            "GET",
+            "/other",
+            None,
+            &empty_headers,
+            None
+        ));
     }
 
     #[test]
@@ -3440,7 +3797,11 @@ mod tests {
                 }
             })],
             responses: vec![StubResponse::Is {
-                is: IsResponse { status_code: 200, headers: HashMap::new(), body: None },
+                is: IsResponse {
+                    status_code: 200,
+                    headers: HashMap::new(),
+                    body: None,
+                },
                 behaviors: None,
                 rift: None,
             }],
@@ -3449,10 +3810,38 @@ mod tests {
 
         let empty_headers = HashMap::new();
 
-        assert!(Imposter::stub_matches(&stub, "GET", "/api/v1/users", None, &empty_headers, None));
-        assert!(Imposter::stub_matches(&stub, "POST", "/api/v2/items", None, &empty_headers, None));
-        assert!(!Imposter::stub_matches(&stub, "DELETE", "/api/v1/users", None, &empty_headers, None));
-        assert!(!Imposter::stub_matches(&stub, "GET", "/other/path", None, &empty_headers, None));
+        assert!(Imposter::stub_matches(
+            &stub,
+            "GET",
+            "/api/v1/users",
+            None,
+            &empty_headers,
+            None
+        ));
+        assert!(Imposter::stub_matches(
+            &stub,
+            "POST",
+            "/api/v2/items",
+            None,
+            &empty_headers,
+            None
+        ));
+        assert!(!Imposter::stub_matches(
+            &stub,
+            "DELETE",
+            "/api/v1/users",
+            None,
+            &empty_headers,
+            None
+        ));
+        assert!(!Imposter::stub_matches(
+            &stub,
+            "GET",
+            "/other/path",
+            None,
+            &empty_headers,
+            None
+        ));
     }
 
     #[test]
@@ -3462,7 +3851,11 @@ mod tests {
                 "matches": {"body": "\"userId\":\\s*\"[a-f0-9-]+\""}
             })],
             responses: vec![StubResponse::Is {
-                is: IsResponse { status_code: 200, headers: HashMap::new(), body: None },
+                is: IsResponse {
+                    status_code: 200,
+                    headers: HashMap::new(),
+                    body: None,
+                },
                 behaviors: None,
                 rift: None,
             }],
@@ -3471,8 +3864,22 @@ mod tests {
 
         let empty_headers = HashMap::new();
 
-        assert!(Imposter::stub_matches(&stub, "POST", "/test", None, &empty_headers, Some(r#"{"userId": "abc-123-def"}"#)));
-        assert!(!Imposter::stub_matches(&stub, "POST", "/test", None, &empty_headers, Some(r#"{"userId": "invalid!"}"#)));
+        assert!(Imposter::stub_matches(
+            &stub,
+            "POST",
+            "/test",
+            None,
+            &empty_headers,
+            Some(r#"{"userId": "abc-123-def"}"#)
+        ));
+        assert!(!Imposter::stub_matches(
+            &stub,
+            "POST",
+            "/test",
+            None,
+            &empty_headers,
+            Some(r#"{"userId": "invalid!"}"#)
+        ));
     }
 
     #[test]
@@ -3483,7 +3890,11 @@ mod tests {
                 "caseSensitive": true
             })],
             responses: vec![StubResponse::Is {
-                is: IsResponse { status_code: 200, headers: HashMap::new(), body: None },
+                is: IsResponse {
+                    status_code: 200,
+                    headers: HashMap::new(),
+                    body: None,
+                },
                 behaviors: None,
                 rift: None,
             }],
@@ -3492,8 +3903,22 @@ mod tests {
 
         let empty_headers = HashMap::new();
 
-        assert!(Imposter::stub_matches(&stub, "GET", "/API/Users", None, &empty_headers, None));
-        assert!(!Imposter::stub_matches(&stub, "GET", "/api/users", None, &empty_headers, None));
+        assert!(Imposter::stub_matches(
+            &stub,
+            "GET",
+            "/API/Users",
+            None,
+            &empty_headers,
+            None
+        ));
+        assert!(!Imposter::stub_matches(
+            &stub,
+            "GET",
+            "/api/users",
+            None,
+            &empty_headers,
+            None
+        ));
     }
 
     #[test]
@@ -3504,7 +3929,11 @@ mod tests {
                 "except": "\\?.*$"  // Strip query string before matching
             })],
             responses: vec![StubResponse::Is {
-                is: IsResponse { status_code: 200, headers: HashMap::new(), body: None },
+                is: IsResponse {
+                    status_code: 200,
+                    headers: HashMap::new(),
+                    body: None,
+                },
                 behaviors: None,
                 rift: None,
             }],
@@ -3513,8 +3942,22 @@ mod tests {
 
         let empty_headers = HashMap::new();
 
-        assert!(Imposter::stub_matches(&stub, "GET", "/api/users", None, &empty_headers, None));
-        assert!(Imposter::stub_matches(&stub, "GET", "/api/users?page=1", None, &empty_headers, None));
+        assert!(Imposter::stub_matches(
+            &stub,
+            "GET",
+            "/api/users",
+            None,
+            &empty_headers,
+            None
+        ));
+        assert!(Imposter::stub_matches(
+            &stub,
+            "GET",
+            "/api/users?page=1",
+            None,
+            &empty_headers,
+            None
+        ));
     }
 
     #[test]
@@ -3533,7 +3976,11 @@ mod tests {
                 }),
             ],
             responses: vec![StubResponse::Is {
-                is: IsResponse { status_code: 200, headers: HashMap::new(), body: None },
+                is: IsResponse {
+                    status_code: 200,
+                    headers: HashMap::new(),
+                    body: None,
+                },
                 behaviors: None,
                 rift: None,
             }],
@@ -3623,12 +4070,18 @@ mod tests {
         assert_eq!(config.port, Some(8201));
         assert_eq!(config.protocol, "http");
         assert!(config.allow_cors);
-        assert_eq!(config.service_name, Some("LenderDetails_v1_lenders".to_string()));
+        assert_eq!(
+            config.service_name,
+            Some("LenderDetails_v1_lenders".to_string())
+        );
         assert!(config.service_info.is_some());
         assert_eq!(config.stubs.len(), 1);
 
         let stub = &config.stubs[0];
-        assert_eq!(stub.scenario_name, Some("LenderDetails-v1-lenders_Lender1".to_string()));
+        assert_eq!(
+            stub.scenario_name,
+            Some("LenderDetails-v1-lenders_Lender1".to_string())
+        );
         assert_eq!(stub.predicates.len(), 2);
 
         if let StubResponse::Is { is, behaviors, .. } = &stub.responses[0] {
@@ -3698,10 +4151,16 @@ mod tests {
         assert_eq!(config.stubs.len(), 2);
 
         // First stub should be Is
-        assert!(matches!(&config.stubs[0].responses[0], StubResponse::Is { .. }));
+        assert!(matches!(
+            &config.stubs[0].responses[0],
+            StubResponse::Is { .. }
+        ));
 
         // Second stub should be Proxy
-        assert!(matches!(&config.stubs[1].responses[0], StubResponse::Proxy { .. }));
+        assert!(matches!(
+            &config.stubs[1].responses[0],
+            StubResponse::Proxy { .. }
+        ));
     }
 
     #[test]
@@ -3711,7 +4170,11 @@ mod tests {
                 "contains": {"headers": {"Authorization": "Bearer"}}
             })],
             responses: vec![StubResponse::Is {
-                is: IsResponse { status_code: 200, headers: HashMap::new(), body: None },
+                is: IsResponse {
+                    status_code: 200,
+                    headers: HashMap::new(),
+                    body: None,
+                },
                 behaviors: None,
                 rift: None,
             }],
@@ -3719,14 +4182,26 @@ mod tests {
         };
 
         let mut headers = HashMap::new();
-        headers.insert("Authorization".to_string(), "Bearer abc123token".to_string());
+        headers.insert(
+            "Authorization".to_string(),
+            "Bearer abc123token".to_string(),
+        );
 
-        assert!(Imposter::stub_matches(&stub, "GET", "/", None, &headers, None));
+        assert!(Imposter::stub_matches(
+            &stub, "GET", "/", None, &headers, None
+        ));
 
         // Wrong token type
         let mut headers_basic = HashMap::new();
         headers_basic.insert("Authorization".to_string(), "Basic xyz".to_string());
-        assert!(!Imposter::stub_matches(&stub, "GET", "/", None, &headers_basic, None));
+        assert!(!Imposter::stub_matches(
+            &stub,
+            "GET",
+            "/",
+            None,
+            &headers_basic,
+            None
+        ));
     }
 
     #[test]
@@ -3736,7 +4211,11 @@ mod tests {
                 "startsWith": {"query": {"filter": "status_"}}
             })],
             responses: vec![StubResponse::Is {
-                is: IsResponse { status_code: 200, headers: HashMap::new(), body: None },
+                is: IsResponse {
+                    status_code: 200,
+                    headers: HashMap::new(),
+                    body: None,
+                },
                 behaviors: None,
                 rift: None,
             }],
@@ -3745,9 +4224,30 @@ mod tests {
 
         let empty_headers = HashMap::new();
 
-        assert!(Imposter::stub_matches(&stub, "GET", "/", Some("filter=status_active"), &empty_headers, None));
-        assert!(Imposter::stub_matches(&stub, "GET", "/", Some("filter=status_pending"), &empty_headers, None));
-        assert!(!Imposter::stub_matches(&stub, "GET", "/", Some("filter=type_user"), &empty_headers, None));
+        assert!(Imposter::stub_matches(
+            &stub,
+            "GET",
+            "/",
+            Some("filter=status_active"),
+            &empty_headers,
+            None
+        ));
+        assert!(Imposter::stub_matches(
+            &stub,
+            "GET",
+            "/",
+            Some("filter=status_pending"),
+            &empty_headers,
+            None
+        ));
+        assert!(!Imposter::stub_matches(
+            &stub,
+            "GET",
+            "/",
+            Some("filter=type_user"),
+            &empty_headers,
+            None
+        ));
     }
 
     #[test]
@@ -3757,7 +4257,11 @@ mod tests {
                 "endsWith": {"query": {"filename": ".json"}}
             })],
             responses: vec![StubResponse::Is {
-                is: IsResponse { status_code: 200, headers: HashMap::new(), body: None },
+                is: IsResponse {
+                    status_code: 200,
+                    headers: HashMap::new(),
+                    body: None,
+                },
                 behaviors: None,
                 rift: None,
             }],
@@ -3766,9 +4270,30 @@ mod tests {
 
         let empty_headers = HashMap::new();
 
-        assert!(Imposter::stub_matches(&stub, "GET", "/", Some("filename=data.json"), &empty_headers, None));
-        assert!(Imposter::stub_matches(&stub, "GET", "/", Some("filename=config.json"), &empty_headers, None));
-        assert!(!Imposter::stub_matches(&stub, "GET", "/", Some("filename=data.xml"), &empty_headers, None));
+        assert!(Imposter::stub_matches(
+            &stub,
+            "GET",
+            "/",
+            Some("filename=data.json"),
+            &empty_headers,
+            None
+        ));
+        assert!(Imposter::stub_matches(
+            &stub,
+            "GET",
+            "/",
+            Some("filename=config.json"),
+            &empty_headers,
+            None
+        ));
+        assert!(!Imposter::stub_matches(
+            &stub,
+            "GET",
+            "/",
+            Some("filename=data.xml"),
+            &empty_headers,
+            None
+        ));
     }
 
     #[test]
@@ -3778,7 +4303,11 @@ mod tests {
                 "matches": {"query": {"id": "^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$"}}
             })],
             responses: vec![StubResponse::Is {
-                is: IsResponse { status_code: 200, headers: HashMap::new(), body: None },
+                is: IsResponse {
+                    status_code: 200,
+                    headers: HashMap::new(),
+                    body: None,
+                },
                 behaviors: None,
                 rift: None,
             }],
@@ -3788,10 +4317,24 @@ mod tests {
         let empty_headers = HashMap::new();
 
         // Valid UUID
-        assert!(Imposter::stub_matches(&stub, "GET", "/", Some("id=550e8400-e29b-41d4-a716-446655440000"), &empty_headers, None));
+        assert!(Imposter::stub_matches(
+            &stub,
+            "GET",
+            "/",
+            Some("id=550e8400-e29b-41d4-a716-446655440000"),
+            &empty_headers,
+            None
+        ));
 
         // Invalid UUID
-        assert!(!Imposter::stub_matches(&stub, "GET", "/", Some("id=not-a-uuid"), &empty_headers, None));
+        assert!(!Imposter::stub_matches(
+            &stub,
+            "GET",
+            "/",
+            Some("id=not-a-uuid"),
+            &empty_headers,
+            None
+        ));
     }
 
     #[test]
@@ -3801,7 +4344,11 @@ mod tests {
                 "matches": {"headers": {"User-Agent": "Mozilla.*Firefox"}}
             })],
             responses: vec![StubResponse::Is {
-                is: IsResponse { status_code: 200, headers: HashMap::new(), body: None },
+                is: IsResponse {
+                    status_code: 200,
+                    headers: HashMap::new(),
+                    body: None,
+                },
                 behaviors: None,
                 rift: None,
             }],
@@ -3809,14 +4356,34 @@ mod tests {
         };
 
         let mut firefox_headers = HashMap::new();
-        firefox_headers.insert("User-Agent".to_string(), "Mozilla/5.0 (Windows NT 10.0; rv:91.0) Gecko/20100101 Firefox/91.0".to_string());
+        firefox_headers.insert(
+            "User-Agent".to_string(),
+            "Mozilla/5.0 (Windows NT 10.0; rv:91.0) Gecko/20100101 Firefox/91.0".to_string(),
+        );
 
-        assert!(Imposter::stub_matches(&stub, "GET", "/", None, &firefox_headers, None));
+        assert!(Imposter::stub_matches(
+            &stub,
+            "GET",
+            "/",
+            None,
+            &firefox_headers,
+            None
+        ));
 
         let mut chrome_headers = HashMap::new();
-        chrome_headers.insert("User-Agent".to_string(), "Mozilla/5.0 Chrome/96.0".to_string());
+        chrome_headers.insert(
+            "User-Agent".to_string(),
+            "Mozilla/5.0 Chrome/96.0".to_string(),
+        );
 
-        assert!(!Imposter::stub_matches(&stub, "GET", "/", None, &chrome_headers, None));
+        assert!(!Imposter::stub_matches(
+            &stub,
+            "GET",
+            "/",
+            None,
+            &chrome_headers,
+            None
+        ));
     }
 
     #[test]
@@ -3826,7 +4393,11 @@ mod tests {
                 "deepEquals": {"headers": {"Content-Type": "application/json"}}
             })],
             responses: vec![StubResponse::Is {
-                is: IsResponse { status_code: 200, headers: HashMap::new(), body: None },
+                is: IsResponse {
+                    status_code: 200,
+                    headers: HashMap::new(),
+                    body: None,
+                },
                 behaviors: None,
                 rift: None,
             }],
@@ -3837,14 +4408,28 @@ mod tests {
         let mut exact_headers = HashMap::new();
         exact_headers.insert("Content-Type".to_string(), "application/json".to_string());
 
-        assert!(Imposter::stub_matches(&stub, "POST", "/", None, &exact_headers, None));
+        assert!(Imposter::stub_matches(
+            &stub,
+            "POST",
+            "/",
+            None,
+            &exact_headers,
+            None
+        ));
 
         // Extra headers should fail deepEquals
         let mut extra_headers = HashMap::new();
         extra_headers.insert("Content-Type".to_string(), "application/json".to_string());
         extra_headers.insert("Accept".to_string(), "application/json".to_string());
 
-        assert!(!Imposter::stub_matches(&stub, "POST", "/", None, &extra_headers, None));
+        assert!(!Imposter::stub_matches(
+            &stub,
+            "POST",
+            "/",
+            None,
+            &extra_headers,
+            None
+        ));
     }
 
     #[test]
@@ -3862,7 +4447,11 @@ mod tests {
                 ]
             })],
             responses: vec![StubResponse::Is {
-                is: IsResponse { status_code: 200, headers: HashMap::new(), body: None },
+                is: IsResponse {
+                    status_code: 200,
+                    headers: HashMap::new(),
+                    body: None,
+                },
                 behaviors: None,
                 rift: None,
             }],
@@ -3872,19 +4461,54 @@ mod tests {
         let empty_headers = HashMap::new();
 
         // Should match: GET /api/users
-        assert!(Imposter::stub_matches(&stub, "GET", "/api/users", None, &empty_headers, None));
+        assert!(Imposter::stub_matches(
+            &stub,
+            "GET",
+            "/api/users",
+            None,
+            &empty_headers,
+            None
+        ));
 
         // Should match: POST /api/data
-        assert!(Imposter::stub_matches(&stub, "POST", "/api/data", None, &empty_headers, None));
+        assert!(Imposter::stub_matches(
+            &stub,
+            "POST",
+            "/api/data",
+            None,
+            &empty_headers,
+            None
+        ));
 
         // Should NOT match: DELETE /api/users
-        assert!(!Imposter::stub_matches(&stub, "DELETE", "/api/users", None, &empty_headers, None));
+        assert!(!Imposter::stub_matches(
+            &stub,
+            "DELETE",
+            "/api/users",
+            None,
+            &empty_headers,
+            None
+        ));
 
         // Should NOT match: GET /api/admin/config
-        assert!(!Imposter::stub_matches(&stub, "GET", "/api/admin/config", None, &empty_headers, None));
+        assert!(!Imposter::stub_matches(
+            &stub,
+            "GET",
+            "/api/admin/config",
+            None,
+            &empty_headers,
+            None
+        ));
 
         // Should NOT match: GET /other/path
-        assert!(!Imposter::stub_matches(&stub, "GET", "/other/path", None, &empty_headers, None));
+        assert!(!Imposter::stub_matches(
+            &stub,
+            "GET",
+            "/other/path",
+            None,
+            &empty_headers,
+            None
+        ));
     }
 
     #[test]
@@ -3933,7 +4557,10 @@ mod tests {
         assert_eq!(deserialized.allow_cors, original.allow_cors);
         assert_eq!(deserialized.service_name, original.service_name);
         assert_eq!(deserialized.stubs.len(), 1);
-        assert_eq!(deserialized.stubs[0].scenario_name, original.stubs[0].scenario_name);
+        assert_eq!(
+            deserialized.stubs[0].scenario_name,
+            original.stubs[0].scenario_name
+        );
     }
 
     // =============================================================================
@@ -4127,7 +4754,10 @@ mod tests {
         let error = ext.fault.unwrap().error.unwrap();
         assert_eq!(error.probability, 0.1);
         assert_eq!(error.status, 503);
-        assert_eq!(error.body, Some("Service temporarily unavailable".to_string()));
+        assert_eq!(
+            error.body,
+            Some("Service temporarily unavailable".to_string())
+        );
         assert_eq!(error.headers.get("Retry-After"), Some(&"30".to_string()));
     }
 
@@ -4274,7 +4904,10 @@ mod tests {
             assert_eq!(script.engine, "rhai");
             assert!(script.code.contains("let count"));
         } else {
-            panic!("Expected RiftScript response, got {:?}", config.stubs[0].responses[0]);
+            panic!(
+                "Expected RiftScript response, got {:?}",
+                config.stubs[0].responses[0]
+            );
         }
     }
 
@@ -4406,7 +5039,10 @@ mod tests {
         assert_eq!(config.stubs[0].predicates.len(), 2);
 
         // Response with both _behaviors and _rift
-        if let StubResponse::Is { behaviors, rift, .. } = &config.stubs[0].responses[0] {
+        if let StubResponse::Is {
+            behaviors, rift, ..
+        } = &config.stubs[0].responses[0]
+        {
             assert!(behaviors.is_some());
             assert!(rift.is_some());
         } else {
@@ -4484,7 +5120,9 @@ mod tests {
 
         let store = Imposter::create_flow_store(&config);
         // Test that the store works
-        store.set("test_flow", "counter", serde_json::json!(42)).unwrap();
+        store
+            .set("test_flow", "counter", serde_json::json!(42))
+            .unwrap();
         let value = store.get("test_flow", "counter").unwrap();
         assert_eq!(value, Some(serde_json::json!(42)));
     }
@@ -4713,7 +5351,10 @@ mod tests {
         assert!(result.is_some());
         let (_status, headers, body, _behaviors, _rift_ext, _is_fault) = result.unwrap();
         // Should auto-add Content-Type for JSON objects
-        assert_eq!(headers.get("Content-Type"), Some(&"application/json".to_string()));
+        assert_eq!(
+            headers.get("Content-Type"),
+            Some(&"application/json".to_string())
+        );
         assert!(body.contains("key"));
     }
 

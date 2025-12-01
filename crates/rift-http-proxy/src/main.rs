@@ -1,3 +1,6 @@
+// Allow dead_code for test targets - functions are used at runtime but not in tests
+#![allow(dead_code)]
+
 //! Rift HTTP Proxy - A Mountebank-compatible chaos engineering proxy
 //!
 //! Rift provides a Mountebank-compatible API with advanced features like:
