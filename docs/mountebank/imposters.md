@@ -115,9 +115,22 @@ Each stub contains predicates (matching rules) and responses:
 
 | Field | Type | Required | Description |
 |:------|:-----|:---------|:------------|
+| `id` | string | No | Unique identifier (Rift extension) |
 | `predicates` | array | No | Conditions to match requests |
 | `responses` | array | Yes | Responses to return |
 | `scenarioName` | string | No | Identifier for test scenarios |
+
+The `id` field is a **Rift extension** that allows you to identify stubs by name rather than index:
+
+```json
+{
+  "stubs": [{
+    "id": "get-user-success",
+    "predicates": [{ "equals": { "path": "/users/123" } }],
+    "responses": [{ "is": { "statusCode": 200, "body": "{\"id\": 123}" } }]
+  }]
+}
+```
 
 The `scenarioName` field is useful for organizing stubs into logical groups for testing:
 
@@ -290,6 +303,92 @@ Use EJS for dynamic configuration:
 
 ---
 
+## Stub Matching Behavior
+
+### First-Match-Wins
+
+Stubs are evaluated in order. The **first stub whose predicates match** is used:
+
+```json
+{
+  "stubs": [
+    {
+      "predicates": [{ "startsWith": { "path": "/api" } }],
+      "responses": [{ "is": { "body": "general" } }]
+    },
+    {
+      "predicates": [{ "equals": { "path": "/api/users" } }],
+      "responses": [{ "is": { "body": "specific" } }]
+    }
+  ]
+}
+```
+
+In this example, `/api/users` returns "general" because the first stub matches. To get "specific", swap the stub order.
+
+### Empty Predicates (Catch-All)
+
+A stub with empty predicates matches **all requests**:
+
+```json
+{
+  "stubs": [
+    { "predicates": [], "responses": [{ "is": { "body": "catch all" } }] }
+  ]
+}
+```
+
+**Warning**: A catch-all stub shadows all subsequent stubs. Place catch-all stubs last.
+
+### Index-Based Operations
+
+Stub indexes shift when stubs are added or removed:
+
+```
+Before: [Stub0, Stub1, Stub2]  (indexes 0, 1, 2)
+Delete index 0:
+After:  [Stub1, Stub2]         (indexes 0, 1)
+```
+
+---
+
+## Rift Stub Analysis (Rift Extension)
+
+Rift provides optional warnings for common stub configuration issues. These warnings appear in the API response under `_rift.warnings`:
+
+```bash
+curl http://localhost:2525/imposters/4545
+
+# Response includes:
+{
+  "port": 4545,
+  "stubs": [...],
+  "_rift": {
+    "warnings": [
+      {
+        "warningType": "catch_all_not_last",
+        "message": "Catch-all stub at index 0 will shadow 2 stub(s) after it",
+        "stubIndex": 0
+      }
+    ]
+  }
+}
+```
+
+### Warning Types
+
+| Type | Description |
+|:-----|:------------|
+| `duplicate_id` | Multiple stubs have the same ID |
+| `exact_duplicate` | Stub predicates are identical to another stub |
+| `potentially_shadowed` | Stub may be unreachable due to earlier stub |
+| `catch_all` | Stub with empty predicates matches all requests |
+| `catch_all_not_last` | Catch-all stub is not at the end of the list |
+
+**Note**: Mountebank does NOT provide overlap detection. These warnings are a Rift extension.
+
+---
+
 ## Best Practices
 
 1. **Use meaningful names** - Makes debugging easier
@@ -297,3 +396,5 @@ Use EJS for dynamic configuration:
 3. **Enable recording in tests** - Verify expected requests
 4. **Use default responses** - Clear error messages for unmatched requests
 5. **Separate imposters by service** - One imposter per external dependency
+6. **Place catch-all stubs last** - Avoid accidentally shadowing specific stubs
+7. **Use stub IDs** (Rift) - Easier to track and manage stubs by name

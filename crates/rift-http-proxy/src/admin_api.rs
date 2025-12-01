@@ -9,6 +9,7 @@
 //! The API listens on a configurable port (default: 2525).
 
 use crate::imposter::{ImposterConfig, ImposterError, ImposterManager, Stub};
+use crate::stub_analysis::{analyze_new_stub, analyze_stubs, StubWarning};
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
@@ -20,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 /// Admin API server for Rift
 pub struct AdminApiServer {
@@ -89,6 +90,19 @@ struct ImposterDetail {
     stubs: Vec<Stub>,
     #[serde(skip_serializing_if = "Option::is_none")]
     requests: Option<Vec<crate::imposter::RecordedRequest>>,
+    /// Rift extensions - includes stub analysis warnings
+    /// This field is NOT part of Mountebank's API
+    #[serde(rename = "_rift", skip_serializing_if = "Option::is_none")]
+    rift: Option<RiftImposterExtensions>,
+}
+
+/// Rift-specific extensions in API responses
+#[derive(Debug, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct RiftImposterExtensions {
+    /// Warnings from stub analysis
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    warnings: Vec<StubWarning>,
 }
 
 #[derive(Debug, Serialize)]
@@ -391,18 +405,40 @@ async fn handle_delete_all_imposters(manager: Arc<ImposterManager>) -> Response<
 async fn handle_get_imposter(port: u16, manager: Arc<ImposterManager>) -> Response<Full<Bytes>> {
     match manager.get_imposter(port) {
         Ok(imposter) => {
+            let stubs = imposter.get_stubs();
+
+            // Analyze stubs for potential issues (Rift extension)
+            let analysis = analyze_stubs(&stubs);
+            let rift_extensions = if analysis.has_warnings() {
+                // Log warnings for visibility
+                for warning in &analysis.warnings {
+                    warn!(
+                        port = port,
+                        warning_type = ?warning.warning_type,
+                        "Stub analysis warning: {}",
+                        warning.message
+                    );
+                }
+                Some(RiftImposterExtensions {
+                    warnings: analysis.warnings,
+                })
+            } else {
+                None
+            };
+
             let detail = ImposterDetail {
                 port: imposter.config.port.unwrap_or(port),
                 protocol: imposter.config.protocol.clone(),
                 name: imposter.config.name.clone(),
                 record_requests: imposter.config.record_requests,
                 number_of_requests: imposter.get_request_count(),
-                stubs: imposter.get_stubs(), // Use runtime stubs, not config
+                stubs,
                 requests: if imposter.config.record_requests {
                     Some(imposter.get_recorded_requests())
                 } else {
                     None
                 },
+                rift: rift_extensions,
             };
             json_response(StatusCode::OK, &detail)
         }
@@ -448,9 +484,27 @@ async fn handle_add_stub(
         }
     };
 
+    // Analyze the new stub against existing stubs before adding (Rift extension)
+    if let Ok(imposter) = manager.get_imposter(port) {
+        let existing_stubs = imposter.get_stubs();
+        let insert_index = add_req.index.unwrap_or(existing_stubs.len());
+        let analysis = analyze_new_stub(&existing_stubs, &add_req.stub, insert_index);
+
+        // Log warnings for visibility
+        for warning in &analysis.warnings {
+            warn!(
+                port = port,
+                stub_id = ?add_req.stub.id,
+                warning_type = ?warning.warning_type,
+                "New stub warning: {}",
+                warning.message
+            );
+        }
+    }
+
     match manager.add_stub(port, add_req.stub, add_req.index) {
         Ok(()) => {
-            // Return updated imposter
+            // Return updated imposter (includes all warnings in response)
             handle_get_imposter(port, manager).await
         }
         Err(ImposterError::NotFound(_)) => error_response(
@@ -483,6 +537,17 @@ async fn handle_replace_all_stubs(
             return error_response(StatusCode::BAD_REQUEST, &format!("Invalid stubs JSON: {e}"))
         }
     };
+
+    // Analyze the new stubs before replacing (Rift extension)
+    let analysis = analyze_stubs(&replace_req.stubs);
+    for warning in &analysis.warnings {
+        warn!(
+            port = port,
+            warning_type = ?warning.warning_type,
+            "Stub replacement warning: {}",
+            warning.message
+        );
+    }
 
     let imposter = match manager.get_imposter(port) {
         Ok(i) => i,
@@ -1035,6 +1100,7 @@ mod tests {
             number_of_requests: 100,
             stubs: vec![],
             requests: Some(vec![]),
+            rift: None,
         };
         let json = serde_json::to_string(&detail).unwrap();
         assert!(json.contains("\"port\":8080"));
@@ -1052,6 +1118,7 @@ mod tests {
             number_of_requests: 0,
             stubs: vec![],
             requests: None,
+            rift: None,
         };
         let json = serde_json::to_string(&detail).unwrap();
         // requests should be skipped when None

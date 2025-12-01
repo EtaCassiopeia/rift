@@ -33,6 +33,7 @@ mod recording;
 mod routing;
 mod rule_index;
 mod scripting;
+mod stub_analysis;
 mod template;
 
 use admin_api::AdminApiServer;

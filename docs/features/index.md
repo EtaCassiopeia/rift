@@ -27,6 +27,8 @@ Rift provides advanced features for service virtualization and chaos engineering
 - **Fault Injection** - Probabilistic latency, error, and TCP fault injection
 - **Scripting** - Rhai, Lua, and JavaScript engines for dynamic behavior
 - **Flow State** - Stateful scenarios with InMemory or Redis backends
+- **Stub Analysis** - Overlap detection and conflict warnings
+- **Debug Mode** - Request matching diagnostics with `X-Rift-Debug` header
 - **Metrics** - Prometheus integration
 
 ---
@@ -43,6 +45,9 @@ Rift provides advanced features for service virtualization and chaos engineering
 | Probabilistic Faults | Via injection | ✅ `_rift.fault` |
 | Rhai/Lua Scripting | — | ✅ `_rift.script` |
 | Flow State | Via injection | ✅ `_rift.flowState` |
+| Stub Analysis | — | ✅ `_rift.warnings` |
+| Stub IDs | — | ✅ `id` field |
+| Debug Mode | — | ✅ `X-Rift-Debug` header |
 | Prometheus Metrics | ✅ | ✅ |
 
 ---
@@ -51,5 +56,7 @@ Rift provides advanced features for service virtualization and chaos engineering
 
 - [Fault Injection]({{ site.baseurl }}/features/fault-injection/) - Latency and error simulation
 - [Scripting]({{ site.baseurl }}/features/scripting/) - Dynamic behavior with scripts
+- [Stub Analysis]({{ site.baseurl }}/features/stub-analysis/) - Overlap detection and warnings
+- [Debug Mode]({{ site.baseurl }}/features/debug-mode/) - Request matching diagnostics
 - [TLS/HTTPS]({{ site.baseurl }}/features/tls/) - Secure connections
 - [Metrics]({{ site.baseurl }}/features/metrics/) - Prometheus monitoring

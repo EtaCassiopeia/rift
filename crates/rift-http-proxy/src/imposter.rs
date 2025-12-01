@@ -64,10 +64,99 @@ pub struct RecordedRequest {
     pub timestamp: String,
 }
 
-/// Stub definition (Mountebank-compatible)
+// ============================================================================
+// Debug Mode Structures (Rift Extension)
+// ============================================================================
+
+/// Debug response for X-Rift-Debug header (Rift extension)
+/// Returns match information instead of executing the response
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DebugResponse {
+    pub debug: bool,
+    pub request: DebugRequest,
+    pub imposter: DebugImposter,
+    pub match_result: DebugMatchResult,
+}
+
+/// Debug request information
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DebugRequest {
+    pub method: String,
+    pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
+    pub headers: HashMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+}
+
+/// Debug imposter information
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DebugImposter {
+    pub port: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub protocol: String,
+    pub stub_count: usize,
+}
+
+/// Debug match result
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DebugMatchResult {
+    pub matched: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stub_index: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stub_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub predicates: Option<Vec<serde_json::Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_preview: Option<DebugResponsePreview>,
+    /// All stubs for inspection when no match found
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub all_stubs: Option<Vec<DebugStubInfo>>,
+    /// Reason for no match
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// Debug response preview (subset of actual response)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DebugResponsePreview {
+    pub response_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_code: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub headers: Option<HashMap<String, String>>,
+    /// Truncated body preview (first 500 chars)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body_preview: Option<String>,
+}
+
+/// Debug stub info for listing all stubs
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DebugStubInfo {
+    pub index: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    pub predicates: Vec<serde_json::Value>,
+    pub response_count: usize,
+}
+
+/// Stub definition (Mountebank-compatible with Rift extensions)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Stub {
+    /// Optional unique identifier for the stub (Rift extension)
+    /// Useful for targeting specific stubs for updates/deletion without relying on index
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     #[serde(default)]
     pub predicates: Vec<serde_json::Value>,
     pub responses: Vec<StubResponse>,
@@ -790,6 +879,148 @@ impl Imposter {
             }
         }
         None
+    }
+
+    /// Get all stubs info for debug purposes (Rift extension)
+    pub fn get_all_stubs_info(&self) -> Vec<DebugStubInfo> {
+        let stubs = self.stubs.read();
+        stubs
+            .iter()
+            .enumerate()
+            .map(|(index, stub)| DebugStubInfo {
+                index,
+                id: stub.id.clone(),
+                predicates: stub.predicates.clone(),
+                response_count: stub.responses.len(),
+            })
+            .collect()
+    }
+
+    /// Get imposter info for debug purposes (Rift extension)
+    pub fn get_debug_imposter_info(&self) -> DebugImposter {
+        let stubs = self.stubs.read();
+        DebugImposter {
+            port: self.config.port.unwrap_or(0),
+            name: self.config.name.clone(),
+            protocol: self.config.protocol.clone(),
+            stub_count: stubs.len(),
+        }
+    }
+
+    /// Create response preview from a stub (Rift extension)
+    pub fn get_response_preview(&self, stub: &Stub, stub_index: usize) -> DebugResponsePreview {
+        if stub.responses.is_empty() {
+            return DebugResponsePreview {
+                response_type: "unknown".to_string(),
+                status_code: None,
+                headers: None,
+                body_preview: None,
+            };
+        }
+
+        // Get the current response from the cycler
+        let rule_id = format!("stub_{stub_index}");
+        let response_index = self
+            .response_cycler
+            .peek_response_index(&rule_id, stub.responses.len());
+
+        if let Some(response) = stub.responses.get(response_index) {
+            return Self::create_response_preview(response);
+        }
+
+        // Fallback to first response
+        if let Some(response) = stub.responses.first() {
+            return Self::create_response_preview(response);
+        }
+
+        DebugResponsePreview {
+            response_type: "unknown".to_string(),
+            status_code: None,
+            headers: None,
+            body_preview: None,
+        }
+    }
+
+    /// Create response preview from a StubResponse
+    fn create_response_preview(response: &StubResponse) -> DebugResponsePreview {
+        match response {
+            StubResponse::Is { is, .. } => {
+                let body_preview = is.body.as_ref().map(|b| match b {
+                    serde_json::Value::String(s) => {
+                        if s.len() > 500 {
+                            format!("{}...", &s[..500])
+                        } else {
+                            s.clone()
+                        }
+                    }
+                    other => {
+                        let json = serde_json::to_string(other).unwrap_or_default();
+                        if json.len() > 500 {
+                            format!("{}...", &json[..500])
+                        } else {
+                            json
+                        }
+                    }
+                });
+                let headers = if is.headers.is_empty() {
+                    None
+                } else {
+                    Some(
+                        is.headers
+                            .iter()
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect(),
+                    )
+                };
+                DebugResponsePreview {
+                    response_type: "is".to_string(),
+                    status_code: Some(is.status_code),
+                    headers,
+                    body_preview,
+                }
+            }
+            StubResponse::Proxy { proxy, .. } => DebugResponsePreview {
+                response_type: "proxy".to_string(),
+                status_code: None,
+                headers: None,
+                body_preview: Some(format!("Proxy to: {}", proxy.to)),
+            },
+            StubResponse::Inject { inject, .. } => DebugResponsePreview {
+                response_type: "inject".to_string(),
+                status_code: None,
+                headers: None,
+                body_preview: Some(format!(
+                    "JavaScript inject: {}...",
+                    if inject.len() > 50 {
+                        &inject[..50]
+                    } else {
+                        inject
+                    }
+                )),
+            },
+            StubResponse::Fault { fault, .. } => DebugResponsePreview {
+                response_type: "fault".to_string(),
+                status_code: None,
+                headers: None,
+                body_preview: Some(format!("Fault: {fault}")),
+            },
+            StubResponse::RiftScript { rift } => {
+                // RiftScript uses the _rift extension namespace
+                let script_info = if rift.script.is_some() {
+                    "Rift script response"
+                } else if rift.fault.is_some() {
+                    "Rift fault injection"
+                } else {
+                    "Rift extension response"
+                };
+                DebugResponsePreview {
+                    response_type: "_rift".to_string(),
+                    status_code: None,
+                    headers: None,
+                    body_preview: Some(script_info.to_string()),
+                }
+            }
+        }
     }
 
     /// Convert hyper HeaderMap to HashMap<String, String>
@@ -1722,6 +1953,7 @@ impl Imposter {
         };
 
         Stub {
+            id: None,
             predicates,
             responses: vec![StubResponse::Is {
                 is: is_response,
@@ -2334,6 +2566,93 @@ async fn handle_imposter_request(
         Some(query_str.as_str())
     };
 
+    // Check for X-Rift-Debug header (Rift extension)
+    // If present, return match information instead of processing the request
+    let is_debug_mode = headers_clone
+        .get("X-Rift-Debug")
+        .or_else(|| headers_clone.get("x-rift-debug"))
+        .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
+        .unwrap_or(false);
+
+    if is_debug_mode {
+        debug!("Debug mode enabled for request {} {}", method_str, path_str);
+
+        // Build debug request info
+        let debug_request = DebugRequest {
+            method: method.clone(),
+            path: path.clone(),
+            query: if query_str.is_empty() {
+                None
+            } else {
+                Some(query_str.clone())
+            },
+            headers: headers_clone
+                .iter()
+                .filter(|(k, _)| !k.eq_ignore_ascii_case("x-rift-debug"))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+            body: body_string.clone(),
+        };
+
+        // Get imposter info
+        let debug_imposter = imposter.get_debug_imposter_info();
+
+        // Find matching stub for debug info
+        let match_result = if let Some((stub, stub_index)) = imposter.find_matching_stub(
+            method_str,
+            path_str,
+            &headers_for_context,
+            query_opt,
+            body_string.as_deref(),
+        ) {
+            // Match found
+            let response_preview = imposter.get_response_preview(&stub, stub_index);
+            DebugMatchResult {
+                matched: true,
+                stub_index: Some(stub_index),
+                stub_id: stub.id.clone(),
+                predicates: Some(stub.predicates.clone()),
+                response_preview: Some(response_preview),
+                all_stubs: None,
+                reason: None,
+            }
+        } else {
+            // No match - return all stubs for inspection
+            let all_stubs = imposter.get_all_stubs_info();
+            let reason = if all_stubs.is_empty() {
+                "No stubs configured for this imposter".to_string()
+            } else {
+                "No stub predicates matched the request".to_string()
+            };
+            DebugMatchResult {
+                matched: false,
+                stub_index: None,
+                stub_id: None,
+                predicates: None,
+                response_preview: None,
+                all_stubs: Some(all_stubs),
+                reason: Some(reason),
+            }
+        };
+
+        let debug_response = DebugResponse {
+            debug: true,
+            request: debug_request,
+            imposter: debug_imposter,
+            match_result,
+        };
+
+        let json_body = serde_json::to_string_pretty(&debug_response)
+            .unwrap_or_else(|_| r#"{"error": "Failed to serialize debug response"}"#.to_string());
+
+        return Ok(Response::builder()
+            .status(StatusCode::OK)
+            .header("Content-Type", "application/json")
+            .header("X-Rift-Debug-Response", "true")
+            .body(Full::new(Bytes::from(json_body)))
+            .unwrap());
+    }
+
     if let Some((stub, stub_index)) = imposter.find_matching_stub(
         method_str,
         path_str,
@@ -2847,6 +3166,7 @@ mod tests {
     #[test]
     fn test_predicate_matching() {
         let stub = Stub {
+            id: None,
             predicates: vec![serde_json::json!({
                 "equals": {
                     "method": "GET",
@@ -2921,6 +3241,7 @@ mod tests {
         let imposter = Imposter::new(config);
 
         let stub = Stub {
+            id: None,
             predicates: vec![],
             responses: vec![StubResponse::Is {
                 is: IsResponse {
@@ -3177,6 +3498,7 @@ mod tests {
     #[test]
     fn test_predicate_ends_with() {
         let stub = Stub {
+            id: None,
             predicates: vec![serde_json::json!({
                 "endsWith": {"path": "-details"}
             })],
@@ -3234,6 +3556,7 @@ mod tests {
     #[test]
     fn test_predicate_deep_equals_method() {
         let stub = Stub {
+            id: None,
             predicates: vec![serde_json::json!({
                 "deepEquals": {"method": "GET"}
             })],
@@ -3280,6 +3603,7 @@ mod tests {
     #[test]
     fn test_predicate_deep_equals_body() {
         let stub = Stub {
+            id: None,
             predicates: vec![serde_json::json!({
                 "deepEquals": {"body": ""}
             })],
@@ -3329,6 +3653,7 @@ mod tests {
     #[test]
     fn test_predicate_deep_equals_path() {
         let stub = Stub {
+            id: None,
             predicates: vec![serde_json::json!({
                 "deepEquals": {"path": "/kaizen/auto/financing/lender-information/lenders"}
             })],
@@ -3367,6 +3692,7 @@ mod tests {
     #[test]
     fn test_predicate_contains_query() {
         let stub = Stub {
+            id: None,
             predicates: vec![serde_json::json!({
                 "contains": {"query": {"lenderIds": "CofTest"}}
             })],
@@ -3432,6 +3758,7 @@ mod tests {
     #[test]
     fn test_predicate_equals_headers() {
         let stub = Stub {
+            id: None,
             predicates: vec![serde_json::json!({
                 "equals": {"headers": {"Content-Type": "application/json"}}
             })],
@@ -3493,6 +3820,7 @@ mod tests {
     #[test]
     fn test_predicate_equals_body() {
         let stub = Stub {
+            id: None,
             predicates: vec![serde_json::json!({
                 "equals": {"body": "{\"key\": \"value\"}"}
             })],
@@ -3531,6 +3859,7 @@ mod tests {
     #[test]
     fn test_predicate_exists() {
         let stub = Stub {
+            id: None,
             predicates: vec![serde_json::json!({
                 "exists": {
                     "query": {"token": true},
@@ -3598,6 +3927,7 @@ mod tests {
     #[test]
     fn test_predicate_exists_false() {
         let stub = Stub {
+            id: None,
             predicates: vec![serde_json::json!({
                 "exists": {"query": {"debug": false}}
             })],
@@ -3645,6 +3975,7 @@ mod tests {
     #[test]
     fn test_predicate_logical_not() {
         let stub = Stub {
+            id: None,
             predicates: vec![serde_json::json!({
                 "not": {"equals": {"method": "DELETE"}}
             })],
@@ -3692,6 +4023,7 @@ mod tests {
     #[test]
     fn test_predicate_logical_or() {
         let stub = Stub {
+            id: None,
             predicates: vec![serde_json::json!({
                 "or": [
                     {"equals": {"method": "GET"}},
@@ -3741,6 +4073,7 @@ mod tests {
     #[test]
     fn test_predicate_logical_and() {
         let stub = Stub {
+            id: None,
             predicates: vec![serde_json::json!({
                 "and": [
                     {"equals": {"method": "GET"}},
@@ -3790,6 +4123,7 @@ mod tests {
     #[test]
     fn test_predicate_matches_regex_all_fields() {
         let stub = Stub {
+            id: None,
             predicates: vec![serde_json::json!({
                 "matches": {
                     "path": "^/api/v[0-9]+/",
@@ -3847,6 +4181,7 @@ mod tests {
     #[test]
     fn test_predicate_matches_body_regex() {
         let stub = Stub {
+            id: None,
             predicates: vec![serde_json::json!({
                 "matches": {"body": "\"userId\":\\s*\"[a-f0-9-]+\""}
             })],
@@ -3885,6 +4220,7 @@ mod tests {
     #[test]
     fn test_predicate_case_sensitive() {
         let stub = Stub {
+            id: None,
             predicates: vec![serde_json::json!({
                 "equals": {"path": "/API/Users"},
                 "caseSensitive": true
@@ -3924,6 +4260,7 @@ mod tests {
     #[test]
     fn test_predicate_except_pattern() {
         let stub = Stub {
+            id: None,
             predicates: vec![serde_json::json!({
                 "equals": {"path": "/api/users"},
                 "except": "\\?.*$"  // Strip query string before matching
@@ -3964,6 +4301,7 @@ mod tests {
     fn test_predicate_complex_mountebank_format() {
         // Test the exact format from user's JSON
         let stub = Stub {
+            id: None,
             predicates: vec![
                 serde_json::json!({
                     "endsWith": {"path": "lender-details"}
@@ -4166,6 +4504,7 @@ mod tests {
     #[test]
     fn test_predicate_contains_in_headers() {
         let stub = Stub {
+            id: None,
             predicates: vec![serde_json::json!({
                 "contains": {"headers": {"Authorization": "Bearer"}}
             })],
@@ -4207,6 +4546,7 @@ mod tests {
     #[test]
     fn test_predicate_starts_with_in_query() {
         let stub = Stub {
+            id: None,
             predicates: vec![serde_json::json!({
                 "startsWith": {"query": {"filter": "status_"}}
             })],
@@ -4253,6 +4593,7 @@ mod tests {
     #[test]
     fn test_predicate_ends_with_in_query() {
         let stub = Stub {
+            id: None,
             predicates: vec![serde_json::json!({
                 "endsWith": {"query": {"filename": ".json"}}
             })],
@@ -4299,6 +4640,7 @@ mod tests {
     #[test]
     fn test_predicate_matches_regex_in_query() {
         let stub = Stub {
+            id: None,
             predicates: vec![serde_json::json!({
                 "matches": {"query": {"id": "^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$"}}
             })],
@@ -4340,6 +4682,7 @@ mod tests {
     #[test]
     fn test_predicate_matches_regex_in_headers() {
         let stub = Stub {
+            id: None,
             predicates: vec![serde_json::json!({
                 "matches": {"headers": {"User-Agent": "Mozilla.*Firefox"}}
             })],
@@ -4389,6 +4732,7 @@ mod tests {
     #[test]
     fn test_predicate_deep_equals_headers() {
         let stub = Stub {
+            id: None,
             predicates: vec![serde_json::json!({
                 "deepEquals": {"headers": {"Content-Type": "application/json"}}
             })],
@@ -4436,6 +4780,7 @@ mod tests {
     fn test_complex_nested_logical_predicates() {
         // Complex: (GET OR POST) AND (/api/* path) AND NOT (/api/admin/*)
         let stub = Stub {
+            id: None,
             predicates: vec![serde_json::json!({
                 "and": [
                     {"or": [
@@ -4531,6 +4876,7 @@ mod tests {
             name: Some("test".to_string()),
             record_requests: false,
             stubs: vec![Stub {
+                id: None,
                 predicates: vec![serde_json::json!({"equals": {"path": "/test"}})],
                 responses: vec![StubResponse::Is {
                     is: IsResponse {
@@ -5178,6 +5524,7 @@ mod tests {
         let imposter = Imposter::new(config);
 
         let stub = Stub {
+            id: None,
             predicates: vec![],
             responses: vec![StubResponse::Is {
                 is: IsResponse {
@@ -5218,6 +5565,7 @@ mod tests {
         let imposter = Imposter::new(config);
 
         let stub = Stub {
+            id: None,
             predicates: vec![],
             responses: vec![StubResponse::Is {
                 is: IsResponse {
@@ -5276,6 +5624,7 @@ mod tests {
         let imposter = Imposter::new(config);
 
         let stub = Stub {
+            id: None,
             predicates: vec![],
             responses: vec![StubResponse::Fault {
                 fault: "CONNECTION_RESET_BY_PEER".to_string(),
@@ -5308,6 +5657,7 @@ mod tests {
         let imposter = Imposter::new(config);
 
         let stub = Stub {
+            id: None,
             predicates: vec![],
             responses: vec![],
             scenario_name: None,
@@ -5334,6 +5684,7 @@ mod tests {
         let imposter = Imposter::new(config);
 
         let stub = Stub {
+            id: None,
             predicates: vec![],
             responses: vec![StubResponse::Is {
                 is: IsResponse {
@@ -5379,6 +5730,7 @@ mod tests {
         let imposter = Imposter::new(config);
 
         let stub = Stub {
+            id: None,
             predicates: vec![],
             responses: vec![StubResponse::RiftScript {
                 rift: RiftResponseExtension {
@@ -5416,6 +5768,7 @@ mod tests {
         let imposter = Imposter::new(config);
 
         let stub = Stub {
+            id: None,
             predicates: vec![],
             responses: vec![StubResponse::Is {
                 is: IsResponse {
@@ -5847,6 +6200,7 @@ mod tests {
         let imposter = Imposter::new(config);
 
         let stub = Stub {
+            id: None,
             predicates: vec![],
             responses: vec![
                 StubResponse::Is {

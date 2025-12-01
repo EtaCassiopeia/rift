@@ -13,6 +13,7 @@ pub mod predicate;
 pub mod recording;
 pub mod routing;
 pub mod rule_index;
+pub mod stub_analysis;
 pub mod template;
 
 // Don't export internal modules
