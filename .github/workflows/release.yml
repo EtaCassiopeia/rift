@@ -105,11 +105,15 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install cross-compilation tools
-        if: matrix.cross
+      - name: Install cross-compilation tools (non-musl)
+        if: matrix.cross && !contains(matrix.target, 'musl')
         uses: taiki-e/setup-cross-toolchain-action@v1
         with:
           target: ${{ matrix.target }}
+
+      - name: Install cross (for musl targets)
+        if: matrix.cross && contains(matrix.target, 'musl')
+        uses: taiki-e/install-action@cross
 
       # Install LuaJIT on native Linux/macOS builds
       - name: Install LuaJIT (Ubuntu)
@@ -137,8 +141,9 @@ jobs:
       - name: Build release binary
         shell: bash
         run: |
-          if [ "${{ matrix.cross }}" = "true" ]; then
-            cargo build --release --package rift-http-proxy --target ${{ matrix.target }} --features ${{ matrix.features }}
+          if [[ "${{ matrix.target }}" == *"musl"* ]]; then
+            # Use cross for musl targets (provides proper toolchain in Docker)
+            cross build --release --package rift-http-proxy --target ${{ matrix.target }} --features ${{ matrix.features }}
           else
             cargo build --release --package rift-http-proxy --target ${{ matrix.target }} --features ${{ matrix.features }}
           fi

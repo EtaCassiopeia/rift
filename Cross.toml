@@ -1,0 +1,18 @@
+# Cross compilation configuration for musl targets
+# See: https://github.com/cross-rs/cross
+
+[build.env]
+passthrough = [
+    "RUST_BACKTRACE",
+    "CARGO_TERM_COLOR",
+]
+
+# x86_64 musl target configuration
+[target.x86_64-unknown-linux-musl]
+# Use the default cross image which includes proper musl toolchain
+image = "ghcr.io/cross-rs/x86_64-unknown-linux-musl:main"
+
+# aarch64 musl target configuration
+[target.aarch64-unknown-linux-musl]
+# Use the default cross image which includes proper musl toolchain
+image = "ghcr.io/cross-rs/aarch64-unknown-linux-musl:main"
