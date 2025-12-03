@@ -95,6 +95,19 @@ jobs:
             echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
           fi
 
+      - name: Update Cargo.toml version
+        shell: bash
+        run: |
+          # Extract version number (remove 'v' prefix if present)
+          VERSION="${{ steps.version.outputs.VERSION }}"
+          VERSION="${VERSION#v}"
+          echo "Setting version to: $VERSION"
+          # Update workspace version in root Cargo.toml
+          sed -i.bak 's/^version = ".*"/version = "'"$VERSION"'"/' Cargo.toml
+          rm -f Cargo.toml.bak
+          # Verify the change
+          grep 'version = ' Cargo.toml | head -1
+
       # Select Xcode 15.x to avoid ring 0.17.14 compilation issues with Xcode 16.x
       - name: Select Xcode (macOS 13)
         if: matrix.os == 'macos-13'
