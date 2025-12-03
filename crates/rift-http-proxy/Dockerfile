@@ -29,8 +29,9 @@ COPY Cargo.lock* ./
 COPY crates/rift-http-proxy/Cargo.toml ./crates/rift-http-proxy/
 
 # Create dummy source files to build dependencies
-RUN mkdir -p crates/rift-http-proxy/src crates/rift-http-proxy/benches && \
+RUN mkdir -p crates/rift-http-proxy/src/bin crates/rift-http-proxy/benches && \
     echo "fn main() {}" > crates/rift-http-proxy/src/main.rs && \
+    echo "fn main() {}" > crates/rift-http-proxy/src/bin/verify.rs && \
     echo "fn main() {}" > crates/rift-http-proxy/benches/matcher_bench.rs && \
     cargo build --release --locked --package rift-http-proxy --features ${FEATURES} && \
     rm -rf crates/*/src crates/*/benches

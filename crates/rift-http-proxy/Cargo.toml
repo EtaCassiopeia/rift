@@ -100,6 +100,10 @@ redis-backend = ["redis", "r2d2"]
 lua = ["mlua"]
 javascript = ["boa_engine"]
 
+[[bin]]
+name = "rift-verify"
+path = "src/bin/verify.rs"
+
 [[bench]]
 name = "matcher_bench"
 harness = false
