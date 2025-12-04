@@ -19,6 +19,7 @@
 use clap::Parser;
 use reqwest::Client;
 use serde::Deserialize;
+use similar::{ChangeTag, TextDiff};
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -63,6 +64,10 @@ struct Args {
     /// Skip stubs with inject/proxy/script responses (can't verify dynamically generated responses)
     #[arg(long, default_value = "true")]
     skip_dynamic: bool,
+
+    /// Run a demo showing enhanced error output examples
+    #[arg(long)]
+    demo: bool,
 }
 
 // ============================================================================
@@ -134,6 +139,7 @@ struct TestResult {
     actual_body: Option<String>,
     error: Option<String>,
     duration_ms: u128,
+    failure_reasons: Vec<FailureReason>,
 }
 
 #[derive(Debug, Default)]
@@ -147,6 +153,63 @@ struct VerificationSummary {
     failures: Vec<FailureDetails>,
 }
 
+/// Categorizes the specific reason why a verification failed
+#[derive(Debug)]
+enum FailureReason {
+    /// HTTP request failed (connection refused, timeout, etc.)
+    RequestError(String),
+    /// Status code mismatch
+    StatusMismatch { expected: u16, actual: u16 },
+    /// Expected header is missing from the response
+    HeaderMissing { header_name: String },
+    /// Header value doesn't match
+    HeaderMismatch {
+        header_name: String,
+        expected: String,
+        actual: String,
+    },
+    /// Response body doesn't match expected
+    BodyMismatch { expected: String, actual: String },
+    /// Expected body but got none
+    BodyMissing { expected: String },
+}
+
+impl FailureReason {
+    /// Returns a human-readable hint explaining what went wrong
+    fn hint(&self) -> String {
+        match self {
+            FailureReason::RequestError(err) => {
+                if err.contains("Connection refused") {
+                    "Hint: The imposter may not be running. Check that Rift is started and the imposter is created.".to_string()
+                } else if err.contains("timed out") {
+                    "Hint: Request timed out. The server may be slow or unresponsive. Try increasing --timeout.".to_string()
+                } else {
+                    format!("Hint: HTTP request failed - {err}")
+                }
+            }
+            FailureReason::StatusMismatch { expected, actual } => {
+                match *actual {
+                    404 => format!("Hint: Got 404 instead of {expected}. The stub predicate may not match the test request path/method."),
+                    500 => format!("Hint: Got 500 instead of {expected}. Check server logs for errors."),
+                    _ => format!("Hint: Expected status {expected} but got {actual}. Verify the stub response configuration."),
+                }
+            }
+            FailureReason::HeaderMissing { header_name } => {
+                format!("Hint: Expected header '{header_name}' is missing from the response. Add it to the stub's response headers.")
+            }
+            FailureReason::HeaderMismatch { header_name, expected, actual } => {
+                format!("Hint: Header '{header_name}' has wrong value.\n       Expected: \"{expected}\"\n       Actual:   \"{actual}\"")
+            }
+            FailureReason::BodyMismatch { .. } => {
+                "Hint: Response body doesn't match. See diff below for details.".to_string()
+            }
+            FailureReason::BodyMissing { .. } => {
+                "Hint: Expected a response body but got an empty response.".to_string()
+            }
+        }
+    }
+}
+
 #[derive(Debug)]
 struct FailureDetails {
     imposter_port: u16,
@@ -157,6 +220,7 @@ struct FailureDetails {
     expected: String,
     actual: String,
     curl_command: Option<String>,
+    failure_reasons: Vec<FailureReason>,
 }
 
 // ============================================================================
@@ -170,6 +234,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = Client::builder()
         .timeout(Duration::from_secs(args.timeout))
         .build()?;
+
+    // Check if demo mode
+    if args.demo {
+        demo_enhanced_error_output();
+        return Ok(());
+    }
 
     println!("{BOLD}{CYAN}Rift Stub Verifier{RESET}");
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
@@ -292,6 +362,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             )
                         },
                         curl_command: Some(generate_curl_command(imposter.port, &test_case)),
+                        failure_reasons: result.failure_reasons,
                     };
 
                     println!(
@@ -307,6 +378,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         test_case.method,
                         test_case.path
                     );
+
+                    // Show enhanced error details inline when verbose
+                    if args.verbose && !failure.failure_reasons.is_empty() {
+                        println!("   {BOLD}Why it failed:{RESET}");
+                        for reason in &failure.failure_reasons {
+                            print_failure_reason(reason);
+                        }
+                    }
 
                     summary.failures.push(failure);
                 }
@@ -794,7 +873,7 @@ async fn execute_test(client: &Client, imposter_port: u16, test_case: &TestCase)
             let duration_ms = start.elapsed().as_millis();
 
             // Verify response
-            let success = verify_response(
+            let verify_result = verify_response(
                 test_case.expected_status,
                 &test_case.expected_headers,
                 &test_case.expected_body,
@@ -802,6 +881,9 @@ async fn execute_test(client: &Client, imposter_port: u16, test_case: &TestCase)
                 &headers,
                 &body_text,
             );
+
+            let success = verify_result.is_success();
+            let failure_reasons = verify_result.failure_reasons();
 
             TestResult {
                 test_case: test_case.clone(),
@@ -811,17 +893,42 @@ async fn execute_test(client: &Client, imposter_port: u16, test_case: &TestCase)
                 actual_body: body_text,
                 error: None,
                 duration_ms,
+                failure_reasons,
             }
         }
-        Err(e) => TestResult {
-            test_case: test_case.clone(),
-            success: false,
-            actual_status: None,
-            actual_headers: None,
-            actual_body: None,
-            error: Some(e.to_string()),
-            duration_ms: start.elapsed().as_millis(),
-        },
+        Err(e) => {
+            let error_msg = e.to_string();
+            TestResult {
+                test_case: test_case.clone(),
+                success: false,
+                actual_status: None,
+                actual_headers: None,
+                actual_body: None,
+                error: Some(error_msg.clone()),
+                duration_ms: start.elapsed().as_millis(),
+                failure_reasons: vec![FailureReason::RequestError(error_msg)],
+            }
+        }
+    }
+}
+
+/// Result of verification - either success or a list of failure reasons
+#[derive(Debug)]
+enum VerifyResult {
+    Success,
+    Failed(Vec<FailureReason>),
+}
+
+impl VerifyResult {
+    fn is_success(&self) -> bool {
+        matches!(self, VerifyResult::Success)
+    }
+
+    fn failure_reasons(self) -> Vec<FailureReason> {
+        match self {
+            VerifyResult::Success => vec![],
+            VerifyResult::Failed(reasons) => reasons,
+        }
     }
 }
 
@@ -832,10 +939,15 @@ fn verify_response(
     actual_status: u16,
     actual_headers: &HashMap<String, String>,
     actual_body: &Option<String>,
-) -> bool {
+) -> VerifyResult {
+    let mut failures = Vec::new();
+
     // Check status code
     if expected_status != actual_status {
-        return false;
+        failures.push(FailureReason::StatusMismatch {
+            expected: expected_status,
+            actual: actual_status,
+        });
     }
 
     // Check expected headers (actual may have more headers, that's ok)
@@ -846,37 +958,70 @@ fn verify_response(
             .find(|(k, _)| k.to_lowercase() == name_lower)
             .map(|(_, v)| v);
 
-        if actual_value != Some(expected_value) {
-            return false;
+        match actual_value {
+            None => {
+                failures.push(FailureReason::HeaderMissing {
+                    header_name: name.clone(),
+                });
+            }
+            Some(actual) if actual != expected_value => {
+                failures.push(FailureReason::HeaderMismatch {
+                    header_name: name.clone(),
+                    expected: expected_value.clone(),
+                    actual: actual.clone(),
+                });
+            }
+            _ => {}
         }
     }
 
     // Check body if expected
     if let Some(expected) = expected_body {
-        let actual = match actual_body {
-            Some(text) => text,
-            None => return false,
-        };
+        let expected_str = format_json_for_diff(expected);
 
-        // Try JSON comparison first
-        if let Ok(actual_json) = serde_json::from_str::<serde_json::Value>(actual) {
-            // For JSON, do deep comparison
-            if !json_matches(expected, &actual_json) {
-                return false;
+        match actual_body {
+            None => {
+                failures.push(FailureReason::BodyMissing {
+                    expected: expected_str,
+                });
             }
-        } else {
-            // For string comparison
-            let expected_str = match expected {
-                serde_json::Value::String(s) => s.as_str(),
-                _ => return false,
-            };
-            if actual != expected_str {
-                return false;
+            Some(actual_text) => {
+                // Try JSON comparison first
+                if let Ok(actual_json) = serde_json::from_str::<serde_json::Value>(actual_text) {
+                    // For JSON, do deep comparison
+                    if !json_matches(expected, &actual_json) {
+                        failures.push(FailureReason::BodyMismatch {
+                            expected: expected_str,
+                            actual: format_json_for_diff(&actual_json),
+                        });
+                    }
+                } else {
+                    // For string comparison
+                    let expected_plain = match expected {
+                        serde_json::Value::String(s) => s.as_str(),
+                        _ => &expected_str,
+                    };
+                    if actual_text != expected_plain {
+                        failures.push(FailureReason::BodyMismatch {
+                            expected: expected_plain.to_string(),
+                            actual: actual_text.clone(),
+                        });
+                    }
+                }
             }
         }
     }
 
-    true
+    if failures.is_empty() {
+        VerifyResult::Success
+    } else {
+        VerifyResult::Failed(failures)
+    }
+}
+
+/// Pretty-print JSON for diff display
+fn format_json_for_diff(value: &serde_json::Value) -> String {
+    serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
 }
 
 fn json_matches(expected: &serde_json::Value, actual: &serde_json::Value) -> bool {
@@ -984,6 +1129,15 @@ fn print_summary(summary: &VerificationSummary, show_curl: bool) {
                     println!("   Curl:     {curl}");
                 }
             }
+
+            // Print failure reasons with hints
+            if !failure.failure_reasons.is_empty() {
+                println!();
+                println!("   {BOLD}Why it failed:{RESET}");
+                for reason in &failure.failure_reasons {
+                    print_failure_reason(reason);
+                }
+            }
         }
         println!();
     }
@@ -997,4 +1151,160 @@ fn print_summary(summary: &VerificationSummary, show_curl: bool) {
             RED, summary.failed, RESET
         );
     }
+}
+
+/// Print a single failure reason with hint and optional diff
+fn print_failure_reason(reason: &FailureReason) {
+    match reason {
+        FailureReason::StatusMismatch { expected, actual } => {
+            println!("   - {YELLOW}Status mismatch:{RESET} expected {GREEN}{expected}{RESET}, got {RED}{actual}{RESET}");
+            println!("     {DIM}{}{RESET}", reason.hint());
+        }
+        FailureReason::HeaderMissing { header_name } => {
+            println!("   - {YELLOW}Missing header:{RESET} '{header_name}'");
+            println!("     {DIM}{}{RESET}", reason.hint());
+        }
+        FailureReason::HeaderMismatch {
+            header_name,
+            expected,
+            actual,
+        } => {
+            println!("   - {YELLOW}Header mismatch:{RESET} '{header_name}'");
+            println!("     Expected: {GREEN}\"{expected}\"{RESET}");
+            println!("     Actual:   {RED}\"{actual}\"{RESET}");
+        }
+        FailureReason::BodyMissing { expected } => {
+            println!("   - {YELLOW}Missing body:{RESET} expected response body but got none");
+            println!("     {DIM}{}{RESET}", reason.hint());
+            println!("     Expected body:");
+            for line in expected.lines().take(10) {
+                println!("       {GREEN}{line}{RESET}");
+            }
+            if expected.lines().count() > 10 {
+                println!(
+                    "       {DIM}... ({} more lines){RESET}",
+                    expected.lines().count() - 10
+                );
+            }
+        }
+        FailureReason::BodyMismatch { expected, actual } => {
+            println!("   - {YELLOW}Body mismatch:{RESET}");
+            println!("     {DIM}{}{RESET}", reason.hint());
+            print_diff(expected, actual);
+        }
+        FailureReason::RequestError(err) => {
+            println!("   - {YELLOW}Request error:{RESET} {err}");
+            println!("     {DIM}{}{RESET}", reason.hint());
+        }
+    }
+}
+
+/// Print a unified diff between expected and actual content
+fn print_diff(expected: &str, actual: &str) {
+    println!("     {DIM}Diff ({GREEN}-expected{DIM}, {RED}+actual{DIM}):{RESET}");
+
+    let diff = TextDiff::from_lines(expected, actual);
+
+    for change in diff.iter_all_changes() {
+        let (sign, color) = match change.tag() {
+            ChangeTag::Delete => ("-", GREEN),
+            ChangeTag::Insert => ("+", RED),
+            ChangeTag::Equal => (" ", RESET),
+        };
+
+        // Only show context and changes, skip too many equal lines
+        if change.tag() == ChangeTag::Equal {
+            print!(
+                "     {DIM}{sign} {}{RESET}",
+                change.value().trim_end_matches('\n')
+            );
+        } else {
+            print!(
+                "     {color}{sign} {}{RESET}",
+                change.value().trim_end_matches('\n')
+            );
+        }
+        println!();
+    }
+}
+
+// ============================================================================
+// Demo/Test Function for Enhanced Error Output
+// ============================================================================
+
+/// Demonstrates the enhanced error output by printing sample failure scenarios.
+/// Run with: cargo run --bin rift-verify -- --demo
+#[allow(dead_code)]
+fn demo_enhanced_error_output() {
+    println!("{BOLD}{CYAN}Enhanced Error Reporting Demo{RESET}");
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    println!();
+
+    // Demo 1: Status Mismatch
+    println!("{BOLD}1. Status Code Mismatch:{RESET}");
+    let status_fail = FailureReason::StatusMismatch {
+        expected: 200,
+        actual: 404,
+    };
+    print_failure_reason(&status_fail);
+    println!();
+
+    // Demo 2: Header Missing
+    println!("{BOLD}2. Missing Header:{RESET}");
+    let header_missing = FailureReason::HeaderMissing {
+        header_name: "X-Request-Id".to_string(),
+    };
+    print_failure_reason(&header_missing);
+    println!();
+
+    // Demo 3: Header Mismatch
+    println!("{BOLD}3. Header Value Mismatch:{RESET}");
+    let header_mismatch = FailureReason::HeaderMismatch {
+        header_name: "Content-Type".to_string(),
+        expected: "application/json".to_string(),
+        actual: "text/plain".to_string(),
+    };
+    print_failure_reason(&header_mismatch);
+    println!();
+
+    // Demo 4: Body Mismatch with Diff
+    println!("{BOLD}4. JSON Body Mismatch (with diff):{RESET}");
+    let expected_json = r#"{
+  "users": [
+    {"id": 1, "name": "Alice"},
+    {"id": 2, "name": "Bob"}
+  ],
+  "total": 2
+}"#;
+    let actual_json = r#"{
+  "users": [
+    {"id": 1, "name": "Alice"},
+    {"id": 3, "name": "Charlie"}
+  ],
+  "total": 2,
+  "extra": "unexpected"
+}"#;
+    let body_mismatch = FailureReason::BodyMismatch {
+        expected: expected_json.to_string(),
+        actual: actual_json.to_string(),
+    };
+    print_failure_reason(&body_mismatch);
+    println!();
+
+    // Demo 5: Connection Error
+    println!("{BOLD}5. Connection Error:{RESET}");
+    let conn_error = FailureReason::RequestError("Connection refused (os error 61)".to_string());
+    print_failure_reason(&conn_error);
+    println!();
+
+    // Demo 6: Body Missing
+    println!("{BOLD}6. Missing Response Body:{RESET}");
+    let body_missing = FailureReason::BodyMissing {
+        expected: r#"{"status": "ok"}"#.to_string(),
+    };
+    print_failure_reason(&body_missing);
+    println!();
+
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    println!("{GREEN}Demo complete!{RESET}");
 }

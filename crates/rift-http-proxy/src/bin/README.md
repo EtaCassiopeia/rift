@@ -60,6 +60,7 @@ rift-verify -p 4545 --show-curl --verbose
 | `--timeout <SECS>` | `-t` | Request timeout in seconds | `10` |
 | `--dry-run` | | Show tests without executing | `false` |
 | `--skip-dynamic` | | Skip inject/proxy/script stubs | `true` |
+| `--demo` | | Show enhanced error output examples | `false` |
 | `--help` | `-h` | Print help information | |
 | `--version` | `-V` | Print version | |
 
@@ -102,3 +103,32 @@ By default, stubs with dynamic or stateful responses are skipped because their o
 - **repeat behavior**: Stubs with `_behaviors.repeat` (stateful)
 
 Use `--skip-dynamic=false` to attempt verification of these stubs (results may be unpredictable).
+
+### Enhanced Error Reporting
+
+When verification fails, the tool provides detailed diagnostics:
+
+- **Failure categorization**: Status mismatch, header mismatch, body mismatch, connection errors
+- **Contextual hints**: Actionable suggestions based on the failure type
+- **Unified diff**: For body mismatches, shows a line-by-line diff highlighting differences
+
+Example failure output:
+```
+FAIL Stub #0 [user-api] - GET /api/users
+
+   Why it failed:
+   - Status mismatch: expected 200, got 404
+     Hint: Got 404 instead of 200. The stub predicate may not match the test request path/method.
+   - Body mismatch:
+     Hint: Response body doesn't match. See diff below for details.
+     Diff (-expected, +actual):
+       {
+         "users": [
+           {"id": 1, "name": "Alice"},
+     -     {"id": 2, "name": "Bob"}
+     +     {"id": 3, "name": "Charlie"}
+         ]
+       }
+```
+
+Run `rift-verify --demo` to see examples of all failure types and their enhanced output.
