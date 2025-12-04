@@ -50,7 +50,8 @@ Feature: Proxy Mode Compatibility
       """
     When I send GET request to "/test" on imposter 4545
     And I send GET request to "/test" on imposter 4545
-    Then backend should receive only 1 request on both services
+    # Backend receives 1 request per service on first call (MB + Rift both proxy to same backend)
+    Then backend should receive only 2 requests on both services
     And both requests to imposter should return same response
 
   Scenario: proxyAlways mode always forwards to backend
@@ -72,7 +73,8 @@ Feature: Proxy Mode Compatibility
       """
     When I send GET request to "/test" on imposter 4545
     And I send GET request to "/test" on imposter 4545
-    Then backend should receive 2 requests on both services
+    # Backend receives 2 requests per service (MB + Rift both proxy to same backend)
+    Then backend should receive 4 requests on both services
 
   Scenario: proxyTransparent mode does not save responses
     Given a backend server running on port 4546
@@ -382,9 +384,10 @@ Feature: Proxy Mode Compatibility
     Then both services should have recorded 1 request
 
   # ==========================================================================
-  # pathRewrite - Path Transformation
+  # pathRewrite - Path Transformation (Rift extension)
   # ==========================================================================
 
+  @rift-only
   Scenario: pathRewrite removes path prefix when proxying
     Given a backend server that echoes path on port 4546
     And an imposter on port 4545 with proxy:
@@ -410,6 +413,7 @@ Feature: Proxy Mode Compatibility
     Then both services should return status 200
     And backend should receive path "/users" on both services
 
+  @rift-only
   Scenario: pathRewrite replaces path prefix
     Given a backend server that echoes path on port 4546
     And an imposter on port 4545 with proxy:
@@ -435,6 +439,7 @@ Feature: Proxy Mode Compatibility
     Then both services should return status 200
     And backend should receive path "/new-api/resource" on both services
 
+  @rift-only
   Scenario: pathRewrite does not modify non-matching paths
     Given a backend server that echoes path on port 4546
     And an imposter on port 4545 with proxy:

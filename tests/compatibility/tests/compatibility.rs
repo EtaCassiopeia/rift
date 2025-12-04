@@ -47,8 +47,9 @@ async fn main() {
                 .assert_normalized(),
         )
         .filter_run("features/", |_, _, sc| {
-            // Skip scenarios tagged with @skip
-            !sc.tags.iter().any(|t| t == "skip")
+            // Skip scenarios tagged with @skip or @rift-only
+            // @rift-only scenarios test Rift-specific features that Mountebank doesn't support
+            !sc.tags.iter().any(|t| t == "skip" || t == "rift-only")
         })
         .await;
 }

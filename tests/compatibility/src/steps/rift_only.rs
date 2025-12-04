@@ -49,13 +49,10 @@ async fn clear_rift_imposters(world: &mut CompatibilityWorld) {
 async fn create_rift_imposter(world: &mut CompatibilityWorld, port: u16, step: &Step) {
     let config = step.docstring().expect("Missing docstring").to_string();
 
-    // Apply port offset to the imposter config
-    // This is needed because get_imposter_url adds PORT_OFFSET when making requests
-    let mut json: serde_json::Value = serde_json::from_str(&config)
+    // Don't adjust port - both services create at the same port numbers
+    // Docker port mapping handles the offset for access (host 5545 -> container 4545)
+    let json: serde_json::Value = serde_json::from_str(&config)
         .expect("Invalid JSON in imposter config");
-    if let Some(obj) = json.as_object_mut() {
-        obj.insert("port".to_string(), serde_json::json!(port + crate::world::PORT_OFFSET));
-    }
 
     world.client
         .post(format!("{}/imposters", world.config.rift_admin_url))
@@ -256,11 +253,7 @@ async fn send_post_with_header_to_rift(world: &mut CompatibilityWorld, header: S
 // Then Steps
 // ==========================================================================
 
-#[then(expr = "Rift should return status {int}")]
-async fn check_rift_status(world: &mut CompatibilityWorld, expected: u16) {
-    let response = world.last_response.as_ref().expect("No response recorded");
-    assert_eq!(response.rift_status, expected, "Rift status mismatch: expected {}, got {}", expected, response.rift_status);
-}
+// Note: "Rift should return status" step is defined in then.rs
 
 #[then(expr = "Rift response body should be {string}")]
 async fn check_rift_body(world: &mut CompatibilityWorld, expected: String) {

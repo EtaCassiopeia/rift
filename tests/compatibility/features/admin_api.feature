@@ -217,6 +217,7 @@ Feature: Admin API Compatibility
   # GET /imposters/:port/stubs - List All Stubs
   # ==========================================================================
 
+  @rift-only
   Scenario: Get all stubs for an imposter
     Given an imposter on port 4545 with stubs:
       """
@@ -238,6 +239,7 @@ Feature: Admin API Compatibility
   # GET /imposters/:port/stubs/:index - Get Single Stub
   # ==========================================================================
 
+  @rift-only
   Scenario: Get stub by index
     Given an imposter on port 4545 with stubs:
       """

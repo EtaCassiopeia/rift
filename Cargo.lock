@@ -2682,6 +2682,7 @@ dependencies = [
  "anyhow",
  "assert-json-diff",
  "async-trait",
+ "base64 0.22.1",
  "boa_engine",
  "bytes",
  "chrono",
