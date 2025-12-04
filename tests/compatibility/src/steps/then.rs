@@ -841,6 +841,30 @@ async fn check_mb_status(world: &mut CompatibilityWorld, expected: u16) {
     assert_eq!(response.mb_status, expected, "Mountebank status mismatch");
 }
 
+#[then(expr = "Rift should return status {int}")]
+async fn check_rift_status(world: &mut CompatibilityWorld, expected: u16) {
+    let response = world.last_response.as_ref().expect("No response recorded");
+    assert_eq!(response.rift_status, expected, "Rift status mismatch");
+}
+
+#[then(expr = "GET {string} on imposter {int} should return {string} on Rift")]
+async fn check_rift_imposter_response(
+    world: &mut CompatibilityWorld,
+    path: String,
+    port: u16,
+    expected: String,
+) {
+    let response = world
+        .send_to_rift_imposter(port, "GET", &path, None)
+        .await
+        .expect("Failed to send request to Rift imposter");
+    assert_eq!(
+        response.trim(),
+        expected,
+        "Rift response mismatch"
+    );
+}
+
 #[then(regex = r#"^backend should receive path "([^"]+)" on both services$"#)]
 async fn check_backend_received_path(world: &mut CompatibilityWorld, expected_path: String) {
     let response = world.last_response.as_ref().expect("No response recorded");

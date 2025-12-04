@@ -215,7 +215,7 @@ async fn handle_admin_request(
 
         // Individual imposter endpoints
         _ if path.starts_with("/imposters/") => {
-            handle_imposter_routes(&method, &path, req, &base_url, manager).await
+            handle_imposter_routes(&method, &path, query.as_deref(), req, &base_url, manager).await
         }
 
         // Health and metrics
@@ -240,6 +240,7 @@ async fn handle_admin_request(
 async fn handle_imposter_routes(
     method: &Method,
     path: &str,
+    query: Option<&str>,
     req: Request<Incoming>,
     base_url: &str,
     manager: Arc<ImposterManager>,
@@ -257,7 +258,9 @@ async fn handle_imposter_routes(
 
     match (method, parts.as_slice()) {
         // GET /imposters/:port
-        (&Method::GET, ["imposters", _]) => handle_get_imposter(port, base_url, manager).await,
+        (&Method::GET, ["imposters", _]) => {
+            handle_get_imposter(port, query, base_url, manager).await
+        }
 
         // DELETE /imposters/:port
         (&Method::DELETE, ["imposters", _]) => {
@@ -366,8 +369,13 @@ async fn handle_create_imposter(
     match manager.create_imposter(config).await {
         Ok(assigned_port) => {
             info!("Created imposter on port {}", assigned_port);
-            // Return the full imposter details (like Mountebank does)
-            handle_get_imposter(assigned_port, base_url, manager).await
+            // Return the full imposter details with 201 Created (like Mountebank does)
+            let response = handle_get_imposter(assigned_port, None, base_url, manager).await;
+            // Modify the status code to 201 Created
+            let (parts, body) = response.into_parts();
+            let mut new_parts = parts;
+            new_parts.status = StatusCode::CREATED;
+            Response::from_parts(new_parts, body)
         }
         Err(ImposterError::PortInUse(p)) => error_response(
             StatusCode::BAD_REQUEST,
@@ -384,21 +392,75 @@ async fn handle_create_imposter(
     }
 }
 
+/// Query parameters for imposter endpoints
+#[derive(Debug, Default)]
+struct ImposterQueryParams {
+    replayable: bool,
+    remove_proxies: bool,
+}
+
+/// Parse query parameters from query string
+fn parse_imposter_query_params(query: Option<&str>) -> ImposterQueryParams {
+    let mut params = ImposterQueryParams::default();
+    if let Some(q) = query {
+        params.replayable = q.contains("replayable=true");
+        params.remove_proxies = q.contains("removeProxies=true");
+    }
+    params
+}
+
+/// Filter out proxy responses from stubs (for removeProxies query param)
+fn filter_proxy_responses(config: &ImposterConfig) -> ImposterConfig {
+    let mut filtered = config.clone();
+    filtered.stubs = config
+        .stubs
+        .iter()
+        .filter_map(|stub| {
+            // Filter out stubs that only have proxy responses
+            let non_proxy_responses: Vec<_> = stub
+                .responses
+                .iter()
+                .filter(|r| !matches!(r, crate::imposter::StubResponse::Proxy { .. }))
+                .cloned()
+                .collect();
+
+            if non_proxy_responses.is_empty() {
+                // Skip stubs that only had proxy responses
+                None
+            } else {
+                Some(crate::imposter::Stub {
+                    id: stub.id.clone(),
+                    predicates: stub.predicates.clone(),
+                    responses: non_proxy_responses,
+                    scenario_name: stub.scenario_name.clone(),
+                })
+            }
+        })
+        .collect();
+    filtered
+}
+
 /// GET /imposters - List all imposters
 async fn handle_list_imposters(
     manager: Arc<ImposterManager>,
     query: Option<&str>,
     base_url: &str,
 ) -> Response<Full<Bytes>> {
-    let replayable = query
-        .map(|q| q.contains("replayable=true"))
-        .unwrap_or(false);
-
+    let params = parse_imposter_query_params(query);
     let imposters = manager.list_imposters();
 
-    if replayable {
-        // Return full imposter configs
-        let configs: Vec<ImposterConfig> = imposters.iter().map(|i| i.config.clone()).collect();
+    if params.replayable {
+        // Return full imposter configs (optionally with proxies removed)
+        let configs: Vec<ImposterConfig> = imposters
+            .iter()
+            .map(|i| {
+                if params.remove_proxies {
+                    filter_proxy_responses(&i.config)
+                } else {
+                    i.config.clone()
+                }
+            })
+            .collect();
         let body = serde_json::json!({ "imposters": configs });
         json_response(StatusCode::OK, &body)
     } else {
@@ -483,12 +545,41 @@ async fn handle_delete_all_imposters(
 /// GET /imposters/:port - Get a specific imposter
 async fn handle_get_imposter(
     port: u16,
+    query: Option<&str>,
     base_url: &str,
     manager: Arc<ImposterManager>,
 ) -> Response<Full<Bytes>> {
+    let params = parse_imposter_query_params(query);
+
     match manager.get_imposter(port) {
         Ok(imposter) => {
-            let stubs = imposter.get_stubs();
+            let mut stubs = imposter.get_stubs();
+
+            // Apply removeProxies filter if requested
+            if params.remove_proxies {
+                stubs = stubs
+                    .into_iter()
+                    .filter_map(|stub| {
+                        let non_proxy_responses: Vec<_> = stub
+                            .responses
+                            .iter()
+                            .filter(|r| !matches!(r, crate::imposter::StubResponse::Proxy { .. }))
+                            .cloned()
+                            .collect();
+
+                        if non_proxy_responses.is_empty() {
+                            None
+                        } else {
+                            Some(crate::imposter::Stub {
+                                id: stub.id,
+                                predicates: stub.predicates,
+                                responses: non_proxy_responses,
+                                scenario_name: stub.scenario_name,
+                            })
+                        }
+                    })
+                    .collect();
+            }
 
             // Analyze stubs for potential issues (Rift extension)
             let analysis = analyze_stubs(&stubs);
@@ -620,7 +711,7 @@ async fn handle_add_stub(
     match manager.add_stub(port, add_req.stub, add_req.index) {
         Ok(()) => {
             // Return updated imposter (includes all warnings in response)
-            handle_get_imposter(port, base_url, manager).await
+            handle_get_imposter(port, None, base_url, manager).await
         }
         Err(ImposterError::NotFound(_)) => error_response(
             StatusCode::NOT_FOUND,
@@ -685,7 +776,7 @@ async fn handle_replace_all_stubs(
         }
     }
 
-    handle_get_imposter(port, base_url, manager).await
+    handle_get_imposter(port, None, base_url, manager).await
 }
 
 /// PUT /imposters/:port/stubs/:index - Replace a specific stub
@@ -709,7 +800,7 @@ async fn handle_replace_stub(
     };
 
     match manager.replace_stub(port, index, stub) {
-        Ok(()) => handle_get_imposter(port, base_url, manager).await,
+        Ok(()) => handle_get_imposter(port, None, base_url, manager).await,
         Err(ImposterError::NotFound(_)) => error_response(
             StatusCode::NOT_FOUND,
             &format!("Imposter not found on port {port}"),
@@ -729,7 +820,7 @@ async fn handle_delete_stub(
     manager: Arc<ImposterManager>,
 ) -> Response<Full<Bytes>> {
     match manager.delete_stub(port, index) {
-        Ok(()) => handle_get_imposter(port, base_url, manager).await,
+        Ok(()) => handle_get_imposter(port, None, base_url, manager).await,
         Err(ImposterError::NotFound(_)) => error_response(
             StatusCode::NOT_FOUND,
             &format!("Imposter not found on port {port}"),
@@ -808,7 +899,7 @@ async fn handle_clear_requests(
         Ok(imposter) => {
             imposter.clear_recorded_requests();
             // Return full imposter detail (like Mountebank does)
-            handle_get_imposter(port, base_url, manager).await
+            handle_get_imposter(port, None, base_url, manager).await
         }
         Err(ImposterError::NotFound(_)) => error_response(
             StatusCode::NOT_FOUND,
@@ -961,7 +1052,7 @@ async fn handle_clear_proxy_responses(
         Ok(imposter) => {
             imposter.clear_proxy_responses();
             // Return full imposter detail (like Mountebank does)
-            handle_get_imposter(port, base_url, manager).await
+            handle_get_imposter(port, None, base_url, manager).await
         }
         Err(ImposterError::NotFound(_)) => error_response(
             StatusCode::NOT_FOUND,

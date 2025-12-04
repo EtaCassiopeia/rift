@@ -17,6 +17,7 @@ use crate::recording::{ProxyMode, RecordedResponse, RecordingStore, RequestSigna
 #[cfg(feature = "javascript")]
 use crate::scripting::{execute_mountebank_inject, MountebankRequest};
 use crate::scripting::{FaultDecision, ScriptEngine, ScriptRequest};
+use base64::Engine;
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
@@ -233,6 +234,9 @@ struct IsResponseRaw {
     headers: HashMap<String, String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     body: Option<serde_json::Value>,
+    /// Response mode: "text" (default) or "binary" (body is base64-encoded)
+    #[serde(rename = "_mode", default)]
+    mode: ResponseMode,
 }
 
 fn default_status_code_raw() -> u16 {
@@ -272,6 +276,7 @@ impl From<StubResponseRaw> for StubResponse {
                     status_code: is_raw.status_code,
                     headers: is_raw.headers,
                     body: is_raw.body,
+                    mode: is_raw.mode,
                 },
                 behaviors,
                 rift: raw.rift,
@@ -292,6 +297,7 @@ impl From<StubResponseRaw> for StubResponse {
                     status_code: 200,
                     headers: HashMap::new(),
                     body: None,
+                    mode: ResponseMode::Text,
                 },
                 behaviors: None,
                 rift: None,
@@ -312,6 +318,7 @@ impl From<StubResponse> for StubResponseRaw {
                     status_code: is.status_code,
                     headers: is.headers,
                     body: is.body,
+                    mode: is.mode,
                 }),
                 proxy: None,
                 inject: None,
@@ -400,7 +407,18 @@ impl HasRepeatBehavior for StubResponse {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Response mode for body handling (Mountebank compatible)
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum ResponseMode {
+    /// Body is UTF-8 text (default)
+    #[default]
+    Text,
+    /// Body is base64-encoded binary data
+    Binary,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct IsResponse {
     #[serde(default = "default_status_code")]
@@ -409,6 +427,13 @@ pub struct IsResponse {
     pub headers: HashMap<String, String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body: Option<serde_json::Value>,
+    /// Response mode: "text" (default) or "binary" (body is base64-encoded)
+    #[serde(rename = "_mode", default, skip_serializing_if = "is_text_mode")]
+    pub mode: ResponseMode,
+}
+
+fn is_text_mode(mode: &ResponseMode) -> bool {
+    *mode == ResponseMode::Text
 }
 
 fn default_status_code() -> u16 {
@@ -444,18 +469,25 @@ pub struct ProxyResponse {
 }
 
 /// Configuration for creating an imposter
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ImposterConfig {
     /// Port for the imposter. If not specified, an available port will be auto-assigned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
+    /// Host/IP address to bind the imposter to. Defaults to "0.0.0.0" (all interfaces).
+    /// Use "127.0.0.1" or "localhost" for local-only access.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
     #[serde(default = "default_protocol")]
     pub protocol: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(default)]
     pub record_requests: bool,
+    /// Record which stub matched each request (Mountebank compatible)
+    #[serde(default)]
+    pub record_matches: bool,
     #[serde(default)]
     pub stubs: Vec<Stub>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -883,11 +915,75 @@ impl Imposter {
         query: Option<&str>,
         body: Option<&str>,
     ) -> Option<(Stub, usize)> {
+        // Call the extended version with no client info (backward compatible)
+        self.find_matching_stub_with_client(method, path, headers, query, body, None, None)
+    }
+
+    /// Find a matching stub with client address information (for requestFrom/ip predicates)
+    #[allow(clippy::too_many_arguments)]
+    pub fn find_matching_stub_with_client(
+        &self,
+        method: &str,
+        path: &str,
+        headers: &hyper::HeaderMap,
+        query: Option<&str>,
+        body: Option<&str>,
+        request_from: Option<&str>,
+        client_ip: Option<&str>,
+    ) -> Option<(Stub, usize)> {
         let stubs = self.stubs.read();
         let headers_map = Self::header_map_to_hashmap(headers);
+        // Parse form data if Content-Type is application/x-www-form-urlencoded
+        let form = Self::parse_form_data(headers, body);
+
         for (index, stub) in stubs.iter().enumerate() {
-            if Self::stub_matches(stub, method, path, query, &headers_map, body) {
+            if Self::stub_matches(
+                stub,
+                method,
+                path,
+                query,
+                &headers_map,
+                body,
+                request_from,
+                client_ip,
+                form.as_ref(),
+            ) {
                 return Some((stub.clone(), index));
+            }
+        }
+        None
+    }
+
+    /// Parse form-urlencoded data from body if Content-Type matches
+    fn parse_form_data(
+        headers: &hyper::HeaderMap,
+        body: Option<&str>,
+    ) -> Option<HashMap<String, String>> {
+        let content_type = headers
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+
+        if content_type.contains("application/x-www-form-urlencoded") {
+            if let Some(body_str) = body {
+                return Some(
+                    body_str
+                        .split('&')
+                        .filter(|s| !s.is_empty())
+                        .filter_map(|pair| {
+                            let mut parts = pair.splitn(2, '=');
+                            let key = parts.next()?.to_string();
+                            let value = parts
+                                .next()
+                                .map(|v| urlencoding::decode(v).unwrap_or_default().into_owned())
+                                .unwrap_or_default();
+                            Some((
+                                urlencoding::decode(&key).unwrap_or_default().into_owned(),
+                                value,
+                            ))
+                        })
+                        .collect(),
+                );
             }
         }
         None
@@ -1044,6 +1140,7 @@ impl Imposter {
     }
 
     /// Check if a stub matches a request
+    #[allow(clippy::too_many_arguments)]
     fn stub_matches(
         stub: &Stub,
         method: &str,
@@ -1051,6 +1148,9 @@ impl Imposter {
         query: Option<&str>,
         headers: &HashMap<String, String>,
         body: Option<&str>,
+        request_from: Option<&str>,
+        client_ip: Option<&str>,
+        form: Option<&HashMap<String, String>>,
     ) -> bool {
         // If no predicates, match everything
         if stub.predicates.is_empty() {
@@ -1059,7 +1159,17 @@ impl Imposter {
 
         // All predicates must match (implicit AND)
         for predicate in &stub.predicates {
-            if !Self::predicate_matches(predicate, method, path, query, headers, body) {
+            if !Self::predicate_matches(
+                predicate,
+                method,
+                path,
+                query,
+                headers,
+                body,
+                request_from,
+                client_ip,
+                form,
+            ) {
                 return false;
             }
         }
@@ -1081,6 +1191,8 @@ impl Imposter {
 
     /// Check if a single predicate matches (Mountebank-compatible)
     /// Supports: equals, deepEquals, contains, startsWith, endsWith, matches, exists, not, or, and
+    /// Also supports requestFrom, ip, and form fields
+    #[allow(clippy::too_many_arguments)]
     fn predicate_matches(
         predicate: &serde_json::Value,
         method: &str,
@@ -1088,6 +1200,9 @@ impl Imposter {
         query: Option<&str>,
         headers: &HashMap<String, String>,
         body: Option<&str>,
+        request_from: Option<&str>,
+        client_ip: Option<&str>,
+        form: Option<&HashMap<String, String>>,
     ) -> bool {
         let obj = match predicate.as_object() {
             Some(o) => o,
@@ -1099,6 +1214,12 @@ impl Imposter {
             .get("caseSensitive")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+
+        // Get keyCaseSensitive option (defaults to caseSensitive value if not specified)
+        let key_case_sensitive = obj
+            .get("keyCaseSensitive")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(case_sensitive);
 
         let except_pattern = obj.get("except").and_then(|v| v.as_str());
 
@@ -1172,21 +1293,51 @@ impl Imposter {
 
         // Handle logical "not" operator
         if let Some(not_pred) = obj.get("not") {
-            return !Self::predicate_matches(not_pred, method, path, query, headers, body);
+            return !Self::predicate_matches(
+                not_pred,
+                method,
+                path,
+                query,
+                headers,
+                body,
+                request_from,
+                client_ip,
+                form,
+            );
         }
 
         // Handle logical "or" operator
         if let Some(or_preds) = obj.get("or").and_then(|v| v.as_array()) {
-            return or_preds
-                .iter()
-                .any(|p| Self::predicate_matches(p, method, path, query, headers, body));
+            return or_preds.iter().any(|p| {
+                Self::predicate_matches(
+                    p,
+                    method,
+                    path,
+                    query,
+                    headers,
+                    body,
+                    request_from,
+                    client_ip,
+                    form,
+                )
+            });
         }
 
         // Handle logical "and" operator
         if let Some(and_preds) = obj.get("and").and_then(|v| v.as_array()) {
-            return and_preds
-                .iter()
-                .all(|p| Self::predicate_matches(p, method, path, query, headers, body));
+            return and_preds.iter().all(|p| {
+                Self::predicate_matches(
+                    p,
+                    method,
+                    path,
+                    query,
+                    headers,
+                    body,
+                    request_from,
+                    client_ip,
+                    form,
+                )
+            });
         }
 
         // Handle "equals" predicate (subset matching for objects)
@@ -1201,6 +1352,10 @@ impl Imposter {
                 &apply_except,
                 str_equals,
                 false, // not deep equals
+                request_from,
+                client_ip,
+                form,
+                key_case_sensitive,
             ) {
                 return false;
             }
@@ -1218,6 +1373,10 @@ impl Imposter {
                 &apply_except,
                 str_equals,
                 true, // deep equals
+                request_from,
+                client_ip,
+                form,
+                key_case_sensitive,
             ) {
                 return false;
             }
@@ -1235,6 +1394,10 @@ impl Imposter {
                 &apply_except,
                 |expected, actual| str_contains(actual, expected),
                 false,
+                request_from,
+                client_ip,
+                form,
+                key_case_sensitive,
             ) {
                 return false;
             }
@@ -1252,6 +1415,10 @@ impl Imposter {
                 &apply_except,
                 |expected, actual| str_starts_with(actual, expected),
                 false,
+                request_from,
+                client_ip,
+                form,
+                key_case_sensitive,
             ) {
                 return false;
             }
@@ -1269,6 +1436,10 @@ impl Imposter {
                 &apply_except,
                 |expected, actual| str_ends_with(actual, expected),
                 false,
+                request_from,
+                client_ip,
+                form,
+                key_case_sensitive,
             ) {
                 return false;
             }
@@ -1285,6 +1456,10 @@ impl Imposter {
                 effective_body,
                 &apply_except,
                 case_sensitive,
+                request_from,
+                client_ip,
+                form,
+                key_case_sensitive,
             ) {
                 return false;
             }
@@ -1292,7 +1467,7 @@ impl Imposter {
 
         // Handle "exists" predicate
         if let Some(exists) = obj.get("exists") {
-            if !Self::check_exists_predicate(exists, &query_map, headers, effective_body) {
+            if !Self::check_exists_predicate(exists, &query_map, headers, effective_body, form) {
                 return false;
             }
         }
@@ -1301,6 +1476,7 @@ impl Imposter {
     }
 
     /// Check predicate fields against request values
+    /// Supports: method, path, body, query, headers, requestFrom, ip, form
     #[allow(clippy::too_many_arguments)]
     fn check_predicate_fields<F>(
         predicate_value: &serde_json::Value,
@@ -1312,6 +1488,10 @@ impl Imposter {
         apply_except: &impl Fn(&str) -> String,
         compare: F,
         deep_equals: bool,
+        request_from: Option<&str>,
+        client_ip: Option<&str>,
+        form: Option<&HashMap<String, String>>,
+        key_case_sensitive: bool,
     ) -> bool
     where
         F: Fn(&str, &str) -> bool,
@@ -1319,6 +1499,15 @@ impl Imposter {
         let obj = match predicate_value.as_object() {
             Some(o) => o,
             None => return true,
+        };
+
+        // Helper for key comparison based on keyCaseSensitive
+        let key_matches = |expected_key: &str, actual_key: &str| -> bool {
+            if key_case_sensitive {
+                expected_key == actual_key
+            } else {
+                expected_key.eq_ignore_ascii_case(actual_key)
+            }
         };
 
         // Check method
@@ -1348,6 +1537,58 @@ impl Imposter {
             }
         }
 
+        // Check requestFrom (IP:port) - Mountebank compatible
+        if let Some(expected) = obj.get("requestFrom").and_then(|v| v.as_str()) {
+            let actual = request_from.unwrap_or("");
+            let actual = apply_except(actual);
+            if !compare(expected, &actual) {
+                return false;
+            }
+        }
+
+        // Check ip (just the IP address) - Mountebank compatible
+        if let Some(expected) = obj.get("ip").and_then(|v| v.as_str()) {
+            let actual = client_ip.unwrap_or("");
+            let actual = apply_except(actual);
+            if !compare(expected, &actual) {
+                return false;
+            }
+        }
+
+        // Check form fields (parsed from application/x-www-form-urlencoded) - Mountebank compatible
+        if let Some(expected_form) = obj.get("form") {
+            if let Some(expected_obj) = expected_form.as_object() {
+                let actual_form = form.cloned().unwrap_or_default();
+
+                // For deepEquals, check exact match (same number of fields)
+                if deep_equals && expected_obj.len() != actual_form.len() {
+                    return false;
+                }
+
+                for (key, expected_val) in expected_obj {
+                    let expected_str = match expected_val {
+                        serde_json::Value::String(s) => s.clone(),
+                        _ => expected_val.to_string(),
+                    };
+                    // Find key using keyCaseSensitive option
+                    let actual = actual_form
+                        .iter()
+                        .find(|(k, _)| key_matches(key, k))
+                        .map(|(_, v)| v.as_str());
+
+                    match actual {
+                        Some(actual) => {
+                            let actual = apply_except(actual);
+                            if !compare(&expected_str, &actual) {
+                                return false;
+                            }
+                        }
+                        None => return false,
+                    }
+                }
+            }
+        }
+
         // Check query parameters
         if let Some(expected_query) = obj.get("query") {
             if let Some(expected_obj) = expected_query.as_object() {
@@ -1361,7 +1602,13 @@ impl Imposter {
                         serde_json::Value::String(s) => s.clone(),
                         _ => expected_val.to_string(),
                     };
-                    match query.get(key) {
+                    // Find key using keyCaseSensitive option
+                    let actual = query
+                        .iter()
+                        .find(|(k, _)| key_matches(key, k))
+                        .map(|(_, v)| v.as_str());
+
+                    match actual {
                         Some(actual) => {
                             let actual = apply_except(actual);
                             if !compare(&expected_str, &actual) {
@@ -1387,10 +1634,10 @@ impl Imposter {
                         serde_json::Value::String(s) => s.clone(),
                         _ => expected_val.to_string(),
                     };
-                    // Headers are case-insensitive for key lookup
+                    // Headers use keyCaseSensitive option
                     let actual = headers
                         .iter()
-                        .find(|(k, _)| k.eq_ignore_ascii_case(key))
+                        .find(|(k, _)| key_matches(key, k))
                         .map(|(_, v)| v.as_str());
 
                     match actual {
@@ -1410,6 +1657,7 @@ impl Imposter {
     }
 
     /// Check predicate fields with regex matching
+    /// Supports: method, path, body, query, headers, requestFrom, ip, form
     #[allow(clippy::too_many_arguments)]
     fn check_predicate_fields_regex(
         predicate_value: &serde_json::Value,
@@ -1420,6 +1668,10 @@ impl Imposter {
         body: &str,
         apply_except: &impl Fn(&str) -> String,
         case_sensitive: bool,
+        request_from: Option<&str>,
+        client_ip: Option<&str>,
+        form: Option<&HashMap<String, String>>,
+        key_case_sensitive: bool,
     ) -> bool {
         let obj = match predicate_value.as_object() {
             Some(o) => o,
@@ -1434,6 +1686,15 @@ impl Imposter {
                     .case_insensitive(true)
                     .build()
                     .ok()
+            }
+        };
+
+        // Helper for key comparison based on keyCaseSensitive
+        let key_matches = |expected_key: &str, actual_key: &str| -> bool {
+            if key_case_sensitive {
+                expected_key == actual_key
+            } else {
+                expected_key.eq_ignore_ascii_case(actual_key)
             }
         };
 
@@ -1466,6 +1727,53 @@ impl Imposter {
             }
         }
 
+        // Check requestFrom
+        if let Some(pattern) = obj.get("requestFrom").and_then(|v| v.as_str()) {
+            if let Some(re) = build_regex(pattern) {
+                let actual = apply_except(request_from.unwrap_or(""));
+                if !re.is_match(&actual) {
+                    return false;
+                }
+            }
+        }
+
+        // Check ip
+        if let Some(pattern) = obj.get("ip").and_then(|v| v.as_str()) {
+            if let Some(re) = build_regex(pattern) {
+                let actual = apply_except(client_ip.unwrap_or(""));
+                if !re.is_match(&actual) {
+                    return false;
+                }
+            }
+        }
+
+        // Check form fields
+        if let Some(expected_form) = obj.get("form").and_then(|v| v.as_object()) {
+            let actual_form = form.cloned().unwrap_or_default();
+            for (key, pattern_val) in expected_form {
+                let pattern = match pattern_val {
+                    serde_json::Value::String(s) => s.as_str(),
+                    _ => continue,
+                };
+                if let Some(re) = build_regex(pattern) {
+                    let actual = actual_form
+                        .iter()
+                        .find(|(k, _)| key_matches(key, k))
+                        .map(|(_, v)| v.as_str());
+
+                    match actual {
+                        Some(actual) => {
+                            let actual = apply_except(actual);
+                            if !re.is_match(&actual) {
+                                return false;
+                            }
+                        }
+                        None => return false,
+                    }
+                }
+            }
+        }
+
         // Check query parameters
         if let Some(expected_query) = obj.get("query").and_then(|v| v.as_object()) {
             for (key, pattern_val) in expected_query {
@@ -1474,7 +1782,12 @@ impl Imposter {
                     _ => continue,
                 };
                 if let Some(re) = build_regex(pattern) {
-                    match query.get(key) {
+                    let actual = query
+                        .iter()
+                        .find(|(k, _)| key_matches(key, k))
+                        .map(|(_, v)| v.as_str());
+
+                    match actual {
                         Some(actual) => {
                             let actual = apply_except(actual);
                             if !re.is_match(&actual) {
@@ -1497,7 +1810,7 @@ impl Imposter {
                 if let Some(re) = build_regex(pattern) {
                     let actual = headers
                         .iter()
-                        .find(|(k, _)| k.eq_ignore_ascii_case(key))
+                        .find(|(k, _)| key_matches(key, k))
                         .map(|(_, v)| v.as_str());
 
                     match actual {
@@ -1517,11 +1830,13 @@ impl Imposter {
     }
 
     /// Check exists predicate - verifies field presence or absence
+    /// Supports: body, query, headers, form
     fn check_exists_predicate(
         predicate_value: &serde_json::Value,
         query: &HashMap<String, String>,
         headers: &HashMap<String, String>,
         body: &str,
+        form: Option<&HashMap<String, String>>,
     ) -> bool {
         let obj = match predicate_value.as_object() {
             Some(o) => o,
@@ -1552,6 +1867,18 @@ impl Imposter {
             for (key, should_exist_val) in expected_headers {
                 let should_exist = should_exist_val.as_bool().unwrap_or(true);
                 let exists = headers.iter().any(|(k, _)| k.eq_ignore_ascii_case(key));
+                if exists != should_exist {
+                    return false;
+                }
+            }
+        }
+
+        // Check form fields exist
+        if let Some(expected_form) = obj.get("form").and_then(|v| v.as_object()) {
+            let actual_form = form.cloned().unwrap_or_default();
+            for (key, should_exist_val) in expected_form {
+                let should_exist = should_exist_val.as_bool().unwrap_or(true);
+                let exists = actual_form.contains_key(key);
                 if exists != should_exist {
                     return false;
                 }
@@ -1631,7 +1958,7 @@ impl Imposter {
     }
 
     /// Execute a stub and get the response with behaviors and rift extensions
-    /// Returns (status, headers, body, behaviors, rift_extension, is_fault)
+    /// Returns (status, headers, body, behaviors, rift_extension, response_mode, is_fault)
     #[allow(clippy::type_complexity)]
     pub fn execute_stub_with_rift(
         &self,
@@ -1643,6 +1970,7 @@ impl Imposter {
         String,
         Option<serde_json::Value>,
         Option<RiftResponseExtension>,
+        ResponseMode,
         bool,
     )> {
         if stub.responses.is_empty() {
@@ -1663,6 +1991,7 @@ impl Imposter {
                 rift,
             } => {
                 let mut headers = is.headers.clone();
+                let mode = is.mode.clone();
 
                 let body = is
                     .body
@@ -1690,12 +2019,19 @@ impl Imposter {
                     body,
                     behaviors.clone(),
                     rift.clone(),
+                    mode,
                     false,
                 ))
             }
-            StubResponse::Fault { fault } => {
-                Some((0, HashMap::new(), fault.clone(), None, None, true))
-            }
+            StubResponse::Fault { fault } => Some((
+                0,
+                HashMap::new(),
+                fault.clone(),
+                None,
+                None,
+                ResponseMode::Text,
+                true,
+            )),
             StubResponse::Proxy { .. } => None,
             StubResponse::Inject { .. } => None,
             StubResponse::RiftScript { .. } => None,
@@ -1948,6 +2284,7 @@ impl Imposter {
             status_code: status,
             headers: response_headers,
             body: body_value,
+            mode: ResponseMode::Text, // Proxy responses are always text
         };
 
         // Build behaviors object if needed
@@ -2298,6 +2635,15 @@ impl ImposterManager {
         let mut resolved_config = config;
         resolved_config.port = Some(port);
 
+        // Determine bind address from host configuration
+        let bind_host = resolved_config
+            .host
+            .clone()
+            .unwrap_or_else(|| "0.0.0.0".to_string());
+        let bind_addr: SocketAddr = format!("{}:{}", bind_host, port).parse().map_err(|e| {
+            ImposterError::BindError(port, format!("Invalid host '{}': {}", bind_host, e))
+        })?;
+
         // Create imposter
         let mut imposter = Imposter::new(resolved_config);
 
@@ -2308,12 +2654,11 @@ impl ImposterManager {
         let imposter = Arc::new(imposter);
 
         // Bind to port
-        let addr = SocketAddr::from(([0, 0, 0, 0], port));
-        let listener = TcpListener::bind(addr)
+        let listener = TcpListener::bind(bind_addr)
             .await
             .map_err(|e| ImposterError::BindError(port, e.to_string()))?;
 
-        info!("Imposter bound to port {}", port);
+        info!("Imposter bound to {}:{}", bind_host, port);
 
         // Start serving
         let imposter_clone = Arc::clone(&imposter);
@@ -2637,14 +2982,19 @@ async fn handle_imposter_request(
         // Get imposter info
         let debug_imposter = imposter.get_debug_imposter_info();
 
-        // Find matching stub for debug info
-        let match_result = if let Some((stub, stub_index)) = imposter.find_matching_stub(
-            method_str,
-            path_str,
-            &headers_for_context,
-            query_opt,
-            body_string.as_deref(),
-        ) {
+        // Find matching stub for debug info (with client address)
+        let request_from = client_addr.to_string();
+        let client_ip = client_addr.ip().to_string();
+        let match_result = if let Some((stub, stub_index)) = imposter
+            .find_matching_stub_with_client(
+                method_str,
+                path_str,
+                &headers_for_context,
+                query_opt,
+                body_string.as_deref(),
+                Some(&request_from),
+                Some(&client_ip),
+            ) {
             // Match found
             let response_preview = imposter.get_response_preview(&stub, stub_index);
             DebugMatchResult {
@@ -2693,12 +3043,18 @@ async fn handle_imposter_request(
             .unwrap());
     }
 
-    if let Some((stub, stub_index)) = imposter.find_matching_stub(
+    // Get client address info for requestFrom, ip predicates
+    let request_from = client_addr.to_string();
+    let client_ip = client_addr.ip().to_string();
+
+    if let Some((stub, stub_index)) = imposter.find_matching_stub_with_client(
         method_str,
         path_str,
         &headers_for_context,
         query_opt,
         body_string.as_deref(),
+        Some(&request_from),
+        Some(&client_ip),
     ) {
         // Check if this is a proxy response
         if let Some(proxy_config) = imposter.get_proxy_response(&stub, stub_index) {
@@ -2901,8 +3257,15 @@ async fn handle_imposter_request(
             }
         }
 
-        if let Some((mut status, mut headers, mut body, behaviors, rift_ext, is_fault)) =
-            imposter.execute_stub_with_rift(&stub, stub_index)
+        if let Some((
+            mut status,
+            mut headers,
+            mut body,
+            behaviors,
+            rift_ext,
+            response_mode,
+            is_fault,
+        )) = imposter.execute_stub_with_rift(&stub, stub_index)
         {
             // Handle faults - simulate connection errors
             if is_fault {
@@ -3074,13 +3437,28 @@ async fn handle_imposter_request(
 
             response = response.header("x-rift-imposter", "true");
 
-            return Ok(response.body(Full::new(Bytes::from(body))).unwrap());
+            // Handle binary mode - decode base64 body if _mode is "binary"
+            let body_bytes = match response_mode {
+                ResponseMode::Binary => {
+                    // Decode base64-encoded body
+                    match base64::engine::general_purpose::STANDARD.decode(&body) {
+                        Ok(decoded) => Bytes::from(decoded),
+                        Err(e) => {
+                            warn!("Failed to decode base64 body: {}, using raw body", e);
+                            Bytes::from(body)
+                        }
+                    }
+                }
+                ResponseMode::Text => Bytes::from(body),
+            };
+
+            return Ok(response.body(Full::new(body_bytes)).unwrap());
         }
     }
 
     // No matching rule - return default response or 404
     if let Some(ref default) = imposter.config.default_response {
-        let body = default
+        let body_str = default
             .body
             .as_ref()
             .map(|b| {
@@ -3092,6 +3470,23 @@ async fn handle_imposter_request(
             })
             .unwrap_or_default();
 
+        // Handle binary mode for default response
+        let body_bytes = match default.mode {
+            ResponseMode::Binary => {
+                match base64::engine::general_purpose::STANDARD.decode(&body_str) {
+                    Ok(decoded) => Bytes::from(decoded),
+                    Err(e) => {
+                        warn!(
+                            "Failed to decode base64 default body: {}, using raw body",
+                            e
+                        );
+                        Bytes::from(body_str)
+                    }
+                }
+            }
+            ResponseMode::Text => Bytes::from(body_str),
+        };
+
         let mut response = Response::builder().status(default.status_code);
         for (k, v) in &default.headers {
             response = response.header(k, v);
@@ -3099,7 +3494,7 @@ async fn handle_imposter_request(
         response = response.header("x-rift-imposter", "true");
         response = response.header("x-rift-default-response", "true");
 
-        return Ok(response.body(Full::new(Bytes::from(body))).unwrap());
+        return Ok(response.body(Full::new(body_bytes)).unwrap());
     }
 
     // No match and no default - Mountebank returns 200 with empty body
@@ -3218,6 +3613,7 @@ mod tests {
                     status_code: 200,
                     headers: HashMap::new(),
                     body: Some(serde_json::json!({"message": "hello"})),
+                    ..Default::default()
                 },
                 behaviors: None,
                 rift: None,
@@ -3234,6 +3630,9 @@ mod tests {
             "/test",
             None,
             &empty_headers,
+            None,
+            None,
+            None,
             None
         ));
         assert!(Imposter::stub_matches(
@@ -3242,6 +3641,9 @@ mod tests {
             "/test",
             None,
             &empty_headers,
+            None,
+            None,
+            None,
             None
         )); // case-insensitive method
 
@@ -3252,6 +3654,9 @@ mod tests {
             "/test",
             None,
             &empty_headers,
+            None,
+            None,
+            None,
             None
         ));
         assert!(!Imposter::stub_matches(
@@ -3260,6 +3665,9 @@ mod tests {
             "/other",
             None,
             &empty_headers,
+            None,
+            None,
+            None,
             None
         ));
     }
@@ -3277,6 +3685,7 @@ mod tests {
             service_name: None,
             service_info: None,
             rift: None,
+            ..Default::default()
         };
         let imposter = Imposter::new(config);
 
@@ -3288,6 +3697,7 @@ mod tests {
                     status_code: 201,
                     headers: HashMap::new(),
                     body: Some(serde_json::json!({"created": true})),
+                    ..Default::default()
                 },
                 behaviors: None,
                 rift: None,
@@ -3327,6 +3737,7 @@ mod tests {
             service_name: None,
             service_info: None,
             rift: None,
+            ..Default::default()
         };
 
         // This may fail if port is in use, which is fine for testing
@@ -3547,6 +3958,7 @@ mod tests {
                     status_code: 200,
                     headers: HashMap::new(),
                     body: None,
+                    ..Default::default()
                 },
                 behaviors: None,
                 rift: None,
@@ -3563,6 +3975,9 @@ mod tests {
             "/api/lender-details",
             None,
             &empty_headers,
+            None,
+            None,
+            None,
             None
         ));
         assert!(Imposter::stub_matches(
@@ -3571,6 +3986,9 @@ mod tests {
             "/user-details",
             None,
             &empty_headers,
+            None,
+            None,
+            None,
             None
         ));
 
@@ -3581,6 +3999,9 @@ mod tests {
             "/details/other",
             None,
             &empty_headers,
+            None,
+            None,
+            None,
             None
         ));
         assert!(!Imposter::stub_matches(
@@ -3589,6 +4010,9 @@ mod tests {
             "/api/details/v1",
             None,
             &empty_headers,
+            None,
+            None,
+            None,
             None
         ));
     }
@@ -3605,6 +4029,7 @@ mod tests {
                     status_code: 200,
                     headers: HashMap::new(),
                     body: None,
+                    ..Default::default()
                 },
                 behaviors: None,
                 rift: None,
@@ -3620,6 +4045,9 @@ mod tests {
             "/test",
             None,
             &empty_headers,
+            None,
+            None,
+            None,
             None
         ));
         assert!(Imposter::stub_matches(
@@ -3628,6 +4056,9 @@ mod tests {
             "/test",
             None,
             &empty_headers,
+            None,
+            None,
+            None,
             None
         )); // case-insensitive
         assert!(!Imposter::stub_matches(
@@ -3636,6 +4067,9 @@ mod tests {
             "/test",
             None,
             &empty_headers,
+            None,
+            None,
+            None,
             None
         ));
     }
@@ -3652,6 +4086,7 @@ mod tests {
                     status_code: 200,
                     headers: HashMap::new(),
                     body: None,
+                    ..Default::default()
                 },
                 behaviors: None,
                 rift: None,
@@ -3668,7 +4103,10 @@ mod tests {
             "/test",
             None,
             &empty_headers,
-            Some("")
+            Some(""),
+            None,
+            None,
+            None
         ));
         assert!(Imposter::stub_matches(
             &stub,
@@ -3676,6 +4114,9 @@ mod tests {
             "/test",
             None,
             &empty_headers,
+            None,
+            None,
+            None,
             None
         ));
 
@@ -3686,7 +4127,10 @@ mod tests {
             "/test",
             None,
             &empty_headers,
-            Some("content")
+            Some("content"),
+            None,
+            None,
+            None
         ));
     }
 
@@ -3702,6 +4146,7 @@ mod tests {
                     status_code: 200,
                     headers: HashMap::new(),
                     body: None,
+                    ..Default::default()
                 },
                 behaviors: None,
                 rift: None,
@@ -3717,6 +4162,9 @@ mod tests {
             "/kaizen/auto/financing/lender-information/lenders",
             None,
             &empty_headers,
+            None,
+            None,
+            None,
             None
         ));
         assert!(!Imposter::stub_matches(
@@ -3725,6 +4173,9 @@ mod tests {
             "/other/path",
             None,
             &empty_headers,
+            None,
+            None,
+            None,
             None
         ));
     }
@@ -3741,6 +4192,7 @@ mod tests {
                     status_code: 200,
                     headers: HashMap::new(),
                     body: None,
+                    ..Default::default()
                 },
                 behaviors: None,
                 rift: None,
@@ -3757,6 +4209,9 @@ mod tests {
             "/test",
             Some("lenderIds=CofTestWL"),
             &empty_headers,
+            None,
+            None,
+            None,
             None
         ));
         assert!(Imposter::stub_matches(
@@ -3765,6 +4220,9 @@ mod tests {
             "/test",
             Some("lenderIds=CofTest"),
             &empty_headers,
+            None,
+            None,
+            None,
             None
         ));
         assert!(Imposter::stub_matches(
@@ -3773,6 +4231,9 @@ mod tests {
             "/test",
             Some("lenderIds=123CofTest456"),
             &empty_headers,
+            None,
+            None,
+            None,
             None
         ));
 
@@ -3783,6 +4244,9 @@ mod tests {
             "/test",
             Some("lenderIds=Other"),
             &empty_headers,
+            None,
+            None,
+            None,
             None
         ));
         assert!(!Imposter::stub_matches(
@@ -3791,6 +4255,9 @@ mod tests {
             "/test",
             None,
             &empty_headers,
+            None,
+            None,
+            None,
             None
         ));
     }
@@ -3807,6 +4274,7 @@ mod tests {
                     status_code: 200,
                     headers: HashMap::new(),
                     body: None,
+                    ..Default::default()
                 },
                 behaviors: None,
                 rift: None,
@@ -3818,7 +4286,7 @@ mod tests {
         headers.insert("Content-Type".to_string(), "application/json".to_string());
 
         assert!(Imposter::stub_matches(
-            &stub, "GET", "/test", None, &headers, None
+            &stub, "GET", "/test", None, &headers, None, None, None, None
         ));
 
         // Header key lookup is case-insensitive
@@ -3830,6 +4298,9 @@ mod tests {
             "/test",
             None,
             &headers_lower,
+            None,
+            None,
+            None,
             None
         ));
 
@@ -3842,6 +4313,9 @@ mod tests {
             "/test",
             None,
             &wrong_headers,
+            None,
+            None,
+            None,
             None
         ));
 
@@ -3853,6 +4327,9 @@ mod tests {
             "/test",
             None,
             &empty_headers,
+            None,
+            None,
+            None,
             None
         ));
     }
@@ -3869,6 +4346,7 @@ mod tests {
                     status_code: 200,
                     headers: HashMap::new(),
                     body: None,
+                    ..Default::default()
                 },
                 behaviors: None,
                 rift: None,
@@ -3884,7 +4362,10 @@ mod tests {
             "/test",
             None,
             &empty_headers,
-            Some("{\"key\": \"value\"}")
+            Some("{\"key\": \"value\"}"),
+            None,
+            None,
+            None
         ));
         assert!(!Imposter::stub_matches(
             &stub,
@@ -3892,7 +4373,10 @@ mod tests {
             "/test",
             None,
             &empty_headers,
-            Some("{\"other\": \"data\"}")
+            Some("{\"other\": \"data\"}"),
+            None,
+            None,
+            None
         ));
     }
 
@@ -3912,6 +4396,7 @@ mod tests {
                     status_code: 200,
                     headers: HashMap::new(),
                     body: None,
+                    ..Default::default()
                 },
                 behaviors: None,
                 rift: None,
@@ -3929,7 +4414,10 @@ mod tests {
             "/test",
             Some("token=abc"),
             &headers,
-            Some("body content")
+            Some("body content"),
+            None,
+            None,
+            None
         ));
 
         // Missing query param
@@ -3939,7 +4427,10 @@ mod tests {
             "/test",
             None,
             &headers,
-            Some("body content")
+            Some("body content"),
+            None,
+            None,
+            None
         ));
 
         // Missing header
@@ -3950,7 +4441,10 @@ mod tests {
             "/test",
             Some("token=abc"),
             &empty_headers,
-            Some("body content")
+            Some("body content"),
+            None,
+            None,
+            None
         ));
 
         // Missing body
@@ -3960,6 +4454,9 @@ mod tests {
             "/test",
             Some("token=abc"),
             &headers,
+            None,
+            None,
+            None,
             None
         ));
     }
@@ -3976,6 +4473,7 @@ mod tests {
                     status_code: 200,
                     headers: HashMap::new(),
                     body: None,
+                    ..Default::default()
                 },
                 behaviors: None,
                 rift: None,
@@ -3992,6 +4490,9 @@ mod tests {
             "/test",
             None,
             &empty_headers,
+            None,
+            None,
+            None,
             None
         ));
         assert!(Imposter::stub_matches(
@@ -4000,6 +4501,9 @@ mod tests {
             "/test",
             Some("other=value"),
             &empty_headers,
+            None,
+            None,
+            None,
             None
         ));
         assert!(!Imposter::stub_matches(
@@ -4008,6 +4512,9 @@ mod tests {
             "/test",
             Some("debug=true"),
             &empty_headers,
+            None,
+            None,
+            None,
             None
         ));
     }
@@ -4024,6 +4531,7 @@ mod tests {
                     status_code: 200,
                     headers: HashMap::new(),
                     body: None,
+                    ..Default::default()
                 },
                 behaviors: None,
                 rift: None,
@@ -4040,6 +4548,9 @@ mod tests {
             "/test",
             None,
             &empty_headers,
+            None,
+            None,
+            None,
             None
         ));
         assert!(Imposter::stub_matches(
@@ -4048,6 +4559,9 @@ mod tests {
             "/test",
             None,
             &empty_headers,
+            None,
+            None,
+            None,
             None
         ));
         assert!(!Imposter::stub_matches(
@@ -4056,6 +4570,9 @@ mod tests {
             "/test",
             None,
             &empty_headers,
+            None,
+            None,
+            None,
             None
         ));
     }
@@ -4075,6 +4592,7 @@ mod tests {
                     status_code: 200,
                     headers: HashMap::new(),
                     body: None,
+                    ..Default::default()
                 },
                 behaviors: None,
                 rift: None,
@@ -4090,6 +4608,9 @@ mod tests {
             "/test",
             None,
             &empty_headers,
+            None,
+            None,
+            None,
             None
         ));
         assert!(Imposter::stub_matches(
@@ -4098,6 +4619,9 @@ mod tests {
             "/test",
             None,
             &empty_headers,
+            None,
+            None,
+            None,
             None
         ));
         assert!(!Imposter::stub_matches(
@@ -4106,6 +4630,9 @@ mod tests {
             "/test",
             None,
             &empty_headers,
+            None,
+            None,
+            None,
             None
         ));
     }
@@ -4125,6 +4652,7 @@ mod tests {
                     status_code: 200,
                     headers: HashMap::new(),
                     body: None,
+                    ..Default::default()
                 },
                 behaviors: None,
                 rift: None,
@@ -4140,6 +4668,9 @@ mod tests {
             "/api/users",
             None,
             &empty_headers,
+            None,
+            None,
+            None,
             None
         ));
         assert!(!Imposter::stub_matches(
@@ -4148,6 +4679,9 @@ mod tests {
             "/api/users",
             None,
             &empty_headers,
+            None,
+            None,
+            None,
             None
         ));
         assert!(!Imposter::stub_matches(
@@ -4156,6 +4690,9 @@ mod tests {
             "/other",
             None,
             &empty_headers,
+            None,
+            None,
+            None,
             None
         ));
     }
@@ -4175,6 +4712,7 @@ mod tests {
                     status_code: 200,
                     headers: HashMap::new(),
                     body: None,
+                    ..Default::default()
                 },
                 behaviors: None,
                 rift: None,
@@ -4190,6 +4728,9 @@ mod tests {
             "/api/v1/users",
             None,
             &empty_headers,
+            None,
+            None,
+            None,
             None
         ));
         assert!(Imposter::stub_matches(
@@ -4198,6 +4739,9 @@ mod tests {
             "/api/v2/items",
             None,
             &empty_headers,
+            None,
+            None,
+            None,
             None
         ));
         assert!(!Imposter::stub_matches(
@@ -4206,6 +4750,9 @@ mod tests {
             "/api/v1/users",
             None,
             &empty_headers,
+            None,
+            None,
+            None,
             None
         ));
         assert!(!Imposter::stub_matches(
@@ -4214,6 +4761,9 @@ mod tests {
             "/other/path",
             None,
             &empty_headers,
+            None,
+            None,
+            None,
             None
         ));
     }
@@ -4230,6 +4780,7 @@ mod tests {
                     status_code: 200,
                     headers: HashMap::new(),
                     body: None,
+                    ..Default::default()
                 },
                 behaviors: None,
                 rift: None,
@@ -4245,7 +4796,10 @@ mod tests {
             "/test",
             None,
             &empty_headers,
-            Some(r#"{"userId": "abc-123-def"}"#)
+            Some(r#"{"userId": "abc-123-def"}"#),
+            None,
+            None,
+            None
         ));
         assert!(!Imposter::stub_matches(
             &stub,
@@ -4253,7 +4807,10 @@ mod tests {
             "/test",
             None,
             &empty_headers,
-            Some(r#"{"userId": "invalid!"}"#)
+            Some(r#"{"userId": "invalid!"}"#),
+            None,
+            None,
+            None
         ));
     }
 
@@ -4270,6 +4827,7 @@ mod tests {
                     status_code: 200,
                     headers: HashMap::new(),
                     body: None,
+                    ..Default::default()
                 },
                 behaviors: None,
                 rift: None,
@@ -4285,6 +4843,9 @@ mod tests {
             "/API/Users",
             None,
             &empty_headers,
+            None,
+            None,
+            None,
             None
         ));
         assert!(!Imposter::stub_matches(
@@ -4293,6 +4854,9 @@ mod tests {
             "/api/users",
             None,
             &empty_headers,
+            None,
+            None,
+            None,
             None
         ));
     }
@@ -4310,6 +4874,7 @@ mod tests {
                     status_code: 200,
                     headers: HashMap::new(),
                     body: None,
+                    ..Default::default()
                 },
                 behaviors: None,
                 rift: None,
@@ -4325,6 +4890,9 @@ mod tests {
             "/api/users",
             None,
             &empty_headers,
+            None,
+            None,
+            None,
             None
         ));
         assert!(Imposter::stub_matches(
@@ -4333,6 +4901,9 @@ mod tests {
             "/api/users?page=1",
             None,
             &empty_headers,
+            None,
+            None,
+            None,
             None
         ));
     }
@@ -4358,6 +4929,7 @@ mod tests {
                     status_code: 200,
                     headers: HashMap::new(),
                     body: None,
+                    ..Default::default()
                 },
                 behaviors: None,
                 rift: None,
@@ -4374,6 +4946,9 @@ mod tests {
             "/kaizen/auto/financing/lender-information/lender-details",
             Some("lenderIds=ALL"),
             &empty_headers,
+            None,
+            None,
+            None,
             None
         ));
 
@@ -4384,6 +4959,9 @@ mod tests {
             "/kaizen/auto/financing/lender-information/lender-details",
             Some("lenderIds=ALL"),
             &empty_headers,
+            None,
+            None,
+            None,
             None
         ));
 
@@ -4394,6 +4972,9 @@ mod tests {
             "/kaizen/auto/financing/lender-information/lenders",
             Some("lenderIds=ALL"),
             &empty_headers,
+            None,
+            None,
+            None,
             None
         ));
 
@@ -4404,6 +4985,9 @@ mod tests {
             "/kaizen/auto/financing/lender-information/lender-details",
             Some("lenderIds=LENDER1"),
             &empty_headers,
+            None,
+            None,
+            None,
             None
         ));
     }
@@ -4553,6 +5137,7 @@ mod tests {
                     status_code: 200,
                     headers: HashMap::new(),
                     body: None,
+                    ..Default::default()
                 },
                 behaviors: None,
                 rift: None,
@@ -4567,7 +5152,7 @@ mod tests {
         );
 
         assert!(Imposter::stub_matches(
-            &stub, "GET", "/", None, &headers, None
+            &stub, "GET", "/", None, &headers, None, None, None, None
         ));
 
         // Wrong token type
@@ -4579,6 +5164,9 @@ mod tests {
             "/",
             None,
             &headers_basic,
+            None,
+            None,
+            None,
             None
         ));
     }
@@ -4595,6 +5183,7 @@ mod tests {
                     status_code: 200,
                     headers: HashMap::new(),
                     body: None,
+                    ..Default::default()
                 },
                 behaviors: None,
                 rift: None,
@@ -4610,6 +5199,9 @@ mod tests {
             "/",
             Some("filter=status_active"),
             &empty_headers,
+            None,
+            None,
+            None,
             None
         ));
         assert!(Imposter::stub_matches(
@@ -4618,6 +5210,9 @@ mod tests {
             "/",
             Some("filter=status_pending"),
             &empty_headers,
+            None,
+            None,
+            None,
             None
         ));
         assert!(!Imposter::stub_matches(
@@ -4626,6 +5221,9 @@ mod tests {
             "/",
             Some("filter=type_user"),
             &empty_headers,
+            None,
+            None,
+            None,
             None
         ));
     }
@@ -4642,6 +5240,7 @@ mod tests {
                     status_code: 200,
                     headers: HashMap::new(),
                     body: None,
+                    ..Default::default()
                 },
                 behaviors: None,
                 rift: None,
@@ -4657,6 +5256,9 @@ mod tests {
             "/",
             Some("filename=data.json"),
             &empty_headers,
+            None,
+            None,
+            None,
             None
         ));
         assert!(Imposter::stub_matches(
@@ -4665,6 +5267,9 @@ mod tests {
             "/",
             Some("filename=config.json"),
             &empty_headers,
+            None,
+            None,
+            None,
             None
         ));
         assert!(!Imposter::stub_matches(
@@ -4673,6 +5278,9 @@ mod tests {
             "/",
             Some("filename=data.xml"),
             &empty_headers,
+            None,
+            None,
+            None,
             None
         ));
     }
@@ -4689,6 +5297,7 @@ mod tests {
                     status_code: 200,
                     headers: HashMap::new(),
                     body: None,
+                    ..Default::default()
                 },
                 behaviors: None,
                 rift: None,
@@ -4705,6 +5314,9 @@ mod tests {
             "/",
             Some("id=550e8400-e29b-41d4-a716-446655440000"),
             &empty_headers,
+            None,
+            None,
+            None,
             None
         ));
 
@@ -4715,6 +5327,9 @@ mod tests {
             "/",
             Some("id=not-a-uuid"),
             &empty_headers,
+            None,
+            None,
+            None,
             None
         ));
     }
@@ -4731,6 +5346,7 @@ mod tests {
                     status_code: 200,
                     headers: HashMap::new(),
                     body: None,
+                    ..Default::default()
                 },
                 behaviors: None,
                 rift: None,
@@ -4750,6 +5366,9 @@ mod tests {
             "/",
             None,
             &firefox_headers,
+            None,
+            None,
+            None,
             None
         ));
 
@@ -4765,6 +5384,9 @@ mod tests {
             "/",
             None,
             &chrome_headers,
+            None,
+            None,
+            None,
             None
         ));
     }
@@ -4781,6 +5403,7 @@ mod tests {
                     status_code: 200,
                     headers: HashMap::new(),
                     body: None,
+                    ..Default::default()
                 },
                 behaviors: None,
                 rift: None,
@@ -4798,6 +5421,9 @@ mod tests {
             "/",
             None,
             &exact_headers,
+            None,
+            None,
+            None,
             None
         ));
 
@@ -4812,6 +5438,9 @@ mod tests {
             "/",
             None,
             &extra_headers,
+            None,
+            None,
+            None,
             None
         ));
     }
@@ -4836,6 +5465,7 @@ mod tests {
                     status_code: 200,
                     headers: HashMap::new(),
                     body: None,
+                    ..Default::default()
                 },
                 behaviors: None,
                 rift: None,
@@ -4852,6 +5482,9 @@ mod tests {
             "/api/users",
             None,
             &empty_headers,
+            None,
+            None,
+            None,
             None
         ));
 
@@ -4862,6 +5495,9 @@ mod tests {
             "/api/data",
             None,
             &empty_headers,
+            None,
+            None,
+            None,
             None
         ));
 
@@ -4872,6 +5508,9 @@ mod tests {
             "/api/users",
             None,
             &empty_headers,
+            None,
+            None,
+            None,
             None
         ));
 
@@ -4882,6 +5521,9 @@ mod tests {
             "/api/admin/config",
             None,
             &empty_headers,
+            None,
+            None,
+            None,
             None
         ));
 
@@ -4892,6 +5534,9 @@ mod tests {
             "/other/path",
             None,
             &empty_headers,
+            None,
+            None,
+            None,
             None
         ));
     }
@@ -4923,6 +5568,7 @@ mod tests {
                         status_code: 200,
                         headers: HashMap::new(),
                         body: Some(serde_json::json!("test body")),
+                        ..Default::default()
                     },
                     behaviors: Some(serde_json::json!({"wait": 100})),
                     rift: None,
@@ -4934,6 +5580,7 @@ mod tests {
             service_name: Some("test-service".to_string()),
             service_info: Some(serde_json::json!({"version": "1.0"})),
             rift: None,
+            ..Default::default()
         };
 
         let serialized = serde_json::to_string(&original).unwrap();
@@ -5453,6 +6100,7 @@ mod tests {
             service_name: None,
             service_info: None,
             rift: None, // No _rift config
+            ..Default::default()
         };
 
         let store = Imposter::create_flow_store(&config);
@@ -5473,6 +6121,7 @@ mod tests {
             service_name: None,
             service_info: None,
             rift: Some(RiftConfig::default()), // Empty _rift config
+            ..Default::default()
         };
 
         let store = Imposter::create_flow_store(&config);
@@ -5502,6 +6151,7 @@ mod tests {
                 proxy: None,
                 script_engine: None,
             }),
+            ..Default::default()
         };
 
         let store = Imposter::create_flow_store(&config);
@@ -5536,6 +6186,7 @@ mod tests {
                 proxy: None,
                 script_engine: None,
             }),
+            ..Default::default()
         };
 
         // Should fallback to NoOp store
@@ -5560,6 +6211,7 @@ mod tests {
             service_name: None,
             service_info: None,
             rift: None,
+            ..Default::default()
         };
         let imposter = Imposter::new(config);
 
@@ -5571,6 +6223,7 @@ mod tests {
                     status_code: 200,
                     headers: HashMap::new(),
                     body: Some(serde_json::json!("test body")),
+                    ..Default::default()
                 },
                 behaviors: None,
                 rift: None,
@@ -5580,7 +6233,7 @@ mod tests {
 
         let result = imposter.execute_stub_with_rift(&stub, 0);
         assert!(result.is_some());
-        let (status, _headers, body, behaviors, rift_ext, is_fault) = result.unwrap();
+        let (status, _headers, body, behaviors, rift_ext, _mode, is_fault) = result.unwrap();
         assert_eq!(status, 200);
         assert_eq!(body, "test body");
         assert!(behaviors.is_none());
@@ -5601,6 +6254,7 @@ mod tests {
             service_name: None,
             service_info: None,
             rift: None,
+            ..Default::default()
         };
         let imposter = Imposter::new(config);
 
@@ -5612,6 +6266,7 @@ mod tests {
                     status_code: 200,
                     headers: HashMap::new(),
                     body: Some(serde_json::json!("test")),
+                    ..Default::default()
                 },
                 behaviors: Some(serde_json::json!({"wait": 100})),
                 rift: Some(RiftResponseExtension {
@@ -5633,7 +6288,7 @@ mod tests {
 
         let result = imposter.execute_stub_with_rift(&stub, 0);
         assert!(result.is_some());
-        let (status, _headers, _body, behaviors, rift_ext, is_fault) = result.unwrap();
+        let (status, _headers, _body, behaviors, rift_ext, _mode, is_fault) = result.unwrap();
         assert_eq!(status, 200);
         assert!(behaviors.is_some());
         assert!(rift_ext.is_some());
@@ -5660,6 +6315,7 @@ mod tests {
             service_name: None,
             service_info: None,
             rift: None,
+            ..Default::default()
         };
         let imposter = Imposter::new(config);
 
@@ -5674,7 +6330,7 @@ mod tests {
 
         let result = imposter.execute_stub_with_rift(&stub, 0);
         assert!(result.is_some());
-        let (status, _headers, body, _behaviors, _rift_ext, is_fault) = result.unwrap();
+        let (status, _headers, body, _behaviors, _rift_ext, _mode, is_fault) = result.unwrap();
         assert_eq!(status, 0);
         assert_eq!(body, "CONNECTION_RESET_BY_PEER");
         assert!(is_fault);
@@ -5693,6 +6349,7 @@ mod tests {
             service_name: None,
             service_info: None,
             rift: None,
+            ..Default::default()
         };
         let imposter = Imposter::new(config);
 
@@ -5720,6 +6377,7 @@ mod tests {
             service_name: None,
             service_info: None,
             rift: None,
+            ..Default::default()
         };
         let imposter = Imposter::new(config);
 
@@ -5731,6 +6389,7 @@ mod tests {
                     status_code: 200,
                     headers: HashMap::new(), // No content-type
                     body: Some(serde_json::json!({"key": "value"})), // JSON object
+                    ..Default::default()
                 },
                 behaviors: None,
                 rift: None,
@@ -5740,7 +6399,7 @@ mod tests {
 
         let result = imposter.execute_stub_with_rift(&stub, 0);
         assert!(result.is_some());
-        let (_status, headers, body, _behaviors, _rift_ext, _is_fault) = result.unwrap();
+        let (_status, headers, body, _behaviors, _rift_ext, _mode, _is_fault) = result.unwrap();
         // Should auto-add Content-Type for JSON objects
         assert_eq!(
             headers.get("Content-Type"),
@@ -5766,6 +6425,7 @@ mod tests {
             service_name: None,
             service_info: None,
             rift: None,
+            ..Default::default()
         };
         let imposter = Imposter::new(config);
 
@@ -5804,6 +6464,7 @@ mod tests {
             service_name: None,
             service_info: None,
             rift: None,
+            ..Default::default()
         };
         let imposter = Imposter::new(config);
 
@@ -5815,6 +6476,7 @@ mod tests {
                     status_code: 200,
                     headers: HashMap::new(),
                     body: None,
+                    ..Default::default()
                 },
                 behaviors: None,
                 rift: None,
@@ -6236,6 +6898,7 @@ mod tests {
             service_name: None,
             service_info: None,
             rift: None,
+            ..Default::default()
         };
         let imposter = Imposter::new(config);
 
@@ -6248,6 +6911,7 @@ mod tests {
                         status_code: 200,
                         headers: HashMap::new(),
                         body: Some(serde_json::json!("first")),
+                        ..Default::default()
                     },
                     behaviors: None,
                     rift: Some(RiftResponseExtension {
@@ -6269,6 +6933,7 @@ mod tests {
                         status_code: 200,
                         headers: HashMap::new(),
                         body: Some(serde_json::json!("second")),
+                        ..Default::default()
                     },
                     behaviors: None,
                     rift: None, // No rift extension
@@ -6280,21 +6945,21 @@ mod tests {
         // First call
         let result1 = imposter.execute_stub_with_rift(&stub, 0);
         assert!(result1.is_some());
-        let (_, _, body1, _, rift1, _) = result1.unwrap();
+        let (_, _, body1, _, rift1, _mode, _is_fault) = result1.unwrap();
         assert_eq!(body1, "first");
         assert!(rift1.is_some());
 
         // Second call - should cycle to second response
         let result2 = imposter.execute_stub_with_rift(&stub, 0);
         assert!(result2.is_some());
-        let (_, _, body2, _, rift2, _) = result2.unwrap();
+        let (_, _, body2, _, rift2, _mode, _is_fault) = result2.unwrap();
         assert_eq!(body2, "second");
         assert!(rift2.is_none());
 
         // Third call - should cycle back to first
         let result3 = imposter.execute_stub_with_rift(&stub, 0);
         assert!(result3.is_some());
-        let (_, _, body3, _, rift3, _) = result3.unwrap();
+        let (_, _, body3, _, rift3, _mode, _is_fault) = result3.unwrap();
         assert_eq!(body3, "first");
         assert!(rift3.is_some());
     }

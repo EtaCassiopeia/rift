@@ -38,8 +38,39 @@ async fn create_imposter(world: &mut CompatibilityWorld, step: &Step) {
 #[when(expr = "I PUT to {string} on both services:")]
 async fn put_to_both(world: &mut CompatibilityWorld, path: String, step: &Step) {
     let body = step.docstring().expect("Missing docstring").to_string();
-    world.send_to_both("PUT", &path, Some(&body), None).await
-        .expect("Failed to send PUT request");
+    // For PUT /imposters, we need to adjust port numbers in the body for Rift
+    if path == "/imposters" {
+        let rift_body = world.adjust_imposters_body_for_rift(&body).unwrap_or(body.clone());
+        let mb_url = format!("{}{}", world.config.mb_admin_url, path);
+        let rift_url = format!("{}{}", world.config.rift_admin_url, path);
+
+        let client = world.client.clone();
+        let (mb_response, rift_response) = tokio::join!(
+            client.put(&mb_url).header("Content-Type", "application/json").body(body.clone()).send(),
+            client.put(&rift_url).header("Content-Type", "application/json").body(rift_body).send()
+        );
+        let mb_resp = mb_response.expect("Failed to PUT on Mountebank");
+        let rift_resp = rift_response.expect("Failed to PUT on Rift");
+
+        let mb_status = mb_resp.status().as_u16();
+        let rift_status = rift_resp.status().as_u16();
+        let mb_body = mb_resp.text().await.unwrap_or_default();
+        let rift_body = rift_resp.text().await.unwrap_or_default();
+
+        world.last_response = Some(crate::world::DualResponse {
+            mb_status,
+            mb_body,
+            mb_headers: std::collections::HashMap::new(),
+            mb_duration: std::time::Duration::ZERO,
+            rift_status,
+            rift_body,
+            rift_headers: std::collections::HashMap::new(),
+            rift_duration: std::time::Duration::ZERO,
+        });
+    } else {
+        world.send_to_both("PUT", &path, Some(&body), None).await
+            .expect("Failed to send PUT request");
+    }
 }
 
 #[when(expr = "I send GET request to {string} on imposter {int}")]
@@ -142,8 +173,17 @@ async fn add_stub(world: &mut CompatibilityWorld, port: u16, step: &Step) {
 async fn add_stub_at_index(world: &mut CompatibilityWorld, index: usize, port: u16, step: &Step) {
     let stub = step.docstring().expect("Missing docstring").to_string();
     let wrapped = format!(r#"{{"index": {}, "stub": {}}}"#, index, stub);
-    world.send_to_both("POST", &format!("/imposters/{}/stubs", port), Some(&wrapped), None).await
-        .expect("Failed to add stub at index");
+    // Both services use the same port numbers (Docker handles the mapping)
+    let mb_url = format!("{}/imposters/{}/stubs", world.config.mb_admin_url, port);
+    let rift_url = format!("{}/imposters/{}/stubs", world.config.rift_admin_url, port);
+
+    let client = &world.client;
+    let (mb_response, rift_response) = tokio::join!(
+        client.post(&mb_url).header("Content-Type", "application/json").body(wrapped.clone()).send(),
+        client.post(&rift_url).header("Content-Type", "application/json").body(wrapped.clone()).send()
+    );
+    mb_response.expect("Failed to add stub on Mountebank");
+    rift_response.expect("Failed to add stub on Rift");
 }
 
 #[when(expr = "I replace stub {int} on imposter {int} on both services:")]
@@ -269,12 +309,49 @@ async fn send_get_with_header_value(world: &mut CompatibilityWorld, key: String,
 }
 
 // ============================================
+// Form data step definitions
+// ============================================
+
+#[when(expr = "I send POST request with form body {string} and Content-Type {string} on imposter {int}")]
+async fn send_post_form_body(
+    world: &mut CompatibilityWorld,
+    body: String,
+    content_type: String,
+    port: u16,
+) {
+    let headers = vec![("Content-Type".to_string(), content_type)];
+    world
+        .send_to_imposter(port, "POST", "/", Some(&body), Some(&headers))
+        .await
+        .expect("Failed to send POST request with form body");
+}
+
+// ============================================
+// Rift-only step definitions
+// ============================================
+
+#[when(expr = "I create an imposter on Rift only:")]
+async fn create_imposter_rift_only(world: &mut CompatibilityWorld, step: &Step) {
+    let config = step.docstring().expect("Missing docstring").to_string();
+    world
+        .send_to_rift("POST", "/imposters", Some(&config))
+        .await
+        .expect("Failed to create imposter on Rift");
+}
+
+// ============================================
 // Mountebank-only step definitions
 // ============================================
 
 #[when(expr = "I POST to {string} with missing required fields on Mountebank:")]
-async fn post_missing_fields_mb_only(world: &mut CompatibilityWorld, path: String, step: &cucumber::gherkin::Step) {
+async fn post_missing_fields_mb_only(
+    world: &mut CompatibilityWorld,
+    path: String,
+    step: &cucumber::gherkin::Step,
+) {
     let body = step.docstring().expect("Missing docstring").to_string();
-    world.send_to_mountebank("POST", &path, Some(&body)).await
+    world
+        .send_to_mountebank("POST", &path, Some(&body))
+        .await
         .expect("Failed to send POST to Mountebank");
 }
