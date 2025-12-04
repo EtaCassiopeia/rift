@@ -1,4 +1,4 @@
-use crate::flow_state::FlowStore;
+use crate::extensions::flow_state::FlowStore;
 use crate::scripting::{FaultDecision, ScriptRequest};
 use anyhow::{anyhow, Result};
 use crossbeam::channel::{bounded, Receiver, Sender};
@@ -620,7 +620,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_pool_execute_simple_rhai_script() {
-        use crate::flow_state::NoOpFlowStore;
+        use crate::extensions::flow_state::NoOpFlowStore;
         use crate::scripting::ScriptRequest;
         use std::collections::HashMap;
 
@@ -658,7 +658,7 @@ mod tests {
             path_params: HashMap::new(),
         };
 
-        let flow_store: Arc<dyn crate::flow_state::FlowStore> = Arc::new(NoOpFlowStore);
+        let flow_store: Arc<dyn crate::extensions::flow_state::FlowStore> = Arc::new(NoOpFlowStore);
 
         let result = pool.execute(compiled, request, flow_store).await;
         assert!(result.is_ok());

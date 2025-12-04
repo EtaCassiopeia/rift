@@ -9,10 +9,10 @@ use super::network::create_reusable_listener;
 use super::tls::create_tls_acceptor;
 use crate::behaviors::{CsvCache, ResponseCycler};
 use crate::config::{Config, Protocol as RiftProtocol, Upstream};
-use crate::flow_state::{create_flow_store, FlowStore};
-use crate::matcher::CompiledRule;
+use crate::extensions::flow_state::{create_flow_store, FlowStore};
+use crate::extensions::matcher::CompiledRule;
+use crate::extensions::routing::Router;
 use crate::recording::{ProxyMode, RecordingStore};
-use crate::routing::Router;
 #[cfg(feature = "javascript")]
 use crate::scripting::compile_js_to_bytecode;
 #[cfg(feature = "lua")]
@@ -115,10 +115,10 @@ impl ProxyServer {
         } else if !config.script_rules.is_empty() {
             // Scripts are configured but no flow_state - use no-op store
             tracing::info!("Using NoOpFlowStore for scripts (flow_state not configured)");
-            Arc::new(crate::flow_state::NoOpFlowStore)
+            Arc::new(crate::extensions::flow_state::NoOpFlowStore)
         } else {
             // Neither scripts nor flow_state configured - use no-op store as placeholder
-            Arc::new(crate::flow_state::NoOpFlowStore)
+            Arc::new(crate::extensions::flow_state::NoOpFlowStore)
         };
 
         // Create script pool and decision cache for script execution

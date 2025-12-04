@@ -18,23 +18,24 @@
 //! rift --datadir ./mb-data                # Persist imposters to directory
 //! ```
 
+// ===== Core Mountebank-compatible modules =====
 mod admin_api;
 mod backends;
 mod behaviors;
 mod config;
-mod fault;
-mod flow_state;
 mod imposter;
-mod matcher;
-mod metrics;
 mod predicate;
 mod proxy;
 mod recording;
-mod routing;
-mod rule_index;
+
+// ===== Rift Extensions (features beyond Mountebank) =====
+mod extensions;
+
+// Internal modules
 mod scripting;
-mod stub_analysis;
-mod template;
+
+// Re-export extension modules for convenience
+use extensions::metrics;
 
 use admin_api::AdminApiServer;
 use clap::{Parser, Subcommand};

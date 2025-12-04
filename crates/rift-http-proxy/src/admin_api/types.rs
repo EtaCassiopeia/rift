@@ -1,7 +1,7 @@
 //! Response types and HATEOAS structures for the Admin API.
 
+use crate::extensions::stub_analysis::StubWarning;
 use crate::imposter::{RecordedRequest, Stub};
-use crate::stub_analysis::StubWarning;
 use bytes::Bytes;
 use http_body_util::Full;
 use hyper::body::Incoming;

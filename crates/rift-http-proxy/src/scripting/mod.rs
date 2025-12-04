@@ -1,4 +1,4 @@
-use crate::flow_state::FlowStore;
+use crate::extensions::flow_state::FlowStore;
 use anyhow::{anyhow, Result};
 use rhai::Dynamic;
 use serde_json::Value;
@@ -191,7 +191,7 @@ impl ScriptFlowStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::flow_state::NoOpFlowStore;
+    use crate::extensions::flow_state::NoOpFlowStore;
     use std::collections::HashMap;
 
     // ============================================
@@ -498,7 +498,7 @@ mod tests {
             path_params: HashMap::new(),
         };
 
-        let flow_store: Arc<dyn crate::flow_state::FlowStore> = Arc::new(NoOpFlowStore);
+        let flow_store: Arc<dyn crate::extensions::flow_state::FlowStore> = Arc::new(NoOpFlowStore);
         let result = engine.should_inject_fault(&request, flow_store);
         assert!(result.is_ok());
     }

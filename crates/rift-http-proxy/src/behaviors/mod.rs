@@ -24,14 +24,18 @@ mod transform;
 mod types;
 mod wait;
 
-// Re-export main types
+// Re-export main types for library consumers
+#[allow(unused_imports)]
 pub use copy::{apply_copy_behaviors, CopyBehavior, CopySource};
 pub use cycler::{HasRepeatBehavior, ResponseCycler};
+#[allow(unused_imports)]
 pub use extraction::{extract_jsonpath, extract_xpath, ExtractionMethod};
+#[allow(unused_imports)]
 pub use lookup::{
     apply_lookup_behaviors, CsvCache, CsvData, CsvDataSource, DataSource, LookupBehavior, LookupKey,
 };
 pub use request::RequestContext;
 pub use transform::{apply_decorate, apply_shell_transform};
 pub use types::ResponseBehaviors;
+#[allow(unused_imports)]
 pub use wait::WaitBehavior;

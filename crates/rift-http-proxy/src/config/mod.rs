@@ -12,19 +12,25 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-// Re-export all types
+// Re-export all types for library consumers
+#[allow(unused_imports)]
 pub use listen::{ListenConfig, MetricsConfig, TlsConfig};
 pub use protocol::{DeploymentMode, Protocol};
+#[allow(unused_imports)]
 pub use recording::{
     PredicateGenerator, PredicateGeneratorMatches, RecordingConfig, RecordingPersistence,
 };
+#[allow(unused_imports)]
 pub use routing::{HeaderMatch, HostMatch, Route, RouteMatch};
+#[allow(unused_imports)]
 pub use rules::{
     ErrorFault, FaultConfig, LatencyFault, MatchConfig, PathMatch, Rule, ScriptRule, TcpFault,
 };
+#[allow(unused_imports)]
 pub use scripting::{
     DecisionCacheConfigFile, FlowStateConfig, RedisConfig, ScriptEngineConfig, ScriptPoolConfigFile,
 };
+#[allow(unused_imports)]
 pub use upstream::{ConnectionPoolConfig, HealthCheckConfig, Upstream, UpstreamConfig};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

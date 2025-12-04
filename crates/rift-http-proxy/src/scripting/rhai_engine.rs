@@ -1,4 +1,4 @@
-use crate::flow_state::FlowStore;
+use crate::extensions::flow_state::FlowStore;
 use anyhow::{anyhow, Result};
 use rhai::{Dynamic, Engine, Map, Scope, AST};
 use serde_json::Value;

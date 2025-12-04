@@ -12,17 +12,17 @@ use crate::behaviors::{
     RequestContext,
 };
 use crate::config::TcpFault;
-use crate::fault::{apply_latency, create_error_response, decide_fault, FaultDecision};
-use crate::flow_state::FlowStore;
-use crate::matcher::CompiledRule;
-use crate::metrics;
+use crate::extensions::fault::{apply_latency, create_error_response, decide_fault, FaultDecision};
+use crate::extensions::flow_state::FlowStore;
+use crate::extensions::matcher::CompiledRule;
+use crate::extensions::metrics;
+use crate::extensions::routing::Router;
+use crate::extensions::template::{has_template_variables, process_template, RequestData};
 use crate::recording::RecordingStore;
-use crate::routing::Router;
 use crate::scripting::{
     CacheKey, CompiledScript, DecisionCache, FaultDecision as ScriptFaultDecision, ScriptPool,
     ScriptRequest,
 };
-use crate::template::{has_template_variables, process_template, RequestData};
 use http_body_util::combinators::BoxBody;
 use http_body_util::BodyExt;
 use hyper::body::Bytes;
