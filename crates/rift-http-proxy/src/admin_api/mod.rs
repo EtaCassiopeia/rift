@@ -1,0 +1,16 @@
+//! Admin REST API for Rift proxy and imposter management.
+//!
+//! This module provides a Mountebank-compatible REST API for:
+//! - Creating, deleting, and listing imposters
+//! - Managing stubs within imposters
+//! - Clearing recorded requests and proxy responses
+//! - Health and metrics endpoints
+//!
+//! The API listens on a configurable port (default: 2525).
+
+mod handlers;
+mod router;
+mod server;
+mod types;
+
+pub use server::AdminApiServer;
