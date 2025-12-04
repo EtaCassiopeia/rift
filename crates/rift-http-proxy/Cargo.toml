@@ -64,6 +64,7 @@ chrono = { version = "0.4", features = ["serde"] }
 regex = "1.11"
 rand = "0.8"
 urlencoding = "2.1"
+similar = "2.6"
 matchit = "0.9"
 aho-corasick = "1.1"
 anyhow = "1.0"

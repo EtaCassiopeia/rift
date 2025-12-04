@@ -212,3 +212,55 @@ Feature: Admin API Compatibility
     Given an imposter exists on port 4545 with proxy stub
     When I send GET request to "/imposters/4545?replayable=true&removeProxies=true" on both services
     Then both services should return status 200
+
+  # ==========================================================================
+  # GET /imposters/:port/stubs - List All Stubs
+  # ==========================================================================
+
+  Scenario: Get all stubs for an imposter
+    Given an imposter on port 4545 with stubs:
+      """
+      [
+        {"predicates": [{"equals": {"path": "/first"}}], "responses": [{"is": {"statusCode": 200, "body": "first"}}]},
+        {"predicates": [{"equals": {"path": "/second"}}], "responses": [{"is": {"statusCode": 200, "body": "second"}}]}
+      ]
+      """
+    When I send GET request to "/imposters/4545/stubs" on both services
+    Then both services should return status 200
+    And both responses should be valid JSON
+    And both responses should contain "stubs"
+
+  Scenario: Get stubs for non-existent imposter returns 404
+    When I send GET request to "/imposters/9999/stubs" on both services
+    Then both services should return status 404
+
+  # ==========================================================================
+  # GET /imposters/:port/stubs/:index - Get Single Stub
+  # ==========================================================================
+
+  Scenario: Get stub by index
+    Given an imposter on port 4545 with stubs:
+      """
+      [
+        {"predicates": [{"equals": {"path": "/zero"}}], "responses": [{"is": {"statusCode": 200, "body": "stub zero"}}]},
+        {"predicates": [{"equals": {"path": "/one"}}], "responses": [{"is": {"statusCode": 200, "body": "stub one"}}]}
+      ]
+      """
+    When I send GET request to "/imposters/4545/stubs/0" on both services
+    Then both services should return status 200
+    And both responses should contain "/zero"
+    When I send GET request to "/imposters/4545/stubs/1" on both services
+    Then both services should return status 200
+    And both responses should contain "/one"
+
+  Scenario: Get stub with out-of-range index returns 404
+    Given an imposter on port 4545 with stub:
+      """
+      {"predicates": [{"equals": {"path": "/test"}}], "responses": [{"is": {"statusCode": 200, "body": "test"}}]}
+      """
+    When I send GET request to "/imposters/4545/stubs/99" on both services
+    Then both services should return status 404
+
+  Scenario: Get stub for non-existent imposter returns 404
+    When I send GET request to "/imposters/9999/stubs/0" on both services
+    Then both services should return status 404

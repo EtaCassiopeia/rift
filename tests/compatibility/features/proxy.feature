@@ -380,3 +380,82 @@ Feature: Proxy Mode Compatibility
       """
     When I send GET request to "/test" on imposter 4545
     Then both services should have recorded 1 request
+
+  # ==========================================================================
+  # pathRewrite - Path Transformation
+  # ==========================================================================
+
+  Scenario: pathRewrite removes path prefix when proxying
+    Given a backend server that echoes path on port 4546
+    And an imposter on port 4545 with proxy:
+      """
+      {
+        "port": 4545,
+        "protocol": "http",
+        "stubs": [{
+          "responses": [{
+            "proxy": {
+              "to": "http://localhost:4546",
+              "mode": "proxyAlways",
+              "pathRewrite": {
+                "from": "/api/v1",
+                "to": ""
+              }
+            }
+          }]
+        }]
+      }
+      """
+    When I send GET request to "/api/v1/users" on imposter 4545
+    Then both services should return status 200
+    And backend should receive path "/users" on both services
+
+  Scenario: pathRewrite replaces path prefix
+    Given a backend server that echoes path on port 4546
+    And an imposter on port 4545 with proxy:
+      """
+      {
+        "port": 4545,
+        "protocol": "http",
+        "stubs": [{
+          "responses": [{
+            "proxy": {
+              "to": "http://localhost:4546",
+              "mode": "proxyAlways",
+              "pathRewrite": {
+                "from": "/old-api",
+                "to": "/new-api"
+              }
+            }
+          }]
+        }]
+      }
+      """
+    When I send GET request to "/old-api/resource" on imposter 4545
+    Then both services should return status 200
+    And backend should receive path "/new-api/resource" on both services
+
+  Scenario: pathRewrite does not modify non-matching paths
+    Given a backend server that echoes path on port 4546
+    And an imposter on port 4545 with proxy:
+      """
+      {
+        "port": 4545,
+        "protocol": "http",
+        "stubs": [{
+          "responses": [{
+            "proxy": {
+              "to": "http://localhost:4546",
+              "mode": "proxyAlways",
+              "pathRewrite": {
+                "from": "/api/v1",
+                "to": ""
+              }
+            }
+          }]
+        }]
+      }
+      """
+    When I send GET request to "/other/path" on imposter 4545
+    Then both services should return status 200
+    And backend should receive path "/other/path" on both services

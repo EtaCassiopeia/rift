@@ -376,3 +376,26 @@ async fn imposter_with_proxy_and_recording(world: &mut CompatibilityWorld, _port
         .expect("Failed to create proxy imposter with recording");
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 }
+
+#[given(expr = "a backend server that echoes path on port {int}")]
+async fn backend_server_echo_path(world: &mut CompatibilityWorld, port: u16) {
+    // Create a backend that echoes the received path using inject
+    // The response body will contain the path for verification
+    let imposter = format!(
+        r#"{{
+            "port": {},
+            "protocol": "http",
+            "recordRequests": true,
+            "stubs": [{{
+                "predicates": [],
+                "responses": [{{
+                    "inject": "function(config) {{ return {{ statusCode: 200, body: 'path:' + config.request.path }}; }}"
+                }}]
+            }}]
+        }}"#,
+        port
+    );
+    world.create_imposter_on_both(&imposter).await
+        .expect("Failed to create path echo backend server");
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+}

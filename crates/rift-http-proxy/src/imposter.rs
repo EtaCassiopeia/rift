@@ -415,6 +415,15 @@ fn default_status_code() -> u16 {
     200
 }
 
+/// Path rewrite configuration for proxy responses (Mountebank compatible)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PathRewrite {
+    /// Pattern to match in the path (string to replace)
+    pub from: String,
+    /// Replacement string
+    pub to: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProxyResponse {
@@ -429,6 +438,9 @@ pub struct ProxyResponse {
     pub inject_headers: HashMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub add_decorate_behavior: Option<String>,
+    /// Path rewrite configuration for transforming the request path before proxying
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path_rewrite: Option<PathRewrite>,
 }
 
 /// Configuration for creating an imposter
@@ -1987,15 +1999,29 @@ impl Imposter {
         info!("Proxy config - addDecorateBehavior: {:?}, addWaitBehavior: {}, predicateGenerators: {:?}",
             proxy_config.add_decorate_behavior, proxy_config.add_wait_behavior, proxy_config.predicate_generators);
 
-        // Build the proxy URL
+        // Build the proxy URL, applying path rewrite if configured
+        let original_path = uri.path();
+        let rewritten_path = if let Some(ref rewrite) = proxy_config.path_rewrite {
+            original_path.replacen(&rewrite.from, &rewrite.to, 1)
+        } else {
+            original_path.to_string()
+        };
+
         let target_url = format!(
             "{}{}{}",
             proxy_config.to,
-            uri.path(),
+            rewritten_path,
             uri.query().map(|q| format!("?{q}")).unwrap_or_default()
         );
 
-        debug!("Proxy request to: {}", target_url);
+        if proxy_config.path_rewrite.is_some() {
+            debug!(
+                "Proxy request to: {} (path rewritten from '{}')",
+                target_url, original_path
+            );
+        } else {
+            debug!("Proxy request to: {}", target_url);
+        }
 
         // Create request signature for recording
         let signature = RequestSignature::new(method, uri.path(), uri.query(), &[]);
@@ -2193,6 +2219,12 @@ impl Imposter {
     /// Get all stubs
     pub fn get_stubs(&self) -> Vec<Stub> {
         self.stubs.read().clone()
+    }
+
+    /// Get a specific stub by index
+    pub fn get_stub(&self, index: usize) -> Option<Stub> {
+        let stubs = self.stubs.read();
+        stubs.get(index).cloned()
     }
 
     /// Set enabled state
@@ -2453,6 +2485,14 @@ impl ImposterManager {
         imposter
             .delete_stub(index)
             .map_err(|_| ImposterError::StubIndexOutOfBounds(index))
+    }
+
+    /// Get a specific stub by index
+    pub fn get_stub(&self, port: u16, index: usize) -> Result<Stub, ImposterError> {
+        let imposter = self.get_imposter(port)?;
+        imposter
+            .get_stub(index)
+            .ok_or(ImposterError::StubIndexOutOfBounds(index))
     }
 
     /// Shutdown all imposters (for future graceful shutdown)
@@ -6922,5 +6962,104 @@ mod tests {
         } else {
             panic!("Expected RiftScript response");
         }
+    }
+
+    // =============================================================================
+    // PathRewrite Tests
+    // =============================================================================
+
+    #[test]
+    fn test_path_rewrite_serde() {
+        let json = r#"{"from": "/api/v1", "to": ""}"#;
+        let path_rewrite: PathRewrite = serde_json::from_str(json).unwrap();
+        assert_eq!(path_rewrite.from, "/api/v1");
+        assert_eq!(path_rewrite.to, "");
+
+        // Test serialization roundtrip
+        let serialized = serde_json::to_string(&path_rewrite).unwrap();
+        let deserialized: PathRewrite = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(deserialized.from, "/api/v1");
+        assert_eq!(deserialized.to, "");
+    }
+
+    #[test]
+    fn test_path_rewrite_with_replacement() {
+        let json = r#"{"from": "/old-api", "to": "/new-api"}"#;
+        let path_rewrite: PathRewrite = serde_json::from_str(json).unwrap();
+        assert_eq!(path_rewrite.from, "/old-api");
+        assert_eq!(path_rewrite.to, "/new-api");
+    }
+
+    #[test]
+    fn test_proxy_response_with_path_rewrite() {
+        let json = r#"{
+            "to": "http://localhost:4546",
+            "mode": "proxyAlways",
+            "pathRewrite": {
+                "from": "/kaizen",
+                "to": ""
+            }
+        }"#;
+
+        let proxy: ProxyResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(proxy.to, "http://localhost:4546");
+        assert_eq!(proxy.mode, "proxyAlways");
+        assert!(proxy.path_rewrite.is_some());
+
+        let path_rewrite = proxy.path_rewrite.unwrap();
+        assert_eq!(path_rewrite.from, "/kaizen");
+        assert_eq!(path_rewrite.to, "");
+    }
+
+    #[test]
+    fn test_imposter_config_with_path_rewrite() {
+        let json = r#"{
+            "port": 4545,
+            "protocol": "http",
+            "stubs": [{
+                "responses": [{
+                    "proxy": {
+                        "to": "http://backend:8080",
+                        "mode": "proxyAlways",
+                        "pathRewrite": {
+                            "from": "/api/v1",
+                            "to": "/v1"
+                        }
+                    }
+                }]
+            }]
+        }"#;
+
+        let config: ImposterConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.stubs.len(), 1);
+
+        if let StubResponse::Proxy { proxy } = &config.stubs[0].responses[0] {
+            assert!(proxy.path_rewrite.is_some());
+            let path_rewrite = proxy.path_rewrite.as_ref().unwrap();
+            assert_eq!(path_rewrite.from, "/api/v1");
+            assert_eq!(path_rewrite.to, "/v1");
+        } else {
+            panic!("Expected Proxy response");
+        }
+
+        // Test serialization roundtrip
+        let serialized = serde_json::to_string(&config).unwrap();
+        assert!(
+            serialized.contains("pathRewrite"),
+            "Serialized JSON should contain pathRewrite field"
+        );
+    }
+
+    #[test]
+    fn test_proxy_response_without_path_rewrite() {
+        let json = r#"{
+            "to": "http://localhost:4546",
+            "mode": "proxyOnce"
+        }"#;
+
+        let proxy: ProxyResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(proxy.to, "http://localhost:4546");
+        assert_eq!(proxy.mode, "proxyOnce");
+        assert!(proxy.path_rewrite.is_none());
     }
 }
