@@ -2195,6 +2195,12 @@ impl Imposter {
         self.stubs.read().clone()
     }
 
+    /// Get a specific stub by index
+    pub fn get_stub(&self, index: usize) -> Option<Stub> {
+        let stubs = self.stubs.read();
+        stubs.get(index).cloned()
+    }
+
     /// Set enabled state
     pub fn set_enabled(&self, enabled: bool) {
         self.enabled.store(enabled, Ordering::SeqCst);
@@ -2453,6 +2459,14 @@ impl ImposterManager {
         imposter
             .delete_stub(index)
             .map_err(|_| ImposterError::StubIndexOutOfBounds(index))
+    }
+
+    /// Get a specific stub by index
+    pub fn get_stub(&self, port: u16, index: usize) -> Result<Stub, ImposterError> {
+        let imposter = self.get_imposter(port)?;
+        imposter
+            .get_stub(index)
+            .ok_or(ImposterError::StubIndexOutOfBounds(index))
     }
 
     /// Shutdown all imposters (for future graceful shutdown)
