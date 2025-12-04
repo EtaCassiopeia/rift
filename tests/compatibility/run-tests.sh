@@ -465,6 +465,183 @@ test_batch_operations() {
 }
 
 # =============================================================================
+# Proxy Tests
+# =============================================================================
+
+test_proxy() {
+    log_section "Proxy Tests"
+
+    # Create backend imposter on both systems (port 4546)
+    local backend='{
+        "port": 4546,
+        "protocol": "http",
+        "name": "Backend Service",
+        "stubs": [
+            {
+                "predicates": [{"equals": {"path": "/api/users"}}],
+                "responses": [{"is": {"statusCode": 200, "headers": {"Content-Type": "application/json"}, "body": {"users": [{"id": 1, "name": "Alice"}]}}}]
+            },
+            {
+                "predicates": [{"equals": {"path": "/api/health"}}],
+                "responses": [{"is": {"statusCode": 200, "body": "healthy"}}]
+            },
+            {
+                "predicates": [],
+                "responses": [{"is": {"statusCode": 200, "body": "backend default"}}]
+            }
+        ]
+    }'
+    curl -s -X POST -H "Content-Type: application/json" -d "$backend" "$MB_ADMIN/imposters" > /dev/null
+    curl -s -X POST -H "Content-Type: application/json" -d "$backend" "$RIFT_ADMIN/imposters" > /dev/null
+
+    sleep 1
+
+    # Test 1: proxyOnce mode
+    log_info "Testing proxyOnce mode..."
+    local proxy_once='{
+        "port": 4545,
+        "protocol": "http",
+        "name": "Proxy Once",
+        "stubs": [{
+            "responses": [{
+                "proxy": {
+                    "to": "http://localhost:4546",
+                    "mode": "proxyOnce",
+                    "predicateGenerators": [{"matches": {"path": true, "method": true}}]
+                }
+            }]
+        }]
+    }'
+    curl -s -X POST -H "Content-Type: application/json" -d "$proxy_once" "$MB_ADMIN/imposters" > /dev/null
+    curl -s -X POST -H "Content-Type: application/json" -d "$proxy_once" "$RIFT_ADMIN/imposters" > /dev/null
+
+    sleep 1
+
+    # First request (should proxy)
+    curl -s http://localhost:4545/api/users > /dev/null
+    curl -s http://localhost:5545/api/users > /dev/null
+
+    # Check stubs were created
+    mb_stubs=$(curl -s "$MB_ADMIN/imposters/4545" | jq '.stubs | length')
+    rift_stubs=$(curl -s "$RIFT_ADMIN/imposters/4545" | jq '.stubs | length')
+
+    if [ "$mb_stubs" == "$rift_stubs" ] && [ "$mb_stubs" -ge 2 ]; then
+        log_success "proxyOnce - Stub created after first request"
+    else
+        log_fail "proxyOnce - Stub count mismatch (MB: $mb_stubs, Rift: $rift_stubs)"
+    fi
+
+    # Second request (should use recorded stub)
+    mb_resp=$(curl -s http://localhost:4545/api/users)
+    rift_resp=$(curl -s http://localhost:5545/api/users)
+
+    if echo "$mb_resp" | grep -q "Alice" && echo "$rift_resp" | grep -q "Alice"; then
+        log_success "proxyOnce - Recorded stub returns correct response"
+    else
+        log_fail "proxyOnce - Response mismatch"
+    fi
+
+    # Cleanup proxyOnce test
+    curl -s -X DELETE "$MB_ADMIN/imposters/4545" > /dev/null
+    curl -s -X DELETE "$RIFT_ADMIN/imposters/4545" > /dev/null
+
+    # Test 2: proxyAlways mode
+    log_info "Testing proxyAlways mode..."
+    local proxy_always='{
+        "port": 4545,
+        "protocol": "http",
+        "name": "Proxy Always",
+        "stubs": [{
+            "responses": [{
+                "proxy": {
+                    "to": "http://localhost:4546",
+                    "mode": "proxyAlways",
+                    "predicateGenerators": [{"matches": {"path": true}}]
+                }
+            }]
+        }]
+    }'
+    curl -s -X POST -H "Content-Type: application/json" -d "$proxy_always" "$MB_ADMIN/imposters" > /dev/null
+    curl -s -X POST -H "Content-Type: application/json" -d "$proxy_always" "$RIFT_ADMIN/imposters" > /dev/null
+
+    sleep 1
+
+    # Make 3 requests to same endpoint
+    for i in 1 2 3; do
+        curl -s http://localhost:4545/api/health > /dev/null
+        curl -s http://localhost:5545/api/health > /dev/null
+    done
+
+    # Check that multiple responses were recorded
+    mb_responses=$(curl -s "$MB_ADMIN/imposters/4545" | jq '.stubs[1].responses | length')
+    rift_responses=$(curl -s "$RIFT_ADMIN/imposters/4545" | jq '.stubs[1].responses | length')
+
+    if [ "$mb_responses" == "$rift_responses" ] && [ "$mb_responses" -ge 3 ]; then
+        log_success "proxyAlways - Multiple responses recorded ($mb_responses)"
+    else
+        log_fail "proxyAlways - Response count mismatch (MB: $mb_responses, Rift: $rift_responses)"
+    fi
+
+    # Cleanup proxyAlways test
+    curl -s -X DELETE "$MB_ADMIN/imposters/4545" > /dev/null
+    curl -s -X DELETE "$RIFT_ADMIN/imposters/4545" > /dev/null
+
+    # Test 3: addWaitBehavior
+    log_info "Testing addWaitBehavior..."
+
+    # Create backend with delay
+    curl -s -X DELETE "$MB_ADMIN/imposters/4546" > /dev/null
+    curl -s -X DELETE "$RIFT_ADMIN/imposters/4546" > /dev/null
+
+    local slow_backend='{
+        "port": 4546,
+        "protocol": "http",
+        "stubs": [{
+            "responses": [{"is": {"statusCode": 200, "body": "slow"}, "_behaviors": {"wait": 100}}]
+        }]
+    }'
+    curl -s -X POST -H "Content-Type: application/json" -d "$slow_backend" "$MB_ADMIN/imposters" > /dev/null
+    curl -s -X POST -H "Content-Type: application/json" -d "$slow_backend" "$RIFT_ADMIN/imposters" > /dev/null
+
+    local proxy_wait='{
+        "port": 4545,
+        "protocol": "http",
+        "stubs": [{
+            "responses": [{
+                "proxy": {
+                    "to": "http://localhost:4546",
+                    "mode": "proxyOnce",
+                    "addWaitBehavior": true,
+                    "predicateGenerators": [{"matches": {"path": true}}]
+                }
+            }]
+        }]
+    }'
+    curl -s -X POST -H "Content-Type: application/json" -d "$proxy_wait" "$MB_ADMIN/imposters" > /dev/null
+    curl -s -X POST -H "Content-Type: application/json" -d "$proxy_wait" "$RIFT_ADMIN/imposters" > /dev/null
+
+    sleep 1
+
+    # Make request to record with latency
+    curl -s http://localhost:4545/slow > /dev/null
+    curl -s http://localhost:5545/slow > /dev/null
+
+    # Check wait behavior was recorded (Mountebank uses 'behaviors', Rift uses '_behaviors')
+    mb_wait=$(curl -s "$MB_ADMIN/imposters/4545" | jq '.stubs[0].responses[0].behaviors[0].wait // .stubs[0].responses[0]._behaviors.wait // 0')
+    rift_wait=$(curl -s "$RIFT_ADMIN/imposters/4545" | jq '.stubs[0].responses[0]._behaviors.wait // .stubs[0].responses[0].behaviors[0].wait // 0')
+
+    if [ "$mb_wait" -ge 90 ] && [ "$rift_wait" -ge 90 ]; then
+        log_success "addWaitBehavior - Latency recorded (MB: ${mb_wait}ms, Rift: ${rift_wait}ms)"
+    else
+        log_fail "addWaitBehavior - Latency not recorded properly (MB: ${mb_wait}ms, Rift: ${rift_wait}ms)"
+    fi
+
+    # Cleanup
+    curl -s -X DELETE "$MB_ADMIN/imposters" > /dev/null
+    curl -s -X DELETE "$RIFT_ADMIN/imposters" > /dev/null
+}
+
+# =============================================================================
 # Error Handling Tests
 # =============================================================================
 
@@ -514,6 +691,7 @@ main() {
     test_response_behaviors
     test_request_recording
     test_batch_operations
+    test_proxy
     test_error_handling
 
     # Summary
