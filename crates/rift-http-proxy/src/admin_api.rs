@@ -62,15 +62,38 @@ impl AdminApiServer {
     }
 }
 
+/// HATEOAS link structure for Mountebank compatibility
+#[derive(Debug, Serialize, Clone)]
+struct Link {
+    href: String,
+}
+
+/// HATEOAS links for imposter resources
+#[derive(Debug, Serialize, Clone)]
+struct ImposterLinks {
+    #[serde(rename = "self")]
+    self_link: Link,
+    stubs: Link,
+}
+
+/// HATEOAS links for stub resources
+#[derive(Debug, Serialize, Clone)]
+struct StubLinks {
+    #[serde(rename = "self")]
+    self_link: Link,
+}
+
 /// Response types
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ImposterSummary {
-    port: u16,
     protocol: String,
+    port: u16,
     #[serde(skip_serializing_if = "Option::is_none")]
     name: Option<String>,
     number_of_requests: u64,
+    #[serde(rename = "_links")]
+    links: ImposterLinks,
 }
 
 #[derive(Debug, Serialize)]
@@ -78,18 +101,28 @@ struct ListImpostersResponse {
     imposters: Vec<ImposterSummary>,
 }
 
+/// A stub with its _links for the response
+#[derive(Debug, Serialize)]
+struct StubWithLinks {
+    #[serde(flatten)]
+    stub: Stub,
+    #[serde(rename = "_links")]
+    links: StubLinks,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ImposterDetail {
-    port: u16,
     protocol: String,
+    port: u16,
     #[serde(skip_serializing_if = "Option::is_none")]
     name: Option<String>,
-    record_requests: bool,
     number_of_requests: u64,
-    stubs: Vec<Stub>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    requests: Option<Vec<crate::imposter::RecordedRequest>>,
+    record_requests: bool,
+    requests: Vec<crate::imposter::RecordedRequest>,
+    stubs: Vec<StubWithLinks>,
+    #[serde(rename = "_links")]
+    links: ImposterLinks,
     /// Rift extensions - includes stub analysis warnings
     /// This field is NOT part of Mountebank's API
     #[serde(rename = "_rift", skip_serializing_if = "Option::is_none")]
@@ -123,6 +156,39 @@ struct AddStubRequest {
     stub: Stub,
 }
 
+/// Extract base URL from request headers for HATEOAS links
+fn get_base_url(req: &Request<Incoming>) -> String {
+    // Try to get the host from the Host header
+    if let Some(host) = req.headers().get("host") {
+        if let Ok(host_str) = host.to_str() {
+            return format!("http://{}", host_str);
+        }
+    }
+    // Fallback to localhost:2525
+    "http://localhost:2525".to_string()
+}
+
+/// Generate HATEOAS links for an imposter
+fn make_imposter_links(base_url: &str, port: u16) -> ImposterLinks {
+    ImposterLinks {
+        self_link: Link {
+            href: format!("{}/imposters/{}", base_url, port),
+        },
+        stubs: Link {
+            href: format!("{}/imposters/{}/stubs", base_url, port),
+        },
+    }
+}
+
+/// Generate HATEOAS links for a stub
+fn make_stub_links(base_url: &str, port: u16, index: usize) -> StubLinks {
+    StubLinks {
+        self_link: Link {
+            href: format!("{}/imposters/{}/stubs/{}", base_url, port, index),
+        },
+    }
+}
+
 /// Main request handler
 async fn handle_admin_request(
     req: Request<Incoming>,
@@ -131,22 +197,25 @@ async fn handle_admin_request(
     let method = req.method().clone();
     let path = req.uri().path().to_string();
     let query = req.uri().query().map(|s| s.to_string());
+    let base_url = get_base_url(&req);
 
     debug!("Admin API: {} {}", method, path);
 
     let response = match (&method, path.as_str()) {
         // Root endpoint
-        (&Method::GET, "/") => handle_root(),
+        (&Method::GET, "/") => handle_root(&base_url),
 
         // Imposter endpoints
-        (&Method::POST, "/imposters") => handle_create_imposter(req, manager).await,
-        (&Method::GET, "/imposters") => handle_list_imposters(manager, query.as_deref()).await,
-        (&Method::PUT, "/imposters") => handle_replace_all_imposters(req, manager).await,
-        (&Method::DELETE, "/imposters") => handle_delete_all_imposters(manager).await,
+        (&Method::POST, "/imposters") => handle_create_imposter(req, &base_url, manager).await,
+        (&Method::GET, "/imposters") => {
+            handle_list_imposters(manager, query.as_deref(), &base_url).await
+        }
+        (&Method::PUT, "/imposters") => handle_replace_all_imposters(req, &base_url, manager).await,
+        (&Method::DELETE, "/imposters") => handle_delete_all_imposters(manager, &base_url).await,
 
         // Individual imposter endpoints
         _ if path.starts_with("/imposters/") => {
-            handle_imposter_routes(&method, &path, req, manager).await
+            handle_imposter_routes(&method, &path, req, &base_url, manager).await
         }
 
         // Health and metrics
@@ -172,6 +241,7 @@ async fn handle_imposter_routes(
     method: &Method,
     path: &str,
     req: Request<Incoming>,
+    base_url: &str,
     manager: Arc<ImposterManager>,
 ) -> Response<Full<Bytes>> {
     // Parse port from path: /imposters/:port/...
@@ -187,17 +257,21 @@ async fn handle_imposter_routes(
 
     match (method, parts.as_slice()) {
         // GET /imposters/:port
-        (&Method::GET, ["imposters", _]) => handle_get_imposter(port, manager).await,
+        (&Method::GET, ["imposters", _]) => handle_get_imposter(port, base_url, manager).await,
 
         // DELETE /imposters/:port
-        (&Method::DELETE, ["imposters", _]) => handle_delete_imposter(port, manager).await,
+        (&Method::DELETE, ["imposters", _]) => {
+            handle_delete_imposter(port, base_url, manager).await
+        }
 
         // POST /imposters/:port/stubs - Add stub
-        (&Method::POST, ["imposters", _, "stubs"]) => handle_add_stub(port, req, manager).await,
+        (&Method::POST, ["imposters", _, "stubs"]) => {
+            handle_add_stub(port, req, base_url, manager).await
+        }
 
         // PUT /imposters/:port/stubs - Replace all stubs
         (&Method::PUT, ["imposters", _, "stubs"]) => {
-            handle_replace_all_stubs(port, req, manager).await
+            handle_replace_all_stubs(port, req, base_url, manager).await
         }
 
         // PUT /imposters/:port/stubs/:index - Replace specific stub
@@ -206,7 +280,7 @@ async fn handle_imposter_routes(
                 Ok(i) => i,
                 Err(_) => return error_response(StatusCode::BAD_REQUEST, "Invalid stub index"),
             };
-            handle_replace_stub(port, index, req, manager).await
+            handle_replace_stub(port, index, req, base_url, manager).await
         }
 
         // DELETE /imposters/:port/stubs/:index - Delete specific stub
@@ -215,17 +289,17 @@ async fn handle_imposter_routes(
                 Ok(i) => i,
                 Err(_) => return error_response(StatusCode::BAD_REQUEST, "Invalid stub index"),
             };
-            handle_delete_stub(port, index, manager).await
+            handle_delete_stub(port, index, base_url, manager).await
         }
 
         // DELETE /imposters/:port/savedRequests - Clear recorded requests
         (&Method::DELETE, ["imposters", _, "savedRequests"]) => {
-            handle_clear_requests(port, manager).await
+            handle_clear_requests(port, base_url, manager).await
         }
 
         // DELETE /imposters/:port/savedProxyResponses - Clear saved proxy responses
         (&Method::DELETE, ["imposters", _, "savedProxyResponses"]) => {
-            handle_clear_proxy_responses(port, manager).await
+            handle_clear_proxy_responses(port, base_url, manager).await
         }
 
         // POST /imposters/:port/enable - Enable imposter (Rift extension)
@@ -242,16 +316,13 @@ async fn handle_imposter_routes(
     }
 }
 
-/// GET / - Root endpoint
-fn handle_root() -> Response<Full<Bytes>> {
+/// GET / - Root endpoint (Mountebank-compatible format)
+fn handle_root(base_url: &str) -> Response<Full<Bytes>> {
     let body = serde_json::json!({
-        "name": "rift",
-        "version": env!("CARGO_PKG_VERSION"),
-        "description": "Rift HTTP Proxy with Mountebank-compatible API",
         "_links": {
-            "imposters": {"href": "/imposters"},
-            "health": {"href": "/health"},
-            "metrics": {"href": "/metrics"}
+            "imposters": {"href": format!("{}/imposters", base_url)},
+            "config": {"href": format!("{}/config", base_url)},
+            "logs": {"href": format!("{}/logs", base_url)}
         }
     });
     json_response(StatusCode::OK, &body)
@@ -260,6 +331,7 @@ fn handle_root() -> Response<Full<Bytes>> {
 /// POST /imposters - Create a new imposter
 async fn handle_create_imposter(
     req: Request<Incoming>,
+    base_url: &str,
     manager: Arc<ImposterManager>,
 ) -> Response<Full<Bytes>> {
     let body = match collect_body(req).await {
@@ -267,7 +339,7 @@ async fn handle_create_imposter(
         Err(e) => return error_response(StatusCode::BAD_REQUEST, &e),
     };
 
-    let mut config: ImposterConfig = match serde_json::from_slice(&body) {
+    let config: ImposterConfig = match serde_json::from_slice(&body) {
         Ok(c) => c,
         Err(e) => {
             return error_response(
@@ -277,12 +349,11 @@ async fn handle_create_imposter(
         }
     };
 
-    match manager.create_imposter(config.clone()).await {
+    match manager.create_imposter(config).await {
         Ok(assigned_port) => {
             info!("Created imposter on port {}", assigned_port);
-            // Update config with assigned port for response
-            config.port = Some(assigned_port);
-            json_response(StatusCode::CREATED, &config)
+            // Return the full imposter details (like Mountebank does)
+            handle_get_imposter(assigned_port, base_url, manager).await
         }
         Err(ImposterError::PortInUse(p)) => error_response(
             StatusCode::BAD_REQUEST,
@@ -303,6 +374,7 @@ async fn handle_create_imposter(
 async fn handle_list_imposters(
     manager: Arc<ImposterManager>,
     query: Option<&str>,
+    base_url: &str,
 ) -> Response<Full<Bytes>> {
     let replayable = query
         .map(|q| q.contains("replayable=true"))
@@ -316,15 +388,16 @@ async fn handle_list_imposters(
         let body = serde_json::json!({ "imposters": configs });
         json_response(StatusCode::OK, &body)
     } else {
-        // Return summaries
+        // Return summaries with HATEOAS links
         let summaries: Vec<ImposterSummary> = imposters
             .iter()
             .filter_map(|i| {
                 i.config.port.map(|port| ImposterSummary {
-                    port,
                     protocol: i.config.protocol.clone(),
+                    port,
                     name: i.config.name.clone(),
                     number_of_requests: i.get_request_count(),
+                    links: make_imposter_links(base_url, port),
                 })
             })
             .collect();
@@ -339,6 +412,7 @@ async fn handle_list_imposters(
 /// PUT /imposters - Replace all imposters
 async fn handle_replace_all_imposters(
     req: Request<Incoming>,
+    base_url: &str,
     manager: Arc<ImposterManager>,
 ) -> Response<Full<Bytes>> {
     let body = match collect_body(req).await {
@@ -375,34 +449,29 @@ async fn handle_replace_all_imposters(
         }
     }
 
-    let body = serde_json::json!({ "imposters": created });
-    json_response(StatusCode::OK, &body)
+    // Return list with links
+    handle_list_imposters(manager, None, base_url).await
 }
 
 /// DELETE /imposters - Delete all imposters
-async fn handle_delete_all_imposters(manager: Arc<ImposterManager>) -> Response<Full<Bytes>> {
+/// Returns full imposter configs (like Mountebank does)
+async fn handle_delete_all_imposters(
+    manager: Arc<ImposterManager>,
+    _base_url: &str,
+) -> Response<Full<Bytes>> {
     let configs = manager.delete_all().await;
 
-    let summaries: Vec<ImposterSummary> = configs
-        .iter()
-        .filter_map(|c| {
-            c.port.map(|port| ImposterSummary {
-                port,
-                protocol: c.protocol.clone(),
-                name: c.name.clone(),
-                number_of_requests: 0,
-            })
-        })
-        .collect();
-
-    let response = ListImpostersResponse {
-        imposters: summaries,
-    };
-    json_response(StatusCode::OK, &response)
+    // Return full configs like Mountebank (protocol, port, name, recordRequests, stubs)
+    let body = serde_json::json!({ "imposters": configs });
+    json_response(StatusCode::OK, &body)
 }
 
 /// GET /imposters/:port - Get a specific imposter
-async fn handle_get_imposter(port: u16, manager: Arc<ImposterManager>) -> Response<Full<Bytes>> {
+async fn handle_get_imposter(
+    port: u16,
+    base_url: &str,
+    manager: Arc<ImposterManager>,
+) -> Response<Full<Bytes>> {
     match manager.get_imposter(port) {
         Ok(imposter) => {
             let stubs = imposter.get_stubs();
@@ -426,18 +495,25 @@ async fn handle_get_imposter(port: u16, manager: Arc<ImposterManager>) -> Respon
                 None
             };
 
+            // Add _links to each stub
+            let stubs_with_links: Vec<StubWithLinks> = stubs
+                .into_iter()
+                .enumerate()
+                .map(|(index, stub)| StubWithLinks {
+                    stub,
+                    links: make_stub_links(base_url, port, index),
+                })
+                .collect();
+
             let detail = ImposterDetail {
-                port: imposter.config.port.unwrap_or(port),
                 protocol: imposter.config.protocol.clone(),
+                port: imposter.config.port.unwrap_or(port),
                 name: imposter.config.name.clone(),
-                record_requests: imposter.config.record_requests,
                 number_of_requests: imposter.get_request_count(),
-                stubs,
-                requests: if imposter.config.record_requests {
-                    Some(imposter.get_recorded_requests())
-                } else {
-                    None
-                },
+                record_requests: imposter.config.record_requests,
+                requests: imposter.get_recorded_requests(),
+                stubs: stubs_with_links,
+                links: make_imposter_links(base_url, port),
                 rift: rift_extensions,
             };
             json_response(StatusCode::OK, &detail)
@@ -452,11 +528,35 @@ async fn handle_get_imposter(port: u16, manager: Arc<ImposterManager>) -> Respon
 
 /// DELETE /imposters/:port - Delete a specific imposter
 /// Returns 200 even if imposter doesn't exist (idempotent delete, matches Mountebank)
-async fn handle_delete_imposter(port: u16, manager: Arc<ImposterManager>) -> Response<Full<Bytes>> {
+async fn handle_delete_imposter(
+    port: u16,
+    base_url: &str,
+    manager: Arc<ImposterManager>,
+) -> Response<Full<Bytes>> {
     match manager.delete_imposter(port).await {
         Ok(config) => {
             info!("Deleted imposter on port {}", port);
-            json_response(StatusCode::OK, &config)
+            // Return the full imposter config with _links (like Mountebank does)
+            let stubs_with_links: Vec<StubWithLinks> = config
+                .stubs
+                .iter()
+                .enumerate()
+                .map(|(index, stub)| StubWithLinks {
+                    stub: stub.clone(),
+                    links: make_stub_links(base_url, port, index),
+                })
+                .collect();
+            let response = serde_json::json!({
+                "protocol": config.protocol,
+                "port": config.port,
+                "name": config.name,
+                "numberOfRequests": 0,
+                "recordRequests": config.record_requests,
+                "requests": [],
+                "stubs": stubs_with_links,
+                "_links": make_imposter_links(base_url, port)
+            });
+            json_response(StatusCode::OK, &response)
         }
         Err(ImposterError::NotFound(_)) => {
             // Return 200 with empty object for idempotent delete (matches Mountebank)
@@ -470,6 +570,7 @@ async fn handle_delete_imposter(port: u16, manager: Arc<ImposterManager>) -> Res
 async fn handle_add_stub(
     port: u16,
     req: Request<Incoming>,
+    base_url: &str,
     manager: Arc<ImposterManager>,
 ) -> Response<Full<Bytes>> {
     let body = match collect_body(req).await {
@@ -505,7 +606,7 @@ async fn handle_add_stub(
     match manager.add_stub(port, add_req.stub, add_req.index) {
         Ok(()) => {
             // Return updated imposter (includes all warnings in response)
-            handle_get_imposter(port, manager).await
+            handle_get_imposter(port, base_url, manager).await
         }
         Err(ImposterError::NotFound(_)) => error_response(
             StatusCode::NOT_FOUND,
@@ -519,6 +620,7 @@ async fn handle_add_stub(
 async fn handle_replace_all_stubs(
     port: u16,
     req: Request<Incoming>,
+    base_url: &str,
     manager: Arc<ImposterManager>,
 ) -> Response<Full<Bytes>> {
     let body = match collect_body(req).await {
@@ -569,7 +671,7 @@ async fn handle_replace_all_stubs(
         }
     }
 
-    handle_get_imposter(port, manager).await
+    handle_get_imposter(port, base_url, manager).await
 }
 
 /// PUT /imposters/:port/stubs/:index - Replace a specific stub
@@ -577,6 +679,7 @@ async fn handle_replace_stub(
     port: u16,
     index: usize,
     req: Request<Incoming>,
+    base_url: &str,
     manager: Arc<ImposterManager>,
 ) -> Response<Full<Bytes>> {
     let body = match collect_body(req).await {
@@ -592,7 +695,7 @@ async fn handle_replace_stub(
     };
 
     match manager.replace_stub(port, index, stub) {
-        Ok(()) => handle_get_imposter(port, manager).await,
+        Ok(()) => handle_get_imposter(port, base_url, manager).await,
         Err(ImposterError::NotFound(_)) => error_response(
             StatusCode::NOT_FOUND,
             &format!("Imposter not found on port {port}"),
@@ -608,10 +711,11 @@ async fn handle_replace_stub(
 async fn handle_delete_stub(
     port: u16,
     index: usize,
+    base_url: &str,
     manager: Arc<ImposterManager>,
 ) -> Response<Full<Bytes>> {
     match manager.delete_stub(port, index) {
-        Ok(()) => handle_get_imposter(port, manager).await,
+        Ok(()) => handle_get_imposter(port, base_url, manager).await,
         Err(ImposterError::NotFound(_)) => error_response(
             StatusCode::NOT_FOUND,
             &format!("Imposter not found on port {port}"),
@@ -624,14 +728,17 @@ async fn handle_delete_stub(
 }
 
 /// DELETE /imposters/:port/savedRequests - Clear recorded requests
-async fn handle_clear_requests(port: u16, manager: Arc<ImposterManager>) -> Response<Full<Bytes>> {
+/// Returns full imposter detail after clearing (like Mountebank)
+async fn handle_clear_requests(
+    port: u16,
+    base_url: &str,
+    manager: Arc<ImposterManager>,
+) -> Response<Full<Bytes>> {
     match manager.get_imposter(port) {
         Ok(imposter) => {
             imposter.clear_recorded_requests();
-            json_response(
-                StatusCode::OK,
-                &serde_json::json!({"message": "Requests cleared"}),
-            )
+            // Return full imposter detail (like Mountebank does)
+            handle_get_imposter(port, base_url, manager).await
         }
         Err(ImposterError::NotFound(_)) => error_response(
             StatusCode::NOT_FOUND,
@@ -774,17 +881,17 @@ fn handle_logs(query: Option<&str>) -> Response<Full<Bytes>> {
 }
 
 /// DELETE /imposters/:port/savedProxyResponses - Clear saved proxy responses
+/// Returns full imposter detail after clearing (like Mountebank)
 async fn handle_clear_proxy_responses(
     port: u16,
+    base_url: &str,
     manager: Arc<ImposterManager>,
 ) -> Response<Full<Bytes>> {
     match manager.get_imposter(port) {
         Ok(imposter) => {
             imposter.clear_proxy_responses();
-            json_response(
-                StatusCode::OK,
-                &serde_json::json!({"message": "Saved proxy responses cleared"}),
-            )
+            // Return full imposter detail (like Mountebank does)
+            handle_get_imposter(port, base_url, manager).await
         }
         Err(ImposterError::NotFound(_)) => error_response(
             StatusCode::NOT_FOUND,
@@ -902,29 +1009,33 @@ mod tests {
     #[test]
     fn test_imposter_summary_serialization() {
         let summary = ImposterSummary {
-            port: 8080,
             protocol: "http".to_string(),
+            port: 8080,
             name: Some("test-imposter".to_string()),
             number_of_requests: 42,
+            links: make_imposter_links("http://localhost:2525", 8080),
         };
         let json = serde_json::to_string(&summary).unwrap();
         assert!(json.contains("\"port\":8080"));
         assert!(json.contains("\"protocol\":\"http\""));
         assert!(json.contains("\"name\":\"test-imposter\""));
         assert!(json.contains("\"numberOfRequests\":42"));
+        assert!(json.contains("\"_links\""));
     }
 
     #[test]
     fn test_imposter_summary_without_name() {
         let summary = ImposterSummary {
-            port: 3000,
             protocol: "https".to_string(),
+            port: 3000,
             name: None,
             number_of_requests: 0,
+            links: make_imposter_links("http://localhost:2525", 3000),
         };
         let json = serde_json::to_string(&summary).unwrap();
         assert!(json.contains("\"port\":3000"));
         assert!(!json.contains("\"name\"")); // name should be skipped when None
+        assert!(json.contains("\"_links\""));
     }
 
     #[test]
@@ -932,16 +1043,18 @@ mod tests {
         let response = ListImpostersResponse {
             imposters: vec![
                 ImposterSummary {
-                    port: 8080,
                     protocol: "http".to_string(),
+                    port: 8080,
                     name: None,
                     number_of_requests: 10,
+                    links: make_imposter_links("http://localhost:2525", 8080),
                 },
                 ImposterSummary {
-                    port: 8443,
                     protocol: "https".to_string(),
+                    port: 8443,
                     name: Some("secure".to_string()),
                     number_of_requests: 20,
+                    links: make_imposter_links("http://localhost:2525", 8443),
                 },
             ],
         };
@@ -949,6 +1062,7 @@ mod tests {
         assert!(json.contains("\"imposters\""));
         assert!(json.contains("8080"));
         assert!(json.contains("8443"));
+        assert!(json.contains("\"_links\""));
     }
 
     #[test]
@@ -1005,7 +1119,7 @@ mod tests {
 
     #[test]
     fn test_handle_root() {
-        let resp = handle_root();
+        let resp = handle_root("http://localhost:2525");
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(
             resp.headers().get("Content-Type").unwrap(),
@@ -1093,36 +1207,53 @@ mod tests {
     #[test]
     fn test_imposter_detail_serialization() {
         let detail = ImposterDetail {
-            port: 8080,
             protocol: "http".to_string(),
+            port: 8080,
             name: Some("test".to_string()),
-            record_requests: true,
             number_of_requests: 100,
+            record_requests: true,
+            requests: vec![],
             stubs: vec![],
-            requests: Some(vec![]),
+            links: ImposterLinks {
+                self_link: Link {
+                    href: "http://localhost:2525/imposters/8080".to_string(),
+                },
+                stubs: Link {
+                    href: "http://localhost:2525/imposters/8080/stubs".to_string(),
+                },
+            },
             rift: None,
         };
         let json = serde_json::to_string(&detail).unwrap();
         assert!(json.contains("\"port\":8080"));
         assert!(json.contains("\"recordRequests\":true"));
         assert!(json.contains("\"numberOfRequests\":100"));
+        assert!(json.contains("\"_links\""));
     }
 
     #[test]
     fn test_imposter_detail_without_requests() {
         let detail = ImposterDetail {
-            port: 8080,
             protocol: "http".to_string(),
+            port: 8080,
             name: None,
-            record_requests: false,
             number_of_requests: 0,
+            record_requests: false,
+            requests: vec![],
             stubs: vec![],
-            requests: None,
+            links: ImposterLinks {
+                self_link: Link {
+                    href: "http://localhost:2525/imposters/8080".to_string(),
+                },
+                stubs: Link {
+                    href: "http://localhost:2525/imposters/8080/stubs".to_string(),
+                },
+            },
             rift: None,
         };
         let json = serde_json::to_string(&detail).unwrap();
-        // requests should be skipped when None
-        assert!(!json.contains("\"requests\""));
+        // requests is now always present (matches Mountebank)
+        assert!(json.contains("\"requests\""));
     }
 
     // ============================================
