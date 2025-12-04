@@ -977,33 +977,34 @@ fn verify_response(
 
     // Check body if expected
     if let Some(expected) = expected_body {
-        let expected_str = format_json_for_diff(expected);
-
         match actual_body {
             None => {
                 failures.push(FailureReason::BodyMissing {
-                    expected: expected_str,
+                    expected: format_json_for_diff(expected),
                 });
             }
             Some(actual_text) => {
-                // Try JSON comparison first
+                // Normalize expected - if it's a string containing JSON, parse it
+                let expected_normalized = normalize_json_value(expected);
+
+                // Try to parse actual as JSON
                 if let Ok(actual_json) = serde_json::from_str::<serde_json::Value>(actual_text) {
-                    // For JSON, do deep comparison
-                    if !json_matches(expected, &actual_json) {
+                    // Both are JSON - do semantic comparison
+                    if !json_matches(&expected_normalized, &actual_json) {
                         failures.push(FailureReason::BodyMismatch {
-                            expected: expected_str,
+                            expected: format_json_for_diff(&expected_normalized),
                             actual: format_json_for_diff(&actual_json),
                         });
                     }
                 } else {
-                    // For string comparison
-                    let expected_plain = match expected {
-                        serde_json::Value::String(s) => s.as_str(),
-                        _ => &expected_str,
+                    // Actual is not valid JSON - compare as strings
+                    let expected_plain = match &expected_normalized {
+                        serde_json::Value::String(s) => s.clone(),
+                        _ => expected_normalized.to_string(),
                     };
-                    if actual_text != expected_plain {
+                    if actual_text != &expected_plain {
                         failures.push(FailureReason::BodyMismatch {
-                            expected: expected_plain.to_string(),
+                            expected: expected_plain,
                             actual: actual_text.clone(),
                         });
                     }
@@ -1024,10 +1025,31 @@ fn format_json_for_diff(value: &serde_json::Value) -> String {
     serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
 }
 
+/// Normalize a JSON value by parsing string values that contain JSON.
+/// This handles cases where the expected body is defined as a string like:
+/// `"{\"key\": \"value\"}"` instead of as a proper JSON object.
+fn normalize_json_value(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::String(s) => {
+            // Try to parse the string as JSON
+            serde_json::from_str(s).unwrap_or_else(|_| value.clone())
+        }
+        _ => value.clone(),
+    }
+}
+
+/// Checks if two JSON values are semantically equal.
+/// This handles:
+/// - Different key ordering in objects
+/// - Compact vs pretty-printed formatting
+/// - String values that contain JSON (parses and compares them)
 fn json_matches(expected: &serde_json::Value, actual: &serde_json::Value) -> bool {
     match (expected, actual) {
         (serde_json::Value::Object(exp_obj), serde_json::Value::Object(act_obj)) => {
-            // All expected keys must be present with matching values
+            // Objects must have the same keys with matching values
+            if exp_obj.len() != act_obj.len() {
+                return false;
+            }
             exp_obj.iter().all(|(key, exp_val)| {
                 act_obj
                     .get(key)
@@ -1041,6 +1063,25 @@ fn json_matches(expected: &serde_json::Value, actual: &serde_json::Value) -> boo
                     .iter()
                     .zip(act_arr.iter())
                     .all(|(e, a)| json_matches(e, a))
+        }
+        // Handle case where one side is a JSON string that needs parsing
+        (serde_json::Value::String(exp_str), actual) => {
+            // Try to parse the expected string as JSON
+            if let Ok(parsed_exp) = serde_json::from_str::<serde_json::Value>(exp_str) {
+                json_matches(&parsed_exp, actual)
+            } else {
+                // Not JSON, compare as-is
+                expected == actual
+            }
+        }
+        (expected, serde_json::Value::String(act_str)) => {
+            // Try to parse the actual string as JSON
+            if let Ok(parsed_act) = serde_json::from_str::<serde_json::Value>(act_str) {
+                json_matches(expected, &parsed_act)
+            } else {
+                // Not JSON, compare as-is
+                expected == actual
+            }
         }
         _ => expected == actual,
     }
