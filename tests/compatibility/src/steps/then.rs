@@ -840,3 +840,24 @@ async fn check_mb_status(world: &mut CompatibilityWorld, expected: u16) {
     let response = world.last_response.as_ref().expect("No response recorded");
     assert_eq!(response.mb_status, expected, "Mountebank status mismatch");
 }
+
+#[then(regex = r#"^backend should receive path "([^"]+)" on both services$"#)]
+async fn check_backend_received_path(world: &mut CompatibilityWorld, expected_path: String) {
+    let response = world.last_response.as_ref().expect("No response recorded");
+
+    // The backend echo server returns "path:/the/path" in the body
+    let expected_body = format!("path:{}", expected_path);
+
+    assert!(
+        response.mb_body.contains(&expected_body),
+        "Mountebank backend should receive path '{}', got body: '{}'",
+        expected_path,
+        response.mb_body
+    );
+    assert!(
+        response.rift_body.contains(&expected_body),
+        "Rift backend should receive path '{}', got body: '{}'",
+        expected_path,
+        response.rift_body
+    );
+}
