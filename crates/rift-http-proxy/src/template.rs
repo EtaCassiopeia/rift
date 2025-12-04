@@ -21,6 +21,7 @@
 //!     body: '{"echo": "${request.query.message}", "path": "${request.path}"}'
 //! ```
 
+use crate::predicate::parse_query_string;
 use regex::Regex;
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -81,19 +82,6 @@ impl RequestData {
         }
     }
 
-    /// Extract path parameters from a route pattern
-    ///
-    /// # Example
-    /// ```ignore
-    /// let pattern = "/users/:id/posts/:post_id";
-    /// let path = "/users/123/posts/456";
-    /// // Returns: {"id": "123", "post_id": "456"}
-    /// ```
-    #[allow(dead_code)]
-    pub fn extract_path_params(&mut self, pattern: &str) {
-        self.path_params = extract_path_params(pattern, &self.path);
-    }
-
     /// Get a value by dotted path (e.g., "query.name", "headers.content-type")
     pub fn get(&self, path: &str) -> Option<String> {
         let parts: Vec<&str> = path.splitn(2, '.').collect();
@@ -110,28 +98,8 @@ impl RequestData {
     }
 }
 
-/// Parse query string into a HashMap
-pub fn parse_query_string(query: Option<&str>) -> HashMap<String, String> {
-    let mut params = HashMap::new();
-    if let Some(q) = query {
-        for pair in q.split('&') {
-            if let Some((key, value)) = pair.split_once('=') {
-                let decoded = urlencoding::decode(value).unwrap_or_default().to_string();
-                params.insert(key.to_string(), decoded);
-            } else if !pair.is_empty() {
-                params.insert(pair.to_string(), String::new());
-            }
-        }
-    }
-    params
-}
-
-/// Extract path parameters from a route pattern and actual path
-///
-/// Supports patterns like:
-/// - `/users/:id` - named parameter
-/// - `/users/:id/posts/:post_id` - multiple parameters
-#[allow(dead_code)]
+/// Extract path parameters from a route pattern and actual path (used in tests)
+#[cfg(test)]
 fn extract_path_params(pattern: &str, path: &str) -> HashMap<String, String> {
     let mut params = HashMap::new();
 
