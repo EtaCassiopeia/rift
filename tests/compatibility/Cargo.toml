@@ -33,3 +33,7 @@ regex = "1.11"
 [[test]]
 name = "compatibility"
 harness = false
+
+[[test]]
+name = "rift_only"
+harness = false

@@ -127,7 +127,7 @@ jobs:
         run: cargo build --workspace --all-features --release
 
   compatibility-test:
-    name: Compatibility Tests (Mountebank)
+    name: Compatibility Tests
     runs-on: ubuntu-latest
     # Only run on pull requests to master/main
     if: github.event_name == 'pull_request'
@@ -179,9 +179,15 @@ jobs:
             sleep 2
           done
 
-      - name: Run compatibility tests
+      - name: Run shared compatibility tests (Rift + Mountebank)
         working-directory: tests/compatibility
-        run: cargo test --release
+        run: cargo test --test compatibility --release
+        env:
+          RUST_LOG: info
+
+      - name: Run Rift-only feature tests
+        working-directory: tests/compatibility
+        run: cargo test --test rift_only --release
         env:
           RUST_LOG: info
 

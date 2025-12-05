@@ -6,6 +6,83 @@ use serde_json::Value;
 use std::sync::Arc;
 
 /// Lua script engine for fault injection
+///
+/// # Script Interface
+///
+/// Scripts must define a `should_inject` function with the following signature:
+///
+/// ```lua
+/// function should_inject(request, flow_store)
+///     -- Your logic here
+///     return { inject = false }
+/// end
+/// ```
+///
+/// ## Request Object
+///
+/// The `request` parameter is a table containing:
+/// - `method` - HTTP method (string): "GET", "POST", "PUT", "DELETE", etc.
+/// - `path` - Request path (string): "/api/users/123"
+/// - `headers` - Table of header name (string) to value (string)
+/// - `body` - Request body (parsed JSON value or nil)
+/// - `query` - Table of query parameter name (string) to value (string)
+/// - `pathParams` - Table of path parameters extracted from route patterns
+///
+/// ## Flow Store Object
+///
+/// The `flow_store` parameter provides state management across requests:
+/// - `flow_store:get(flow_id, key)` - Get a stored value (returns nil if not found)
+/// - `flow_store:set(flow_id, key, value)` - Store a value (returns bool)
+/// - `flow_store:exists(flow_id, key)` - Check if key exists (returns bool)
+/// - `flow_store:delete(flow_id, key)` - Delete a key (returns bool)
+/// - `flow_store:increment(flow_id, key)` - Increment counter (returns number)
+/// - `flow_store:set_ttl(flow_id, ttl_seconds)` - Set flow expiration (returns bool)
+///
+/// ## Return Value
+///
+/// The function must return a table with the fault decision:
+///
+/// ```lua
+/// -- No fault injection
+/// { inject = false }
+///
+/// -- Latency injection
+/// { inject = true, fault = "latency", duration_ms = 500 }
+///
+/// -- Error injection
+/// { inject = true, fault = "error", status = 503, body = "Service unavailable" }
+///
+/// -- Error with custom headers
+/// {
+///     inject = true,
+///     fault = "error",
+///     status = 429,
+///     body = "Rate limited",
+///     headers = { ["Retry-After"] = "60" }
+/// }
+/// ```
+///
+/// ## Example
+///
+/// ```lua
+/// function should_inject(request, flow_store)
+///     -- Rate limit based on flow ID from header
+///     local flow_id = request.headers["x-flow-id"]
+///     if flow_id then
+///         local attempts = flow_store:increment(flow_id, "attempts")
+///         if attempts > 3 then
+///             return { inject = true, fault = "error", status = 429, body = "Rate limited" }
+///         end
+///     end
+///
+///     -- Inject fault for POST requests to specific path
+///     if request.method == "POST" and request.path == "/api/test" then
+///         return { inject = true, fault = "latency", duration_ms = 100 }
+///     end
+///
+///     return { inject = false }
+/// end
+/// ```
 #[derive(Debug, Clone)]
 pub struct LuaEngine {
     script: String,
@@ -20,11 +97,11 @@ impl LuaEngine {
             .exec()
             .map_err(|e| anyhow!("Failed to compile Lua script: {e}"))?;
 
-        // Check that should_inject_fault function exists
+        // Check that should_inject function exists
         let globals = lua.globals();
-        let func: LuaResult<LuaFunction> = globals.get("should_inject_fault");
+        let func: LuaResult<LuaFunction> = globals.get("should_inject");
         if func.is_err() {
-            return Err(anyhow!("Script must define should_inject_fault function"));
+            return Err(anyhow!("Script must define should_inject function"));
         }
 
         Ok(Self {
@@ -33,7 +110,7 @@ impl LuaEngine {
         })
     }
 
-    pub fn should_inject_fault(
+    pub fn should_inject(
         &self,
         request: &ScriptRequest,
         flow_store: Arc<dyn FlowStore>,
@@ -143,19 +220,19 @@ impl LuaEngine {
             .exec()
             .map_err(|e| anyhow!("Failed to execute script: {e}"))?;
 
-        // Call should_inject_fault function
-        let should_inject_fault: LuaFunction = globals
-            .get("should_inject_fault")
-            .map_err(|e| anyhow!("Failed to get should_inject_fault function: {e}"))?;
+        // Call should_inject function
+        let should_inject: LuaFunction = globals
+            .get("should_inject")
+            .map_err(|e| anyhow!("Failed to get should_inject function: {e}"))?;
         let request_arg: LuaTable = globals
             .get("request")
             .map_err(|e| anyhow!("Failed to get request: {e}"))?;
         let flow_store_arg: LuaAnyUserData = globals
             .get("flow_store")
             .map_err(|e| anyhow!("Failed to get flow_store: {e}"))?;
-        let result: LuaTable = should_inject_fault
+        let result: LuaTable = should_inject
             .call((request_arg, flow_store_arg))
-            .map_err(|e| anyhow!("Failed to call should_inject_fault: {e}"))?;
+            .map_err(|e| anyhow!("Failed to call should_inject: {e}"))?;
 
         // Parse result table
         Self::parse_fault_decision(&lua, result, rule_id)
@@ -333,19 +410,19 @@ pub fn execute_lua_bytecode(
         .exec()
         .map_err(|e| anyhow!("Failed to execute bytecode: {e}"))?;
 
-    // Call should_inject_fault function
-    let should_inject_fault: LuaFunction = globals
-        .get("should_inject_fault")
-        .map_err(|e| anyhow!("Failed to get should_inject_fault function: {e}"))?;
+    // Call should_inject function
+    let should_inject: LuaFunction = globals
+        .get("should_inject")
+        .map_err(|e| anyhow!("Failed to get should_inject function: {e}"))?;
     let request_arg: LuaTable = globals
         .get("request")
         .map_err(|e| anyhow!("Failed to get request: {e}"))?;
     let flow_store_arg: LuaAnyUserData = globals
         .get("flow_store")
         .map_err(|e| anyhow!("Failed to get flow_store: {e}"))?;
-    let result: LuaTable = should_inject_fault
+    let result: LuaTable = should_inject
         .call((request_arg, flow_store_arg))
-        .map_err(|e| anyhow!("Failed to call should_inject_fault: {e}"))?;
+        .map_err(|e| anyhow!("Failed to call should_inject: {e}"))?;
 
     // Parse result table with rule_id parameter
     parse_fault_decision_lua(lua, result, rule_id)
@@ -437,19 +514,19 @@ pub fn execute_lua_with_state(
         .exec()
         .map_err(|e| anyhow!("Failed to execute script: {e}"))?;
 
-    // Call should_inject_fault function
-    let should_inject_fault: LuaFunction = globals
-        .get("should_inject_fault")
-        .map_err(|e| anyhow!("Failed to get should_inject_fault function: {e}"))?;
+    // Call should_inject function
+    let should_inject: LuaFunction = globals
+        .get("should_inject")
+        .map_err(|e| anyhow!("Failed to get should_inject function: {e}"))?;
     let request_arg: LuaTable = globals
         .get("request")
         .map_err(|e| anyhow!("Failed to get request: {e}"))?;
     let flow_store_arg: LuaAnyUserData = globals
         .get("flow_store")
         .map_err(|e| anyhow!("Failed to get flow_store: {e}"))?;
-    let result: LuaTable = should_inject_fault
+    let result: LuaTable = should_inject
         .call((request_arg, flow_store_arg))
-        .map_err(|e| anyhow!("Failed to call should_inject_fault: {e}"))?;
+        .map_err(|e| anyhow!("Failed to call should_inject: {e}"))?;
 
     // Parse result table with rule_id parameter
     parse_fault_decision_lua(lua, result, rule_id)
@@ -708,7 +785,7 @@ mod tests {
     #[tokio::test]
     async fn test_lua_engine_compiles() {
         let script = r#"
-function should_inject_fault(request, flow_store)
+function should_inject(request, flow_store)
     return {inject = false}
 end
 "#;
@@ -727,16 +804,13 @@ end
 
         let engine = LuaEngine::new(script, "test-rule".to_string());
         assert!(engine.is_err());
-        assert!(engine
-            .unwrap_err()
-            .to_string()
-            .contains("should_inject_fault"));
+        assert!(engine.unwrap_err().to_string().contains("should_inject"));
     }
 
     #[tokio::test]
     async fn test_lua_simple_fault_injection() {
         let script = r#"
-function should_inject_fault(request, flow_store)
+function should_inject(request, flow_store)
     if request.path == "/api/test" then
         return {
             inject = true,
@@ -764,7 +838,7 @@ end
             path_params: HashMap::new(),
         };
 
-        let result = engine.should_inject_fault(&request, store).unwrap();
+        let result = engine.should_inject(&request, store).unwrap();
 
         match result {
             FaultDecision::Error { status, body, .. } => {
@@ -778,7 +852,7 @@ end
     #[tokio::test]
     async fn test_lua_latency_fault() {
         let script = r#"
-function should_inject_fault(request, flow_store)
+function should_inject(request, flow_store)
     return {
         inject = true,
         fault = "latency",
@@ -799,7 +873,7 @@ end
             path_params: HashMap::new(),
         };
 
-        let result = engine.should_inject_fault(&request, store).unwrap();
+        let result = engine.should_inject(&request, store).unwrap();
 
         match result {
             FaultDecision::Latency { duration_ms, .. } => {
@@ -812,7 +886,7 @@ end
     #[tokio::test]
     async fn test_lua_flow_store_increment() {
         let script = r#"
-function should_inject_fault(request, flow_store)
+function should_inject(request, flow_store)
     local flow_id = request.headers["x-flow-id"] or ""
     if flow_id == "" then
         return {inject = false}
@@ -849,28 +923,22 @@ end
         };
 
         // First attempt should inject fault
-        let result1 = engine
-            .should_inject_fault(&request, Arc::clone(&store))
-            .unwrap();
+        let result1 = engine.should_inject(&request, Arc::clone(&store)).unwrap();
         assert!(matches!(result1, FaultDecision::Error { .. }));
 
         // Second attempt should inject fault
-        let result2 = engine
-            .should_inject_fault(&request, Arc::clone(&store))
-            .unwrap();
+        let result2 = engine.should_inject(&request, Arc::clone(&store)).unwrap();
         assert!(matches!(result2, FaultDecision::Error { .. }));
 
         // Third attempt should not inject fault
-        let result3 = engine
-            .should_inject_fault(&request, Arc::clone(&store))
-            .unwrap();
+        let result3 = engine.should_inject(&request, Arc::clone(&store)).unwrap();
         assert!(matches!(result3, FaultDecision::None));
     }
 
     #[tokio::test]
     async fn test_lua_flow_store_get_set() {
         let script = r#"
-function should_inject_fault(request, flow_store)
+function should_inject(request, flow_store)
     local flow_id = request.headers["x-flow-id"] or ""
     if flow_id == "" then
         return {inject = false}
@@ -911,7 +979,7 @@ end
             path_params: HashMap::new(),
         };
 
-        let result = engine.should_inject_fault(&request, store).unwrap();
+        let result = engine.should_inject(&request, store).unwrap();
 
         // Should inject fault if get/set works
         match result {
@@ -927,7 +995,7 @@ end
     async fn test_lua_state_reuse_optimization() {
         // Test that execute_lua_with_state can reuse Lua state across multiple invocations
         let script = r#"
-function should_inject_fault(request, flow_store)
+function should_inject(request, flow_store)
     if request.path == "/api/test" then
         return {
             inject = true,
@@ -998,7 +1066,7 @@ end
     async fn test_lua_state_reuse_with_flow_store_isolation() {
         // Test that flow_store state is properly isolated between executions
         let script = r#"
-function should_inject_fault(request, flow_store)
+function should_inject(request, flow_store)
     local flow_id = request.headers["x-flow-id"] or "default"
     local count = flow_store:increment(flow_id, "counter")
     
@@ -1093,13 +1161,13 @@ end
     async fn test_lua_state_reuse_error_handling() {
         // Test that errors in one execution don't pollute the Lua state for subsequent executions
         let bad_script = r#"
-function should_inject_fault(request, flow_store)
+function should_inject(request, flow_store)
     error("Intentional error")
 end
 "#;
 
         let good_script = r#"
-function should_inject_fault(request, flow_store)
+function should_inject(request, flow_store)
     return {
         inject = true,
         fault = "latency",
@@ -1149,7 +1217,7 @@ end
     async fn test_lua_state_reuse_with_complex_body() {
         // Test that complex JSON bodies are handled correctly across reuses
         let script = r#"
-function should_inject_fault(request, flow_store)
+function should_inject(request, flow_store)
     if request.body and request.body.nested and request.body.nested.value > 100 then
         return {
             inject = true,
@@ -1216,7 +1284,7 @@ end
     #[tokio::test]
     async fn test_compile_to_bytecode() {
         let script = r#"
-function should_inject_fault(request, flow_store)
+function should_inject(request, flow_store)
     if request.path == "/test" then
         return {
             inject = true,
@@ -1247,7 +1315,7 @@ end
     #[tokio::test]
     async fn test_execute_lua_bytecode() {
         let script = r#"
-function should_inject_fault(request, flow_store)
+function should_inject(request, flow_store)
     if request.path == "/api/bytecode" then
         return {
             inject = true,
@@ -1301,7 +1369,7 @@ end
     #[tokio::test]
     async fn test_bytecode_reuse() {
         let script = r#"
-function should_inject_fault(request, flow_store)
+function should_inject(request, flow_store)
     local flow_id = request.headers["x-flow-id"] or "default"
     local count = flow_store:increment(flow_id, "count")
     
@@ -1353,7 +1421,7 @@ end
     #[tokio::test]
     async fn test_lua_query_params() {
         let script = r#"
-function should_inject_fault(request, flow_store)
+function should_inject(request, flow_store)
     local name = request.query["name"]
     local page = request.query["page"]
 
@@ -1385,7 +1453,7 @@ end
             path_params: HashMap::new(),
         };
 
-        let result = engine.should_inject_fault(&request, store).unwrap();
+        let result = engine.should_inject(&request, store).unwrap();
 
         match result {
             FaultDecision::Error { status, body, .. } => {
@@ -1399,7 +1467,7 @@ end
     #[tokio::test]
     async fn test_lua_path_params() {
         let script = r#"
-function should_inject_fault(request, flow_store)
+function should_inject(request, flow_store)
     local user_id = request.pathParams["id"]
     local action = request.pathParams["action"]
 
@@ -1431,7 +1499,7 @@ end
             path_params,
         };
 
-        let result = engine.should_inject_fault(&request, store).unwrap();
+        let result = engine.should_inject(&request, store).unwrap();
 
         match result {
             FaultDecision::Error { status, body, .. } => {

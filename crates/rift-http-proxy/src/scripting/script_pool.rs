@@ -637,7 +637,7 @@ mod tests {
         let ast = engine
             .compile(
                 r#"
-            fn should_inject(request) {
+            fn should_inject(request, flow_store) {
                 #{ inject: false }
             }
         "#,

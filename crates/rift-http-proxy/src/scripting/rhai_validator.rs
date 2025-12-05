@@ -48,7 +48,7 @@ impl RhaiValidator {
     /// 2. Basic structural validity (contains function definition)
     ///
     /// Note: This does NOT validate runtime behavior - only syntax.
-    /// The actual should_inject_fault function must be verified at runtime.
+    /// The actual should_inject function must be verified at runtime.
     #[allow(dead_code)]
     pub fn validate(&self, script: &str) -> Result<AST, ValidationError> {
         // Compile the script - this catches syntax errors
@@ -57,10 +57,10 @@ impl RhaiValidator {
             .compile(script)
             .map_err(|e| ValidationError::SyntaxError(e.to_string()))?;
 
-        // Basic check: script should contain "should_inject_fault"
-        if !script.contains("should_inject_fault") {
+        // Basic check: script should contain "should_inject"
+        if !script.contains("should_inject") {
             return Err(ValidationError::MissingFunction(
-                "should_inject_fault function not found in script".to_string(),
+                "should_inject function not found in script".to_string(),
             ));
         }
 
@@ -94,7 +94,7 @@ mod tests {
     fn test_valid_script() {
         let validator = RhaiValidator::new();
         let script = r#"
-            fn should_inject_fault(request, flow_store) {
+            fn should_inject(request, flow_store) {
                 return #{ inject: true, fault: "latency", duration_ms: 100 };
             }
         "#;
@@ -107,7 +107,7 @@ mod tests {
     fn test_syntax_error() {
         let validator = RhaiValidator::new();
         let script = r#"
-            fn should_inject_fault(request, flow_store) {
+            fn should_inject(request, flow_store) {
                 return #{ inject: true  // Missing closing brace
             }
         "#;
@@ -133,7 +133,7 @@ mod tests {
         let result = validator.validate(script);
         assert!(result.is_err());
         if let Err(ValidationError::MissingFunction(_)) = result {
-            // Expected - error message will contain "should_inject_fault"
+            // Expected - error message will contain "should_inject"
         } else {
             panic!("Expected MissingFunction error");
         }
@@ -143,7 +143,7 @@ mod tests {
     fn test_complex_valid_script() {
         let validator = RhaiValidator::new();
         let script = r#"
-            fn should_inject_fault(request, flow_store) {
+            fn should_inject(request, flow_store) {
                 let path = request.path;
                 if path.contains("/api/") {
                     let flow_id = request.headers["x-flow-id"];
@@ -167,12 +167,12 @@ mod tests {
         let scripts = vec![
             (
                 "script1",
-                r#"fn should_inject_fault(req, fs) { return #{ inject: false }; }"#,
+                r#"fn should_inject(req, fs) { return #{ inject: false }; }"#,
             ),
             ("script2", r#"fn wrong_name() { return true; }"#),
             (
                 "script3",
-                r#"fn should_inject_fault(req, fs) { return #{ inject: true, fault: "latency", duration_ms: 50 }; }"#,
+                r#"fn should_inject(req, fs) { return #{ inject: true, fault: "latency", duration_ms: 50 }; }"#,
             ),
         ];
 
