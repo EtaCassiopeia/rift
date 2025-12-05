@@ -2,21 +2,27 @@
 // Allow dead_code for library targets - functions are used by the binary but not by tests
 #![allow(dead_code)]
 
+// ===== Core Mountebank-compatible modules =====
 pub mod admin_api;
 pub mod behaviors;
 pub mod config;
-pub mod fault;
-pub mod flow_state;
 pub mod imposter;
-pub mod matcher;
 pub mod predicate;
+pub mod proxy;
 pub mod recording;
-pub mod routing;
-pub mod rule_index;
-pub mod stub_analysis;
-pub mod template;
+
+// ===== Rift Extensions (features beyond Mountebank) =====
+pub mod extensions;
+
+// Re-export extension modules at top level for backward compatibility
+pub use extensions::fault;
+pub use extensions::flow_state;
+pub use extensions::matcher;
+pub use extensions::routing;
+pub use extensions::rule_index;
+pub use extensions::stub_analysis;
+pub use extensions::template;
 
 // Don't export internal modules
 mod backends;
-mod metrics;
 mod scripting;

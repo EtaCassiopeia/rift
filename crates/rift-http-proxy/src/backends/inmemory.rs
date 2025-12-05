@@ -1,4 +1,4 @@
-use crate::flow_state::FlowStore;
+use crate::extensions::flow_state::FlowStore;
 use anyhow::Result;
 use serde_json::Value;
 use std::collections::HashMap;

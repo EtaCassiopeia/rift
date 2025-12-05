@@ -1,74 +1,13 @@
-//! Proxy recording for Mountebank-compatible record/replay functionality.
-//!
-//! Supports three modes:
-//! - `proxyOnce`: Record first response, replay on subsequent matches
-//! - `proxyAlways`: Always proxy, record all responses
-//! - `proxyTransparent`: Always proxy, never record (default Rift behavior)
-//!
-//! Features:
-//! - `addWaitBehavior`: Capture actual latency in recorded responses
-//! - `predicateGenerators`: Auto-generate stubs from recorded requests
-//! - File-based persistence for recordings
+//! Recording store for proxy responses.
 
+use super::mode::ProxyMode;
+use super::stub_generator::generate_stub;
+use super::types::{RecordedResponse, RequestSignature};
 use parking_lot::RwLock;
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tracing::{debug, info};
-
-/// Proxy recording mode (Mountebank-compatible)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
-#[serde(rename_all = "camelCase")]
-#[allow(clippy::enum_variant_names)] // Keep Mountebank-compatible names
-pub enum ProxyMode {
-    /// Record first response, replay on subsequent matches
-    ProxyOnce,
-    /// Always proxy, record all responses (for later replay via `mb replay`)
-    ProxyAlways,
-    /// Always proxy, never record (default Rift behavior)
-    #[default]
-    ProxyTransparent,
-}
-
-/// Recorded response from proxy
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RecordedResponse {
-    pub status: u16,
-    pub headers: HashMap<String, String>,
-    pub body: Vec<u8>,
-    pub latency_ms: Option<u64>,
-    /// Unix timestamp in seconds
-    pub timestamp_secs: u64,
-}
-
-/// Request signature for matching recorded responses
-#[derive(Debug, Clone, Hash, Eq, PartialEq, Serialize, Deserialize)]
-pub struct RequestSignature {
-    pub method: String,
-    pub path: String,
-    pub query: Option<String>,
-    /// Filtered headers based on predicateGenerators
-    pub headers: Vec<(String, String)>,
-}
-
-impl RequestSignature {
-    /// Create signature from request components
-    pub fn new(
-        method: &str,
-        path: &str,
-        query: Option<&str>,
-        headers: &[(String, String)],
-    ) -> Self {
-        Self {
-            method: method.to_uppercase(),
-            path: path.to_string(),
-            query: query.map(|s| s.to_string()),
-            headers: headers.to_vec(),
-        }
-    }
-}
 
 /// Recording store for proxy responses
 pub struct RecordingStore {
@@ -193,87 +132,6 @@ impl RecordingStore {
         Ok(count)
     }
 
-    /// Generate a Mountebank-compatible stub from a recorded request/response
-    #[allow(dead_code)] // Public API for predicate generator export
-    pub fn generate_stub(
-        signature: &RequestSignature,
-        response: &RecordedResponse,
-        include_method: bool,
-        include_path: bool,
-        include_query: bool,
-        include_headers: &[String],
-    ) -> serde_json::Value {
-        let mut predicates = serde_json::Map::new();
-
-        if include_method {
-            predicates.insert(
-                "method".to_string(),
-                serde_json::json!({ "equals": signature.method }),
-            );
-        }
-
-        if include_path {
-            predicates.insert(
-                "path".to_string(),
-                serde_json::json!({ "equals": signature.path }),
-            );
-        }
-
-        if include_query {
-            if let Some(ref query) = signature.query {
-                // Parse query string into map
-                let query_map: HashMap<String, String> = query
-                    .split('&')
-                    .filter_map(|pair| {
-                        let mut parts = pair.splitn(2, '=');
-                        Some((parts.next()?.to_string(), parts.next()?.to_string()))
-                    })
-                    .collect();
-                if !query_map.is_empty() {
-                    predicates.insert(
-                        "query".to_string(),
-                        serde_json::json!({ "equals": query_map }),
-                    );
-                }
-            }
-        }
-
-        if !include_headers.is_empty() {
-            let header_predicates: HashMap<String, String> = signature
-                .headers
-                .iter()
-                .filter(|(k, _)| include_headers.iter().any(|h| h.eq_ignore_ascii_case(k)))
-                .cloned()
-                .collect();
-            if !header_predicates.is_empty() {
-                predicates.insert(
-                    "headers".to_string(),
-                    serde_json::json!({ "equals": header_predicates }),
-                );
-            }
-        }
-
-        // Build response
-        let body_str = String::from_utf8_lossy(&response.body).to_string();
-        let mut response_obj = serde_json::json!({
-            "statusCode": response.status,
-            "headers": response.headers,
-            "body": body_str,
-        });
-
-        // Add wait behavior if latency was captured
-        if let Some(latency) = response.latency_ms {
-            response_obj["_behaviors"] = serde_json::json!({
-                "wait": latency
-            });
-        }
-
-        serde_json::json!({
-            "predicates": [{ "and": predicates }],
-            "responses": [{ "is": response_obj }]
-        })
-    }
-
     /// Export all recordings as Mountebank-compatible stubs
     #[allow(dead_code)] // Public API for mb replay export
     pub fn export_as_stubs(
@@ -288,7 +146,7 @@ impl RecordingStore {
             .iter()
             .flat_map(|(sig, responses)| {
                 responses.iter().map(move |resp| {
-                    Self::generate_stub(
+                    generate_stub(
                         sig,
                         resp,
                         include_method,
@@ -302,40 +160,17 @@ impl RecordingStore {
     }
 }
 
-/// Get current unix timestamp in seconds
-#[allow(dead_code)] // Used in tests
-fn unix_timestamp() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
-
-/// Record a response with timing
-#[allow(dead_code)] // Public API for future use (higher-level recording helper)
-pub fn record_with_timing<F, T>(store: &RecordingStore, signature: RequestSignature, f: F) -> T
-where
-    F: FnOnce() -> (T, u16, HashMap<String, String>, Vec<u8>),
-{
-    let start = Instant::now();
-    let (result, status, headers, body) = f();
-    let latency_ms = start.elapsed().as_millis() as u64;
-
-    let response = RecordedResponse {
-        status,
-        headers,
-        body,
-        latency_ms: Some(latency_ms),
-        timestamp_secs: unix_timestamp(),
-    };
-
-    store.record(signature, response);
-    result
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unix_timestamp() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    }
 
     #[test]
     fn test_proxy_once_records_first_only() {

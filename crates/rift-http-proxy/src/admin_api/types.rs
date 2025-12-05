@@ -1,0 +1,267 @@
+//! Response types and HATEOAS structures for the Admin API.
+
+use crate::extensions::stub_analysis::StubWarning;
+use crate::imposter::{RecordedRequest, Stub};
+use bytes::Bytes;
+use http_body_util::Full;
+use hyper::body::Incoming;
+use hyper::{Request, Response, StatusCode};
+use serde::{Deserialize, Serialize};
+
+/// HATEOAS link structure for Mountebank compatibility
+#[derive(Debug, Serialize, Clone)]
+pub struct Link {
+    pub href: String,
+}
+
+/// HATEOAS links for imposter resources
+#[derive(Debug, Serialize, Clone)]
+pub struct ImposterLinks {
+    #[serde(rename = "self")]
+    pub self_link: Link,
+    pub stubs: Link,
+}
+
+/// HATEOAS links for stub resources
+#[derive(Debug, Serialize, Clone)]
+pub struct StubLinks {
+    #[serde(rename = "self")]
+    pub self_link: Link,
+}
+
+/// Imposter summary for list responses
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImposterSummary {
+    pub protocol: String,
+    pub port: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub number_of_requests: u64,
+    #[serde(rename = "_links")]
+    pub links: ImposterLinks,
+}
+
+/// Response for listing imposters
+#[derive(Debug, Serialize)]
+pub struct ListImpostersResponse {
+    pub imposters: Vec<ImposterSummary>,
+}
+
+/// A stub with its _links for the response
+#[derive(Debug, Serialize)]
+pub struct StubWithLinks {
+    #[serde(flatten)]
+    pub stub: Stub,
+    #[serde(rename = "_links")]
+    pub links: StubLinks,
+}
+
+/// Detailed imposter response
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImposterDetail {
+    pub protocol: String,
+    pub port: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub number_of_requests: u64,
+    pub record_requests: bool,
+    pub requests: Vec<RecordedRequest>,
+    pub stubs: Vec<StubWithLinks>,
+    #[serde(rename = "_links")]
+    pub links: ImposterLinks,
+    /// Rift extensions - includes stub analysis warnings
+    #[serde(rename = "_rift", skip_serializing_if = "Option::is_none")]
+    pub rift: Option<RiftImposterExtensions>,
+}
+
+/// Rift-specific extensions in API responses
+#[derive(Debug, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RiftImposterExtensions {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<StubWarning>,
+}
+
+/// Error response structure
+#[derive(Debug, Serialize)]
+pub struct ErrorResponse {
+    pub errors: Vec<ErrorDetail>,
+}
+
+/// Individual error detail
+#[derive(Debug, Serialize)]
+pub struct ErrorDetail {
+    pub code: String,
+    pub message: String,
+}
+
+/// Request to add a stub
+#[derive(Debug, Deserialize)]
+pub struct AddStubRequest {
+    #[serde(default)]
+    pub index: Option<usize>,
+    pub stub: Stub,
+}
+
+/// Request to replace all stubs
+#[derive(Debug, Deserialize)]
+pub struct ReplaceStubsRequest {
+    pub stubs: Vec<Stub>,
+}
+
+/// Query parameters for imposter endpoints
+#[derive(Debug, Default)]
+pub struct ImposterQueryParams {
+    pub replayable: bool,
+    pub remove_proxies: bool,
+}
+
+impl ImposterQueryParams {
+    /// Parse query parameters from query string
+    pub fn parse(query: Option<&str>) -> Self {
+        let mut params = Self::default();
+        if let Some(q) = query {
+            params.replayable = q.contains("replayable=true");
+            params.remove_proxies = q.contains("removeProxies=true");
+        }
+        params
+    }
+}
+
+// =============================================================================
+// Helper functions for generating HATEOAS links
+// =============================================================================
+
+/// Extract base URL from request headers for HATEOAS links
+pub fn get_base_url(req: &Request<Incoming>) -> String {
+    if let Some(host) = req.headers().get("host") {
+        if let Ok(host_str) = host.to_str() {
+            return format!("http://{}", host_str);
+        }
+    }
+    "http://localhost:2525".to_string()
+}
+
+/// Generate HATEOAS links for an imposter
+pub fn make_imposter_links(base_url: &str, port: u16) -> ImposterLinks {
+    ImposterLinks {
+        self_link: Link {
+            href: format!("{}/imposters/{}", base_url, port),
+        },
+        stubs: Link {
+            href: format!("{}/imposters/{}/stubs", base_url, port),
+        },
+    }
+}
+
+/// Generate HATEOAS links for a stub
+pub fn make_stub_links(base_url: &str, port: u16, index: usize) -> StubLinks {
+    StubLinks {
+        self_link: Link {
+            href: format!("{}/imposters/{}/stubs/{}", base_url, port, index),
+        },
+    }
+}
+
+// =============================================================================
+// Response helper functions
+// =============================================================================
+
+/// Create a JSON response
+pub fn json_response<T: Serialize>(status: StatusCode, body: &T) -> Response<Full<Bytes>> {
+    let json = serde_json::to_string_pretty(body).unwrap_or_else(|_| "{}".to_string());
+    Response::builder()
+        .status(status)
+        .header("Content-Type", "application/json")
+        .body(Full::new(Bytes::from(json)))
+        .unwrap()
+}
+
+/// Create an error response
+pub fn error_response(status: StatusCode, message: &str) -> Response<Full<Bytes>> {
+    let error = ErrorResponse {
+        errors: vec![ErrorDetail {
+            code: status.as_str().to_string(),
+            message: message.to_string(),
+        }],
+    };
+    json_response(status, &error)
+}
+
+/// Create a not found response
+pub fn not_found() -> Response<Full<Bytes>> {
+    error_response(StatusCode::NOT_FOUND, "Not Found")
+}
+
+/// Collect request body into bytes
+pub async fn collect_body(req: Request<Incoming>) -> Result<Bytes, String> {
+    use http_body_util::BodyExt;
+    req.collect()
+        .await
+        .map(|c| c.to_bytes())
+        .map_err(|e| format!("Failed to read request body: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_imposter_query_params_parse() {
+        let params = ImposterQueryParams::parse(Some("replayable=true&removeProxies=true"));
+        assert!(params.replayable);
+        assert!(params.remove_proxies);
+
+        let params = ImposterQueryParams::parse(Some("replayable=false"));
+        assert!(!params.replayable);
+        assert!(!params.remove_proxies);
+
+        let params = ImposterQueryParams::parse(None);
+        assert!(!params.replayable);
+        assert!(!params.remove_proxies);
+    }
+
+    #[test]
+    fn test_make_imposter_links() {
+        let links = make_imposter_links("http://localhost:2525", 8080);
+        assert_eq!(links.self_link.href, "http://localhost:2525/imposters/8080");
+        assert_eq!(
+            links.stubs.href,
+            "http://localhost:2525/imposters/8080/stubs"
+        );
+    }
+
+    #[test]
+    fn test_make_stub_links() {
+        let links = make_stub_links("http://localhost:2525", 8080, 0);
+        assert_eq!(
+            links.self_link.href,
+            "http://localhost:2525/imposters/8080/stubs/0"
+        );
+    }
+
+    #[test]
+    fn test_error_response_format() {
+        let resp = error_response(StatusCode::BAD_REQUEST, "Test error");
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn test_json_response() {
+        let body = serde_json::json!({"test": "value"});
+        let resp = json_response(StatusCode::OK, &body);
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers().get("Content-Type").unwrap(),
+            "application/json"
+        );
+    }
+
+    #[test]
+    fn test_not_found_response() {
+        let resp = not_found();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+}

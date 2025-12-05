@@ -275,9 +275,9 @@ TAGS
 # Redis dump (if used)
 dump.rdb
 
-# Core dumps
-core
-core.*
+# Core dumps (files named "core" or "core.<pid>", but not core.rs source files)
+/core
+/core.[0-9]*
 
 # Profiling
 *.prof

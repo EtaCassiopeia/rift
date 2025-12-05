@@ -1,6 +1,7 @@
 use crate::config::{HeaderMatch, PathMatch, Rule};
 use crate::predicate::{
-    parse_query_string, CompiledBodyMatcher, CompiledHeaderMatcher, CompiledQueryMatcher,
+    compile_header_matcher, compile_query_matcher, parse_query_string, CompiledBodyMatcher,
+    CompiledFieldMatcher,
 };
 use hyper::{HeaderMap, Method, Uri};
 use regex::Regex;
@@ -17,9 +18,9 @@ pub struct CompiledMatch {
     path_matcher: PathMatcher,
     headers: Vec<HeaderMatch>,
     /// Enhanced header predicates (Mountebank-compatible)
-    header_predicates: Vec<CompiledHeaderMatcher>,
+    header_predicates: Vec<CompiledFieldMatcher>,
     /// Query parameter matchers
-    query_matchers: Vec<CompiledQueryMatcher>,
+    query_matchers: Vec<CompiledFieldMatcher>,
     /// Body matcher
     body_matcher: Option<CompiledBodyMatcher>,
     /// Case-sensitive matching
@@ -58,7 +59,7 @@ impl CompiledRule {
             .match_config
             .header_predicates
             .iter()
-            .map(CompiledHeaderMatcher::compile)
+            .map(compile_header_matcher)
             .collect();
 
         // Compile query matchers
@@ -66,7 +67,7 @@ impl CompiledRule {
             .match_config
             .query
             .iter()
-            .map(CompiledQueryMatcher::compile)
+            .map(compile_query_matcher)
             .collect();
 
         // Compile body matcher
