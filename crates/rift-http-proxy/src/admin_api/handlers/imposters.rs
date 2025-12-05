@@ -3,6 +3,7 @@
 use crate::admin_api::types::*;
 use crate::extensions::stub_analysis::analyze_stubs;
 use crate::imposter::{ImposterConfig, ImposterError, ImposterManager, StubResponse};
+use crate::scripting::validate_stubs;
 use bytes::Bytes;
 use http_body_util::Full;
 use hyper::body::Incoming;
@@ -31,6 +32,18 @@ pub async fn handle_create(
             )
         }
     };
+
+    // Validate all scripts in stubs before creating the imposter
+    let validation_result = validate_stubs(&config.stubs);
+    if !validation_result.is_valid() {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            &format!(
+                "Script validation failed: {}",
+                validation_result.into_error_message().unwrap_or_default()
+            ),
+        );
+    }
 
     match manager.create_imposter(config).await {
         Ok(assigned_port) => {
@@ -122,6 +135,22 @@ pub async fn handle_replace_all(
             return error_response(StatusCode::BAD_REQUEST, &format!("Invalid batch JSON: {e}"))
         }
     };
+
+    // Validate all scripts in all imposters before making any changes
+    for (idx, config) in batch.imposters.iter().enumerate() {
+        let validation_result = validate_stubs(&config.stubs);
+        if !validation_result.is_valid() {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                &format!(
+                    "Script validation failed in imposter[{}] (port {:?}): {}",
+                    idx,
+                    config.port,
+                    validation_result.into_error_message().unwrap_or_default()
+                ),
+            );
+        }
+    }
 
     manager.delete_all().await;
 

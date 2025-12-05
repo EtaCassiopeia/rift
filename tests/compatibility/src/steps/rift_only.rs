@@ -331,3 +331,67 @@ async fn check_rift_header_same_as_previous(world: &mut CompatibilityWorld, head
             "Rift header '{}' changed: was '{}', now '{}'", header, previous, current);
     });
 }
+
+// ==========================================================================
+// Script Validation Steps
+// ==========================================================================
+
+#[when(expr = "I try to create an imposter on Rift with:")]
+async fn try_create_rift_imposter(world: &mut CompatibilityWorld, step: &Step) {
+    let config = step.docstring().expect("Missing docstring").to_string();
+
+    let json: serde_json::Value = serde_json::from_str(&config)
+        .expect("Invalid JSON in imposter config");
+
+    let response = world.client
+        .post(format!("{}/imposters", world.config.rift_admin_url))
+        .header("Content-Type", "application/json")
+        .body(json.to_string())
+        .send()
+        .await
+        .expect("Failed to send request to Rift");
+
+    let status = response.status().as_u16();
+    let body = response.text().await.unwrap_or_default();
+
+    world.last_response = Some(crate::world::DualResponse {
+        mb_status: 0,
+        mb_body: String::new(),
+        mb_headers: HashMap::new(),
+        mb_duration: std::time::Duration::ZERO,
+        rift_status: status,
+        rift_body: body,
+        rift_headers: HashMap::new(),
+        rift_duration: std::time::Duration::ZERO,
+    });
+}
+
+#[when(expr = "I try to add a stub to imposter {int} on Rift with:")]
+async fn try_add_stub_to_rift(world: &mut CompatibilityWorld, port: u16, step: &Step) {
+    let config = step.docstring().expect("Missing docstring").to_string();
+
+    let json: serde_json::Value = serde_json::from_str(&config)
+        .expect("Invalid JSON in stub config");
+
+    let response = world.client
+        .post(format!("{}/imposters/{}/stubs", world.config.rift_admin_url, port))
+        .header("Content-Type", "application/json")
+        .body(json.to_string())
+        .send()
+        .await
+        .expect("Failed to send request to Rift");
+
+    let status = response.status().as_u16();
+    let body = response.text().await.unwrap_or_default();
+
+    world.last_response = Some(crate::world::DualResponse {
+        mb_status: 0,
+        mb_body: String::new(),
+        mb_headers: HashMap::new(),
+        mb_duration: std::time::Duration::ZERO,
+        rift_status: status,
+        rift_body: body,
+        rift_headers: HashMap::new(),
+        rift_duration: std::time::Duration::ZERO,
+    });
+}

@@ -40,6 +40,83 @@ fn with_current_flow_store<T>(f: impl FnOnce(&Arc<dyn FlowStore>) -> T) -> Optio
 }
 
 /// JavaScript script engine for fault injection using Boa Engine
+///
+/// # Script Interface
+///
+/// Scripts must define a `should_inject` function with the following signature:
+///
+/// ```javascript
+/// function should_inject(request, flow_store) {
+///     // Your logic here
+///     return { inject: false };
+/// }
+/// ```
+///
+/// ## Request Object
+///
+/// The `request` parameter is an object containing:
+/// - `method` - HTTP method (string): "GET", "POST", "PUT", "DELETE", etc.
+/// - `path` - Request path (string): "/api/users/123"
+/// - `headers` - Object of header name (string) to value (string)
+/// - `body` - Request body (parsed JSON value or null)
+/// - `query` - Object of query parameter name (string) to value (string)
+/// - `pathParams` - Object of path parameters extracted from route patterns
+///
+/// ## Flow Store Object
+///
+/// The `flow_store` parameter provides state management across requests:
+/// - `flow_store.get(flow_id, key)` - Get a stored value (returns null if not found)
+/// - `flow_store.set(flow_id, key, value)` - Store a value (returns boolean)
+/// - `flow_store.exists(flow_id, key)` - Check if key exists (returns boolean)
+/// - `flow_store.delete(flow_id, key)` - Delete a key (returns boolean)
+/// - `flow_store.increment(flow_id, key)` - Increment counter (returns number)
+/// - `flow_store.set_ttl(flow_id, ttl_seconds)` - Set flow expiration (returns boolean)
+///
+/// ## Return Value
+///
+/// The function must return an object with the fault decision:
+///
+/// ```javascript
+/// // No fault injection
+/// { inject: false }
+///
+/// // Latency injection
+/// { inject: true, fault: "latency", duration_ms: 500 }
+///
+/// // Error injection
+/// { inject: true, fault: "error", status: 503, body: "Service unavailable" }
+///
+/// // Error with custom headers
+/// {
+///     inject: true,
+///     fault: "error",
+///     status: 429,
+///     body: "Rate limited",
+///     headers: { "Retry-After": "60" }
+/// }
+/// ```
+///
+/// ## Example
+///
+/// ```javascript
+/// function should_inject(request, flow_store) {
+///     // Rate limit based on flow ID from header
+///     var flow_id = request.headers["x-flow-id"];
+///     if (flow_id) {
+///         var attempts = flow_store.increment(flow_id, "attempts");
+///         if (attempts > 3) {
+///             return { inject: true, fault: "error", status: 429, body: "Rate limited" };
+///         }
+///     }
+///
+///     // Inject fault for POST requests to specific path
+///     if (request.method === "POST" && request.path === "/api/test") {
+///         return { inject: true, fault: "latency", duration_ms: 100 };
+///     }
+///
+///     return { inject: false };
+/// }
+/// ```
 #[derive(Debug, Clone)]
 pub struct JsEngine {
     script: String,
@@ -54,13 +131,13 @@ impl JsEngine {
             .eval(Source::from_bytes(script.as_bytes()))
             .map_err(|e| anyhow!("Failed to compile JavaScript script: {e}"))?;
 
-        // Check that should_inject_fault function exists
+        // Check that should_inject function exists
         let global = context.global_object();
-        let func = global.get(js_string!("should_inject_fault"), &mut context);
+        let func = global.get(js_string!("should_inject"), &mut context);
         match func {
             Ok(val) if val.is_callable() => {}
             _ => {
-                return Err(anyhow!("Script must define should_inject_fault function"));
+                return Err(anyhow!("Script must define should_inject function"));
             }
         }
 
@@ -70,7 +147,7 @@ impl JsEngine {
         })
     }
 
-    pub fn should_inject_fault(
+    pub fn should_inject(
         &self,
         request: &ScriptRequest,
         flow_store: Arc<dyn FlowStore>,
@@ -160,10 +237,10 @@ fn execute_js_script_inner(
         .eval(Source::from_bytes(script.as_bytes()))
         .map_err(|e| anyhow!("Failed to execute script: {e}"))?;
 
-    // Call should_inject_fault function
+    // Call should_inject function
     let func = global
-        .get(js_string!("should_inject_fault"), &mut context)
-        .map_err(|e| anyhow!("Failed to get should_inject_fault function: {e}"))?;
+        .get(js_string!("should_inject"), &mut context)
+        .map_err(|e| anyhow!("Failed to get should_inject function: {e}"))?;
 
     let request_arg = global
         .get(js_string!("request"), &mut context)
@@ -174,13 +251,13 @@ fn execute_js_script_inner(
 
     let result = func
         .as_callable()
-        .ok_or_else(|| anyhow!("should_inject_fault is not a function"))?
+        .ok_or_else(|| anyhow!("should_inject is not a function"))?
         .call(
             &JsValue::undefined(),
             &[request_arg, flow_store_arg],
             &mut context,
         )
-        .map_err(|e| anyhow!("Failed to call should_inject_fault: {e}"))?;
+        .map_err(|e| anyhow!("Failed to call should_inject: {e}"))?;
 
     // Parse result
     parse_fault_decision(&mut context, result, rule_id)
@@ -1073,7 +1150,7 @@ mod tests {
     #[test]
     fn test_js_engine_compiles() {
         let script = r#"
-function should_inject_fault(request, flow_store) {
+function should_inject(request, flow_store) {
     return {inject: false};
 }
 "#;
@@ -1092,16 +1169,13 @@ function some_other_function() {
 
         let engine = JsEngine::new(script, "test-rule".to_string());
         assert!(engine.is_err());
-        assert!(engine
-            .unwrap_err()
-            .to_string()
-            .contains("should_inject_fault"));
+        assert!(engine.unwrap_err().to_string().contains("should_inject"));
     }
 
     #[test]
     fn test_js_simple_fault_injection() {
         let script = r#"
-function should_inject_fault(request, flow_store) {
+function should_inject(request, flow_store) {
     if (request.path === "/api/test") {
         return {
             inject: true,
@@ -1129,7 +1203,7 @@ function should_inject_fault(request, flow_store) {
             path_params: HashMap::new(),
         };
 
-        let result = engine.should_inject_fault(&request, store).unwrap();
+        let result = engine.should_inject(&request, store).unwrap();
 
         match result {
             FaultDecision::Error { status, body, .. } => {
@@ -1143,7 +1217,7 @@ function should_inject_fault(request, flow_store) {
     #[test]
     fn test_js_latency_fault() {
         let script = r#"
-function should_inject_fault(request, flow_store) {
+function should_inject(request, flow_store) {
     return {
         inject: true,
         fault: "latency",
@@ -1164,7 +1238,7 @@ function should_inject_fault(request, flow_store) {
             path_params: HashMap::new(),
         };
 
-        let result = engine.should_inject_fault(&request, store).unwrap();
+        let result = engine.should_inject(&request, store).unwrap();
 
         match result {
             FaultDecision::Latency { duration_ms, .. } => {
@@ -1177,7 +1251,7 @@ function should_inject_fault(request, flow_store) {
     #[test]
     fn test_js_flow_store_increment() {
         let script = r#"
-function should_inject_fault(request, flow_store) {
+function should_inject(request, flow_store) {
     var flow_id = request.headers["x-flow-id"] || "";
     if (flow_id === "") {
         return {inject: false};
@@ -1214,28 +1288,22 @@ function should_inject_fault(request, flow_store) {
         };
 
         // First attempt should inject fault
-        let result1 = engine
-            .should_inject_fault(&request, Arc::clone(&store))
-            .unwrap();
+        let result1 = engine.should_inject(&request, Arc::clone(&store)).unwrap();
         assert!(matches!(result1, FaultDecision::Error { .. }));
 
         // Second attempt should inject fault
-        let result2 = engine
-            .should_inject_fault(&request, Arc::clone(&store))
-            .unwrap();
+        let result2 = engine.should_inject(&request, Arc::clone(&store)).unwrap();
         assert!(matches!(result2, FaultDecision::Error { .. }));
 
         // Third attempt should not inject fault
-        let result3 = engine
-            .should_inject_fault(&request, Arc::clone(&store))
-            .unwrap();
+        let result3 = engine.should_inject(&request, Arc::clone(&store)).unwrap();
         assert!(matches!(result3, FaultDecision::None));
     }
 
     #[test]
     fn test_js_flow_store_get_set() {
         let script = r#"
-function should_inject_fault(request, flow_store) {
+function should_inject(request, flow_store) {
     var flow_id = request.headers["x-flow-id"] || "";
     if (flow_id === "") {
         return {inject: false};
@@ -1276,7 +1344,7 @@ function should_inject_fault(request, flow_store) {
             path_params: HashMap::new(),
         };
 
-        let result = engine.should_inject_fault(&request, store).unwrap();
+        let result = engine.should_inject(&request, store).unwrap();
 
         // Should inject fault if get/set works
         match result {
@@ -1291,7 +1359,7 @@ function should_inject_fault(request, flow_store) {
     #[test]
     fn test_compile_js_to_bytecode() {
         let script = r#"
-function should_inject_fault(request, flow_store) {
+function should_inject(request, flow_store) {
     if (request.path === "/test") {
         return {
             inject: true,
@@ -1314,7 +1382,7 @@ function should_inject_fault(request, flow_store) {
     #[test]
     fn test_execute_js_bytecode() {
         let script = r#"
-function should_inject_fault(request, flow_store) {
+function should_inject(request, flow_store) {
     if (request.path === "/api/bytecode") {
         return {
             inject: true,
@@ -1365,7 +1433,7 @@ function should_inject_fault(request, flow_store) {
     #[test]
     fn test_js_with_complex_body() {
         let script = r#"
-function should_inject_fault(request, flow_store) {
+function should_inject(request, flow_store) {
     if (request.body && request.body.nested && request.body.nested.value > 100) {
         return {
             inject: true,
@@ -1397,9 +1465,7 @@ function should_inject_fault(request, flow_store) {
             path_params: HashMap::new(),
         };
 
-        let result1 = engine
-            .should_inject_fault(&request1, Arc::clone(&store))
-            .unwrap();
+        let result1 = engine.should_inject(&request1, Arc::clone(&store)).unwrap();
 
         match result1 {
             FaultDecision::Error { status, body, .. } => {
@@ -1425,14 +1491,14 @@ function should_inject_fault(request, flow_store) {
             path_params: HashMap::new(),
         };
 
-        let result2 = engine.should_inject_fault(&request2, store).unwrap();
+        let result2 = engine.should_inject(&request2, store).unwrap();
         assert!(matches!(result2, FaultDecision::None));
     }
 
     #[test]
     fn test_js_error_with_headers() {
         let script = r#"
-function should_inject_fault(request, flow_store) {
+function should_inject(request, flow_store) {
     return {
         inject: true,
         fault: "error",
@@ -1458,7 +1524,7 @@ function should_inject_fault(request, flow_store) {
             path_params: HashMap::new(),
         };
 
-        let result = engine.should_inject_fault(&request, store).unwrap();
+        let result = engine.should_inject(&request, store).unwrap();
 
         match result {
             FaultDecision::Error {
@@ -1478,7 +1544,7 @@ function should_inject_fault(request, flow_store) {
     #[test]
     fn test_js_query_params() {
         let script = r#"
-function should_inject_fault(request, flow_store) {
+function should_inject(request, flow_store) {
     var name = request.query["name"];
     var page = request.query["page"];
 
@@ -1510,7 +1576,7 @@ function should_inject_fault(request, flow_store) {
             path_params: HashMap::new(),
         };
 
-        let result = engine.should_inject_fault(&request, store).unwrap();
+        let result = engine.should_inject(&request, store).unwrap();
 
         match result {
             FaultDecision::Error { status, body, .. } => {
@@ -1524,7 +1590,7 @@ function should_inject_fault(request, flow_store) {
     #[test]
     fn test_js_path_params() {
         let script = r#"
-function should_inject_fault(request, flow_store) {
+function should_inject(request, flow_store) {
     var user_id = request.pathParams["id"];
     var action = request.pathParams["action"];
 
@@ -1556,7 +1622,7 @@ function should_inject_fault(request, flow_store) {
             path_params,
         };
 
-        let result = engine.should_inject_fault(&request, store).unwrap();
+        let result = engine.should_inject(&request, store).unwrap();
 
         match result {
             FaultDecision::Error { status, body, .. } => {

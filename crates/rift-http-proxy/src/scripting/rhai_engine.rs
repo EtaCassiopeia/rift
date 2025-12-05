@@ -11,7 +11,117 @@ fn is_leap_year(year: u64) -> bool {
     (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
 }
 
+/// Create a Rhai Map from a ScriptRequest
+fn create_request_map(request: &ScriptRequest) -> Map {
+    let mut request_map = Map::new();
+    request_map.insert("method".into(), Dynamic::from(request.method.clone()));
+    request_map.insert("path".into(), Dynamic::from(request.path.clone()));
+
+    // Convert headers
+    let mut headers_map = Map::new();
+    for (k, v) in &request.headers {
+        headers_map.insert(k.clone().into(), Dynamic::from(v.clone()));
+    }
+    request_map.insert("headers".into(), Dynamic::from(headers_map));
+
+    // Convert query parameters
+    let mut query_map = Map::new();
+    for (k, v) in &request.query {
+        query_map.insert(k.clone().into(), Dynamic::from(v.clone()));
+    }
+    request_map.insert("query".into(), Dynamic::from(query_map));
+
+    // Convert path parameters
+    let mut path_params_map = Map::new();
+    for (k, v) in &request.path_params {
+        path_params_map.insert(k.clone().into(), Dynamic::from(v.clone()));
+    }
+    request_map.insert("pathParams".into(), Dynamic::from(path_params_map));
+
+    // Convert body
+    request_map.insert("body".into(), json_to_dynamic(request.body.clone()));
+
+    request_map
+}
+
 /// Rhai script engine for fault injection
+///
+/// # Script Interface
+///
+/// Scripts must define a `should_inject` function with the following signature:
+///
+/// ```rhai
+/// fn should_inject(request, flow_store) {
+///     // Your logic here
+///     return #{ inject: false };
+/// }
+/// ```
+///
+/// ## Request Object
+///
+/// The `request` parameter is a map containing:
+/// - `method` - HTTP method (string): "GET", "POST", "PUT", "DELETE", etc.
+/// - `path` - Request path (string): "/api/users/123"
+/// - `headers` - Map of header name (string) to value (string)
+/// - `body` - Request body (parsed JSON value or null)
+/// - `query` - Map of query parameter name (string) to value (string)
+/// - `pathParams` - Map of path parameters extracted from route patterns
+///
+/// ## Flow Store Object
+///
+/// The `flow_store` parameter provides state management across requests:
+/// - `flow_store.get(flow_id, key)` - Get a stored value (returns unit if not found)
+/// - `flow_store.set(flow_id, key, value)` - Store a value (returns bool)
+/// - `flow_store.exists(flow_id, key)` - Check if key exists (returns bool)
+/// - `flow_store.delete(flow_id, key)` - Delete a key (returns bool)
+/// - `flow_store.increment(flow_id, key)` - Increment counter (returns i64)
+/// - `flow_store.set_ttl(flow_id, ttl_seconds)` - Set flow expiration (returns bool)
+///
+/// ## Return Value
+///
+/// The function must return a map with the fault decision:
+///
+/// ```rhai
+/// // No fault injection
+/// #{ inject: false }
+///
+/// // Latency injection
+/// #{ inject: true, fault: "latency", duration_ms: 500 }
+///
+/// // Error injection
+/// #{ inject: true, fault: "error", status: 503, body: "Service unavailable" }
+///
+/// // Error with custom headers
+/// #{
+///     inject: true,
+///     fault: "error",
+///     status: 429,
+///     body: "Rate limited",
+///     headers: #{ "Retry-After": "60" }
+/// }
+/// ```
+///
+/// ## Example
+///
+/// ```rhai
+/// fn should_inject(request, flow_store) {
+///     // Rate limit based on flow ID from header
+///     let flow_id = request.headers["x-flow-id"];
+///     if flow_id != () {
+///         let attempts = flow_store.increment(flow_id, "attempts");
+///         if attempts > 3 {
+///             return #{ inject: true, fault: "error", status: 429, body: "Rate limited" };
+///         }
+///     }
+///
+///     // Inject fault for POST requests to specific path
+///     if request.method == "POST" && request.path == "/api/test" {
+///         return #{ inject: true, fault: "latency", duration_ms: 100 };
+///     }
+///
+///     #{ inject: false }
+/// }
+/// ```
 #[derive(Clone)]
 #[allow(dead_code)]
 pub struct RhaiEngine {
@@ -138,42 +248,25 @@ impl RhaiEngine {
         let mut scope = Scope::new();
 
         // Create request map
-        let mut request_map = Map::new();
-        request_map.insert("method".into(), Dynamic::from(request.method.clone()));
-        request_map.insert("path".into(), Dynamic::from(request.path.clone()));
+        let request_map = create_request_map(request);
 
-        // Convert headers
-        let mut headers_map = Map::new();
-        for (k, v) in &request.headers {
-            headers_map.insert(k.clone().into(), Dynamic::from(v.clone()));
-        }
-        request_map.insert("headers".into(), Dynamic::from(headers_map));
+        // Create flow_store wrapper
+        let flow_store_wrapper = ScriptFlowStore::new(flow_store);
 
-        // Convert query parameters
-        let mut query_map = Map::new();
-        for (k, v) in &request.query {
-            query_map.insert(k.clone().into(), Dynamic::from(v.clone()));
-        }
-        request_map.insert("query".into(), Dynamic::from(query_map));
-
-        // Convert path parameters
-        let mut path_params_map = Map::new();
-        for (k, v) in &request.path_params {
-            path_params_map.insert(k.clone().into(), Dynamic::from(v.clone()));
-        }
-        request_map.insert("pathParams".into(), Dynamic::from(path_params_map));
-
-        // Convert body
-        request_map.insert("body".into(), json_to_dynamic(request.body.clone()));
-
-        // Add to scope
-        scope.push("request", request_map);
-        scope.push("flow_store", ScriptFlowStore::new(flow_store));
-
-        // Execute script directly - all operations are now synchronous
-        let result: Dynamic = engine
-            .eval_ast_with_scope(&mut scope, self.ast.as_ref()) // Use Arc::as_ref()
+        // First, evaluate the AST to define the should_inject function
+        engine
+            .run_ast_with_scope(&mut scope, self.ast.as_ref())
             .map_err(|e| anyhow!("Script execution error: {e}"))?;
+
+        // Now call the should_inject function with request and flow_store arguments
+        let result: Dynamic = engine
+            .call_fn(
+                &mut scope,
+                self.ast.as_ref(),
+                "should_inject",
+                (request_map, flow_store_wrapper),
+            )
+            .map_err(|e| anyhow!("Failed to call should_inject function: {e}"))?;
 
         // Parse result
         self.parse_fault_decision(result)
@@ -279,42 +372,25 @@ pub fn execute_rhai_with_engine(
     let mut scope = Scope::new();
 
     // Create request map
-    let mut request_map = Map::new();
-    request_map.insert("method".into(), Dynamic::from(request.method.clone()));
-    request_map.insert("path".into(), Dynamic::from(request.path.clone()));
+    let request_map = create_request_map(request);
 
-    // Convert headers
-    let mut headers_map = Map::new();
-    for (k, v) in &request.headers {
-        headers_map.insert(k.clone().into(), Dynamic::from(v.clone()));
-    }
-    request_map.insert("headers".into(), Dynamic::from(headers_map));
+    // Create flow_store wrapper
+    let flow_store_wrapper = ScriptFlowStore::new(flow_store);
 
-    // Convert query parameters
-    let mut query_map = Map::new();
-    for (k, v) in &request.query {
-        query_map.insert(k.clone().into(), Dynamic::from(v.clone()));
-    }
-    request_map.insert("query".into(), Dynamic::from(query_map));
-
-    // Convert path parameters
-    let mut path_params_map = Map::new();
-    for (k, v) in &request.path_params {
-        path_params_map.insert(k.clone().into(), Dynamic::from(v.clone()));
-    }
-    request_map.insert("pathParams".into(), Dynamic::from(path_params_map));
-
-    // Convert body
-    request_map.insert("body".into(), json_to_dynamic(request.body.clone()));
-
-    // Add to scope
-    scope.push("request", request_map);
-    scope.push("flow_store", ScriptFlowStore::new(flow_store));
-
-    // Execute AST with reusable engine
-    let result: Dynamic = engine
-        .eval_ast_with_scope(&mut scope, ast)
+    // First, evaluate the AST to define the should_inject function
+    engine
+        .run_ast_with_scope(&mut scope, ast)
         .map_err(|e| anyhow!("Script execution error: {e}"))?;
+
+    // Now call the should_inject function with request and flow_store arguments
+    let result: Dynamic = engine
+        .call_fn(
+            &mut scope,
+            ast,
+            "should_inject",
+            (request_map, flow_store_wrapper),
+        )
+        .map_err(|e| anyhow!("Failed to call should_inject function: {e}"))?;
 
     // Parse result
     parse_fault_decision_with_rule_id(result, rule_id)
@@ -472,8 +548,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_simple_fault_injection() {
+        // New unified pattern: define should_inject(request, flow_store) function
         let script = r#"
-            fn should_inject_fault(request, flow_store) {
+            fn should_inject(request, flow_store) {
                 if request.method == "POST" {
                     return #{
                         inject: true,
@@ -482,10 +559,8 @@ mod tests {
                         body: "Service unavailable"
                     };
                 }
-                return #{ inject: false };
+                #{ inject: false }
             }
-            
-            should_inject_fault(request, flow_store)
         "#;
 
         let engine = RhaiEngine::new(script, "test-rule".to_string()).unwrap();
@@ -521,15 +596,13 @@ mod tests {
     #[tokio::test]
     async fn test_latency_fault() {
         let script = r#"
-            fn should_inject_fault(request, flow_store) {
-                return #{
+            fn should_inject(request, flow_store) {
+                #{
                     inject: true,
                     fault: "latency",
                     duration_ms: 500
-                };
+                }
             }
-
-            should_inject_fault(request, flow_store)
         "#;
 
         let engine = RhaiEngine::new(script, "latency-rule".to_string()).unwrap();
@@ -561,10 +634,10 @@ mod tests {
     #[tokio::test]
     async fn test_flow_store_increment() {
         let script = r#"
-            fn should_inject_fault(request, flow_store) {
+            fn should_inject(request, flow_store) {
                 let flow_id = request.headers["x-flow-id"];
                 let attempts = flow_store.increment(flow_id, "attempts");
-                
+
                 if attempts <= 2 {
                     return #{
                         inject: true,
@@ -573,11 +646,9 @@ mod tests {
                         body: "Retry later"
                     };
                 }
-                
-                return #{ inject: false };
+
+                #{ inject: false }
             }
-            
-            should_inject_fault(request, flow_store)
         "#;
 
         let engine = RhaiEngine::new(script, "retry-rule".to_string()).unwrap();
@@ -615,9 +686,9 @@ mod tests {
     #[tokio::test]
     async fn test_header_based_routing() {
         let script = r#"
-            fn should_inject_fault(request, flow_store) {
+            fn should_inject(request, flow_store) {
                 let user_id = request.headers["x-user-id"];
-                
+
                 if user_id.starts_with("beta-") {
                     return #{
                         inject: true,
@@ -625,11 +696,9 @@ mod tests {
                         duration_ms: 1000
                     };
                 }
-                
-                return #{ inject: false };
+
+                #{ inject: false }
             }
-            
-            should_inject_fault(request, flow_store)
         "#;
 
         let engine = RhaiEngine::new(script, "beta-users".to_string()).unwrap();
@@ -675,7 +744,7 @@ mod tests {
         // This test verifies that AST is wrapped in Arc and can be reused
         // across multiple executions with a reusable engine (Day 3 feature)
         let script = r#"
-            fn should_inject_fault(request, flow_store) {
+            fn should_inject(request, flow_store) {
                 if request.path == "/cache-test" {
                     return #{
                         inject: true,
@@ -684,10 +753,8 @@ mod tests {
                         body: "Rate limited"
                     };
                 }
-                return #{ inject: false };
+                #{ inject: false }
             }
-            
-            should_inject_fault(request, flow_store)
         "#;
 
         let engine = RhaiEngine::new(script, "cache-test".to_string()).unwrap();

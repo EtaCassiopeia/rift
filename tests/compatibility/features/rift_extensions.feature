@@ -901,3 +901,167 @@ Feature: Rift Extensions (_rift namespace)
     Then Rift response body should be "us-west marked as failed"
     When I send GET request to "/api" on Rift imposter 4545
     Then Rift response should have header "X-Served-By" with value "eu-west"
+
+  # ==========================================================================
+  # Script Validation at Configuration Time
+  # ==========================================================================
+
+  @rift-only
+  Scenario: Rhai script with syntax error is rejected at creation time
+    When I try to create an imposter on Rift with:
+      """
+      {
+        "port": 4545,
+        "protocol": "http",
+        "stubs": [{
+          "responses": [{
+            "_rift": {
+              "script": {
+                "engine": "rhai",
+                "code": "fn should_inject(request, flow_store) { #{ inject: "
+              }
+            }
+          }]
+        }]
+      }
+      """
+    Then Rift should return status 400
+    And Rift response body should contain "Script validation failed"
+    And Rift response body should contain "Syntax error"
+
+  @rift-only
+  Scenario: Rhai script missing should_inject function is rejected
+    When I try to create an imposter on Rift with:
+      """
+      {
+        "port": 4545,
+        "protocol": "http",
+        "stubs": [{
+          "responses": [{
+            "_rift": {
+              "script": {
+                "engine": "rhai",
+                "code": "fn wrong_function_name(x) { x + 1 }"
+              }
+            }
+          }]
+        }]
+      }
+      """
+    Then Rift should return status 400
+    And Rift response body should contain "Script validation failed"
+    And Rift response body should contain "should_inject"
+
+  @rift-only
+  Scenario: Lua script with syntax error is rejected at creation time
+    When I try to create an imposter on Rift with:
+      """
+      {
+        "port": 4545,
+        "protocol": "http",
+        "stubs": [{
+          "responses": [{
+            "_rift": {
+              "script": {
+                "engine": "lua",
+                "code": "function should_inject(request, flow_store) return { inject ="
+              }
+            }
+          }]
+        }]
+      }
+      """
+    Then Rift should return status 400
+    And Rift response body should contain "Script validation failed"
+
+  @rift-only
+  Scenario: JavaScript inject script with syntax error is rejected at creation time
+    When I try to create an imposter on Rift with:
+      """
+      {
+        "port": 4545,
+        "protocol": "http",
+        "stubs": [{
+          "responses": [{
+            "inject": "function(config, state) { return { statusCode: "
+          }]
+        }]
+      }
+      """
+    Then Rift should return status 400
+    And Rift response body should contain "Script validation failed"
+    And Rift response body should contain "Syntax error"
+
+  @rift-only
+  Scenario: Valid Rhai script is accepted
+    When I try to create an imposter on Rift with:
+      """
+      {
+        "port": 4545,
+        "protocol": "http",
+        "stubs": [{
+          "responses": [{
+            "_rift": {
+              "script": {
+                "engine": "rhai",
+                "code": "fn should_inject(request, flow_store) { #{ inject: false } }"
+              }
+            }
+          }]
+        }]
+      }
+      """
+    Then Rift should return status 201
+
+  @rift-only
+  Scenario: Invalid script in stub addition is rejected
+    Given an imposter on port 4545 on Rift with:
+      """
+      {
+        "port": 4545,
+        "protocol": "http",
+        "stubs": [{
+          "responses": [{"is": {"statusCode": 200, "body": "OK"}}]
+        }]
+      }
+      """
+    When I try to add a stub to imposter 4545 on Rift with:
+      """
+      {
+        "stub": {
+          "responses": [{
+            "_rift": {
+              "script": {
+                "engine": "rhai",
+                "code": "fn invalid_syntax { }"
+              }
+            }
+          }]
+        }
+      }
+      """
+    Then Rift should return status 400
+    And Rift response body should contain "Script validation failed"
+
+  @rift-only
+  Scenario: Unknown script engine is rejected
+    When I try to create an imposter on Rift with:
+      """
+      {
+        "port": 4545,
+        "protocol": "http",
+        "stubs": [{
+          "responses": [{
+            "_rift": {
+              "script": {
+                "engine": "unknown_engine",
+                "code": "some code"
+              }
+            }
+          }]
+        }]
+      }
+      """
+    Then Rift should return status 400
+    And Rift response body should contain "Script validation failed"
+    And Rift response body should contain "Unknown script engine"

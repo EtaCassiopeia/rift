@@ -4,6 +4,7 @@ use crate::admin_api::handlers::imposters::handle_get as handle_get_imposter;
 use crate::admin_api::types::*;
 use crate::extensions::stub_analysis::{analyze_new_stub, analyze_stubs};
 use crate::imposter::{ImposterError, ImposterManager, Stub};
+use crate::scripting::{validate_stub, validate_stubs};
 use bytes::Bytes;
 use http_body_util::Full;
 use hyper::body::Incoming;
@@ -29,6 +30,19 @@ pub async fn handle_add(
             return error_response(StatusCode::BAD_REQUEST, &format!("Invalid stub JSON: {e}"))
         }
     };
+
+    // Validate scripts in the stub before adding
+    let insert_index = add_req.index.unwrap_or(0);
+    let validation_result = validate_stub(&add_req.stub, insert_index);
+    if !validation_result.is_valid() {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            &format!(
+                "Script validation failed: {}",
+                validation_result.into_error_message().unwrap_or_default()
+            ),
+        );
+    }
 
     // Analyze the new stub against existing stubs (Rift extension)
     if let Ok(imposter) = manager.get_imposter(port) {
@@ -75,6 +89,18 @@ pub async fn handle_replace_all(
             return error_response(StatusCode::BAD_REQUEST, &format!("Invalid stubs JSON: {e}"))
         }
     };
+
+    // Validate all scripts in stubs before replacing
+    let validation_result = validate_stubs(&replace_req.stubs);
+    if !validation_result.is_valid() {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            &format!(
+                "Script validation failed: {}",
+                validation_result.into_error_message().unwrap_or_default()
+            ),
+        );
+    }
 
     // Analyze the new stubs (Rift extension)
     let analysis = analyze_stubs(&replace_req.stubs);
@@ -184,6 +210,18 @@ pub async fn handle_replace(
             return error_response(StatusCode::BAD_REQUEST, &format!("Invalid stub JSON: {e}"))
         }
     };
+
+    // Validate scripts in the stub before replacing
+    let validation_result = validate_stub(&stub, index);
+    if !validation_result.is_valid() {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            &format!(
+                "Script validation failed: {}",
+                validation_result.into_error_message().unwrap_or_default()
+            ),
+        );
+    }
 
     match manager.replace_stub(port, index, stub) {
         Ok(()) => handle_get_imposter(port, None, base_url, manager).await,

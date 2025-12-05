@@ -71,7 +71,7 @@ function(config, state) {
 
 ## Rhai (`_rift.script`)
 
-Rhai is a lightweight embedded scripting language optimized for Rust. Scripts are defined inline and have access to `request` and `flow_store` objects.
+Rhai is a lightweight embedded scripting language optimized for Rust. Scripts must define a `should_inject(request, flow_store)` function.
 
 ### Basic Script
 
@@ -87,7 +87,7 @@ Rhai is a lightweight embedded scripting language optimized for Rust. Scripts ar
       "_rift": {
         "script": {
           "engine": "rhai",
-          "code": "let count = flow_store.get(\"demo\", \"counter\"); if count == () { count = 0; }; count += 1; flow_store.set(\"demo\", \"counter\", count); #{inject: true, fault: \"error\", status: 200, body: `{\"count\":${count}}`, headers: #{\"Content-Type\": \"application/json\"}}"
+          "code": "fn should_inject(request, flow_store) { let count = flow_store.get(\"demo\", \"counter\"); if count == () { count = 0; }; count += 1; flow_store.set(\"demo\", \"counter\", count); #{inject: true, fault: \"error\", status: 200, body: `{\"count\":${count}}`, headers: #{\"Content-Type\": \"application/json\"}} }"
         }
       }
     }]
@@ -171,7 +171,7 @@ Scripts must return a map with an `inject` flag:
 
 ## Lua (`_rift.script`)
 
-Lua provides high-performance scripting. Scripts must define a `should_inject_fault(request, flow_store)` function.
+Lua provides high-performance scripting. Scripts must define a `should_inject(request, flow_store)` function.
 
 ### Basic Script
 
@@ -187,7 +187,7 @@ Lua provides high-performance scripting. Scripts must define a `should_inject_fa
       "_rift": {
         "script": {
           "engine": "lua",
-          "code": "function should_inject_fault(request, flow_store)\n  local fid = 'lua'\n  local count = flow_store:get(fid, 'count') or 0\n  count = count + 1\n  flow_store:set(fid, 'count', count)\n  return {\n    inject = true,\n    fault = 'error',\n    status = 200,\n    body = '{\"count\":' .. count .. '}',\n    headers = {['Content-Type'] = 'application/json'}\n  }\nend"
+          "code": "function should_inject(request, flow_store)\n  local fid = 'lua'\n  local count = flow_store:get(fid, 'count') or 0\n  count = count + 1\n  flow_store:set(fid, 'count', count)\n  return {\n    inject = true,\n    fault = 'error',\n    status = 200,\n    body = '{\"count\":' .. count .. '}',\n    headers = {['Content-Type'] = 'application/json'}\n  }\nend"
         }
       }
     }]
@@ -284,7 +284,7 @@ return {
       "_rift": {
         "script": {
           "engine": "rhai",
-          "code": "let fid = \"ratelimit\"; let count = flow_store.get(fid, \"requests\"); if count == () { count = 0; }; count += 1; flow_store.set(fid, \"requests\", count); if count > 100 { #{inject: true, fault: \"error\", status: 429, body: `{\"error\":\"Rate limit exceeded\",\"count\":${count}}`, headers: #{\"Content-Type\": \"application/json\", \"Retry-After\": \"60\"}} } else { #{inject: false} }"
+          "code": "fn should_inject(request, flow_store) { let fid = \"ratelimit\"; let count = flow_store.get(fid, \"requests\"); if count == () { count = 0; }; count += 1; flow_store.set(fid, \"requests\", count); if count > 100 { #{inject: true, fault: \"error\", status: 429, body: `{\"error\":\"Rate limit exceeded\",\"count\":${count}}`, headers: #{\"Content-Type\": \"application/json\", \"Retry-After\": \"60\"}} } else { #{inject: false} } }"
         }
       }
     }]
@@ -304,7 +304,7 @@ return {
       "_rift": {
         "script": {
           "engine": "rhai",
-          "code": "let flow_id = request.headers.get(\"x-flow-id\"); if flow_id == () { flow_id = \"default\"; }; let attempts = flow_store.get(flow_id, \"attempts\"); if attempts == () { attempts = 0; }; attempts += 1; flow_store.set(flow_id, \"attempts\", attempts); if attempts <= 2 { #{inject: true, fault: \"error\", status: 503, body: `{\"error\":\"Temporary failure\",\"attempt\":${attempts}}`, headers: #{\"Content-Type\": \"application/json\"}} } else { #{inject: false} }"
+          "code": "fn should_inject(request, flow_store) { let flow_id = request.headers.get(\"x-flow-id\"); if flow_id == () { flow_id = \"default\"; }; let attempts = flow_store.get(flow_id, \"attempts\"); if attempts == () { attempts = 0; }; attempts += 1; flow_store.set(flow_id, \"attempts\", attempts); if attempts <= 2 { #{inject: true, fault: \"error\", status: 503, body: `{\"error\":\"Temporary failure\",\"attempt\":${attempts}}`, headers: #{\"Content-Type\": \"application/json\"}} } else { #{inject: false} } }"
         }
       }
     }]
@@ -326,7 +326,7 @@ return {
         "_rift": {
           "script": {
             "engine": "rhai",
-            "code": "let fid = \"demo\"; let counter = flow_store.get(fid, \"counter\"); if counter == () { counter = 0; }; counter += 1; flow_store.set(fid, \"counter\", counter); #{inject: true, fault: \"error\", status: 200, body: `{\"counter\":${counter}}`, headers: #{\"Content-Type\": \"application/json\"}}"
+            "code": "fn should_inject(request, flow_store) { let fid = \"demo\"; let counter = flow_store.get(fid, \"counter\"); if counter == () { counter = 0; }; counter += 1; flow_store.set(fid, \"counter\", counter); #{inject: true, fault: \"error\", status: 200, body: `{\"counter\":${counter}}`, headers: #{\"Content-Type\": \"application/json\"}} }"
           }
         }
       }]
@@ -337,7 +337,7 @@ return {
         "_rift": {
           "script": {
             "engine": "rhai",
-            "code": "let fid = \"demo\"; let counter = flow_store.get(fid, \"counter\"); if counter == () { counter = 0; }; #{inject: true, fault: \"error\", status: 200, body: `{\"counter\":${counter}}`, headers: #{\"Content-Type\": \"application/json\"}}"
+            "code": "fn should_inject(request, flow_store) { let fid = \"demo\"; let counter = flow_store.get(fid, \"counter\"); if counter == () { counter = 0; }; #{inject: true, fault: \"error\", status: 200, body: `{\"counter\":${counter}}`, headers: #{\"Content-Type\": \"application/json\"}} }"
           }
         }
       }]
@@ -348,7 +348,7 @@ return {
         "_rift": {
           "script": {
             "engine": "rhai",
-            "code": "let fid = \"demo\"; flow_store.delete(fid, \"counter\"); #{inject: true, fault: \"error\", status: 200, body: \"{\\\"message\\\":\\\"Counter reset\\\"}\", headers: #{\"Content-Type\": \"application/json\"}}"
+            "code": "fn should_inject(request, flow_store) { let fid = \"demo\"; flow_store.delete(fid, \"counter\"); #{inject: true, fault: \"error\", status: 200, body: \"{\\\"message\\\":\\\"Counter reset\\\"}\", headers: #{\"Content-Type\": \"application/json\"}} }"
           }
         }
       }]
@@ -366,7 +366,7 @@ return {
 | Format | `inject` response | `_rift.script` | `_rift.script` |
 | State access | `state.key` | `flow_store.get(id, key)` | `flow_store:get(id, key)` |
 | Flow isolation | Per imposter | Per flow_id | Per flow_id |
-| Function wrapper | None needed | None needed | Requires `should_inject_fault` |
+| Function wrapper | None needed | `should_inject(request, flow_store)` | `should_inject(request, flow_store)` |
 | Performance | Good | Excellent | Excellent |
 | Mountebank compatible | Yes | No | No |
 

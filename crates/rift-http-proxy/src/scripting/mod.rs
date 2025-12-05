@@ -52,6 +52,10 @@ mod js_validator;
 #[allow(dead_code, unused_imports)]
 pub use js_validator::{JsValidationError, JsValidator};
 
+// Stub script validation for Admin API
+mod stub_validator;
+pub use stub_validator::{validate_stub, validate_stubs};
+
 /// Script execution result for fault injection decisions
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -112,9 +116,9 @@ impl ScriptEngine {
         match self {
             ScriptEngine::Rhai(engine) => engine.should_inject_fault(request, flow_store),
             #[cfg(feature = "lua")]
-            ScriptEngine::Lua(engine) => engine.should_inject_fault(request, flow_store),
+            ScriptEngine::Lua(engine) => engine.should_inject(request, flow_store),
             #[cfg(feature = "javascript")]
-            ScriptEngine::JavaScript(engine) => engine.should_inject_fault(request, flow_store),
+            ScriptEngine::JavaScript(engine) => engine.should_inject(request, flow_store),
         }
     }
 }
@@ -463,8 +467,8 @@ mod tests {
     #[test]
     fn test_script_engine_new_rhai() {
         let script = r#"
-            fn should_inject(request) {
-                return #{ inject: false };
+            fn should_inject(request, flow_store) {
+                #{ inject: false }
             }
         "#;
         let engine = ScriptEngine::new("rhai", script, "test-rule".to_string());
@@ -483,8 +487,8 @@ mod tests {
     #[test]
     fn test_script_engine_rhai_execution() {
         let script = r#"
-            fn should_inject(request) {
-                return #{ inject: false };
+            fn should_inject(request, flow_store) {
+                #{ inject: false }
             }
         "#;
         let engine = ScriptEngine::new("rhai", script, "test-rule".to_string()).unwrap();
@@ -510,7 +514,7 @@ mod tests {
     #[test]
     fn test_rhai_engine_creation_valid_script() {
         let script = r#"
-            fn should_inject(request) {
+            fn should_inject(request, flow_store) {
                 #{ inject: false }
             }
         "#;
@@ -532,7 +536,7 @@ mod tests {
     #[test]
     fn test_rhai_engine_ast_access() {
         let script = r#"
-            fn should_inject(request) {
+            fn should_inject(request, flow_store) {
                 #{ inject: false }
             }
         "#;
@@ -552,7 +556,7 @@ mod tests {
         #[test]
         fn test_script_engine_new_lua() {
             let script = r#"
-                function should_inject_fault(request)
+                function should_inject(request, flow_store)
                     return { inject = false }
                 end
             "#;
@@ -567,7 +571,7 @@ mod tests {
         #[test]
         fn test_compile_to_bytecode() {
             let script = r#"
-                function should_inject_fault(request)
+                function should_inject(request, flow_store)
                     return { inject = false }
                 end
             "#;
@@ -583,7 +587,7 @@ mod tests {
         #[test]
         fn test_script_engine_new_javascript() {
             let script = r#"
-                function should_inject_fault(request) {
+                function should_inject(request, flow_store) {
                     return { inject: false };
                 }
             "#;
@@ -598,7 +602,7 @@ mod tests {
         #[test]
         fn test_script_engine_new_js_alias() {
             let script = r#"
-                function should_inject_fault(request) {
+                function should_inject(request, flow_store) {
                     return { inject: false };
                 }
             "#;
@@ -613,7 +617,7 @@ mod tests {
         #[test]
         fn test_compile_js_to_bytecode() {
             let script = r#"
-                function should_inject_fault(request) {
+                function should_inject(request, flow_store) {
                     return { inject: false };
                 }
             "#;

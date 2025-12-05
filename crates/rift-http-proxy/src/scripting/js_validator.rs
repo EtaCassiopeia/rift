@@ -24,13 +24,13 @@ impl JsValidator {
             .eval(Source::from_bytes(script.as_bytes()))
             .map_err(|e| JsValidationError::EvaluationError(e.to_string()))?;
 
-        // Check that should_inject_fault function exists
+        // Check that should_inject function exists
         let global = context.global_object();
-        let func = global.get(js_string!("should_inject_fault"), &mut context);
+        let func = global.get(js_string!("should_inject"), &mut context);
         match func {
             Ok(val) if val.is_callable() => Ok(()),
             _ => Err(JsValidationError::MissingFunction(
-                "should_inject_fault".to_string(),
+                "should_inject".to_string(),
             )),
         }
     }
@@ -43,7 +43,7 @@ mod tests {
     #[test]
     fn test_valid_script() {
         let script = r#"
-function should_inject_fault(request, flow_store) {
+function should_inject(request, flow_store) {
     return {inject: false};
 }
 "#;
@@ -53,7 +53,7 @@ function should_inject_fault(request, flow_store) {
     #[test]
     fn test_syntax_error() {
         let script = r#"
-function should_inject_fault(request, flow_store {
+function should_inject(request, flow_store {
     return {inject: false};
 }
 "#;
@@ -79,7 +79,7 @@ function some_other_function(request, flow_store) {
     #[test]
     fn test_complex_script() {
         let script = r#"
-function should_inject_fault(request, flow_store) {
+function should_inject(request, flow_store) {
     var flowId = request.headers["x-flow-id"];
     if (!flowId) {
         return {inject: false};
