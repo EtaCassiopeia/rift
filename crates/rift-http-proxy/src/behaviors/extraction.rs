@@ -61,7 +61,12 @@ pub fn extract_jsonpath(json_str: &str, path: &str) -> Option<String> {
                 current = current.get(field)?;
             }
 
-            let index: usize = index_str.parse().ok()?;
+            // Handle slice notation like [:0] (used by Solo/Mountebank)
+            let index: usize = if let Some(stripped) = index_str.strip_prefix(':') {
+                stripped.parse().ok()?
+            } else {
+                index_str.parse().ok()?
+            };
             current = current.get(index)?;
         } else {
             current = current.get(part)?;

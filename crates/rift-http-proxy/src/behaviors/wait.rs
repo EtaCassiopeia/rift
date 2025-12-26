@@ -44,9 +44,13 @@ impl WaitBehavior {
             return None;
         }
 
-        // Parse simple patterns:
-        // Math.floor(Math.random() * N) + M -> random between M and M+N
         if let Some(body) = extract_function_body(trimmed) {
+            // Handle Solo pattern:
+            // var min = Math.ceil(N); var max = Math.floor(M); var num = Math.floor(Math.random() * (max - min + 1)); var wait = (num + min); return wait;
+            if body.contains("var min") && body.contains("var max") {
+                return Self::parse_solo_wait_pattern(&body);
+            }
+
             // Look for patterns like "Math.floor(Math.random() * 100) + 50"
             // or "return Math.floor(Math.random() * 100) + 50;"
             let body = body
@@ -81,6 +85,35 @@ impl WaitBehavior {
             body.trim().parse::<u64>().ok()
         } else {
             None
+        }
+    }
+
+    /// Parse Solo wait pattern:
+    /// var min = Math.ceil(N); var max = Math.floor(M); var num = Math.floor(Math.random() * (max - min + 1)); var wait = (num + min); return wait;
+    fn parse_solo_wait_pattern(body: &str) -> Option<u64> {
+        use rand::Rng;
+
+        // Extract min value: var min = Math.ceil(N)
+        let min_re = regex::Regex::new(r"var\s+min\s*=\s*Math\.ceil\s*\(\s*(\d+)\s*\)").ok()?;
+        let min_val = min_re
+            .captures(body)
+            .and_then(|c| c.get(1))
+            .and_then(|m| m.as_str().parse::<u64>().ok())
+            .unwrap_or(0);
+
+        // Extract max value: var max = Math.floor(N)
+        let max_re = regex::Regex::new(r"var\s+max\s*=\s*Math\.floor\s*\(\s*(\d+)\s*\)").ok()?;
+        let max_val = max_re
+            .captures(body)
+            .and_then(|c| c.get(1))
+            .and_then(|m| m.as_str().parse::<u64>().ok())
+            .unwrap_or(0);
+
+        // Generate random value in range [min, max]
+        if max_val >= min_val {
+            Some(rand::thread_rng().gen_range(min_val..=max_val))
+        } else {
+            Some(min_val)
         }
     }
 }
@@ -133,5 +166,40 @@ mod tests {
                 max_ms: 200
             }
         ));
+    }
+
+    #[test]
+    fn test_wait_behavior_solo_js_pattern() {
+        // Solo pattern with min=0, max=0 -> returns 0
+        let js = " function() { var min = Math.ceil(0); var max = Math.floor(0); var num = Math.floor(Math.random() * (max - min + 1)); var wait = (num + min); return wait; } ";
+        let wait = WaitBehavior::Function(js.to_string());
+        assert_eq!(wait.get_duration_ms(), 0);
+
+        // Solo pattern with min=50, max=100 -> returns value in range
+        let js = "function() { var min = Math.ceil(50); var max = Math.floor(100); var num = Math.floor(Math.random() * (max - min + 1)); var wait = (num + min); return wait; }";
+        let wait = WaitBehavior::Function(js.to_string());
+        for _ in 0..10 {
+            let duration = wait.get_duration_ms();
+            assert!(
+                (50..=100).contains(&duration),
+                "Duration {} not in range 50-100",
+                duration
+            );
+        }
+    }
+
+    #[test]
+    fn test_wait_behavior_js_function() {
+        // Simple random pattern
+        let js = "function() { return Math.floor(Math.random() * 100) + 50; }";
+        let wait = WaitBehavior::Function(js.to_string());
+        for _ in 0..10 {
+            let duration = wait.get_duration_ms();
+            assert!(
+                (50..=150).contains(&duration),
+                "Duration {} not in range 50-150",
+                duration
+            );
+        }
     }
 }

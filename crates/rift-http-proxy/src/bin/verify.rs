@@ -62,7 +62,7 @@ struct Args {
     dry_run: bool,
 
     /// Skip stubs with inject/proxy/script responses (can't verify dynamically generated responses)
-    #[arg(long, default_value = "true")]
+    #[arg(long)]
     skip_dynamic: bool,
 
     /// Run a demo showing enhanced error output examples
@@ -467,22 +467,26 @@ fn generate_test_cases(stub_index: usize, stub: &Stub, skip_dynamic: bool) -> Ve
     let mut test_cases = Vec::new();
 
     // Check if this stub has dynamic responses
-    let (is_dynamic, skip_reason) = check_if_dynamic(&stub.responses);
+    let (is_dynamic, dynamic_type) = check_if_dynamic(&stub.responses);
 
+    // Parse predicates to build test request (needed for all cases)
+    let (method, path, headers, query_params, body) = parse_predicates(&stub.predicates);
+
+    // If skipping dynamic and this is dynamic, mark as skipped
     if is_dynamic && skip_dynamic {
         test_cases.push(TestCase {
             stub_index,
             stub_id: stub.id.clone(),
-            method: "GET".to_string(),
-            path: "/".to_string(),
-            headers: HashMap::new(),
-            query_params: HashMap::new(),
-            body: None,
+            method,
+            path,
+            headers,
+            query_params,
+            body,
             expected_status: 200,
             expected_headers: HashMap::new(),
             expected_body: None,
             is_dynamic: true,
-            skip_reason,
+            skip_reason: dynamic_type,
         });
         return test_cases;
     }
@@ -490,9 +494,6 @@ fn generate_test_cases(stub_index: usize, stub: &Stub, skip_dynamic: bool) -> Ve
     // Extract expected response from first response
     let (expected_status, expected_headers, expected_body) =
         extract_expected_response(&stub.responses);
-
-    // Parse predicates to build test request
-    let (method, path, headers, query_params, body) = parse_predicates(&stub.predicates);
 
     test_cases.push(TestCase {
         stub_index,
@@ -565,11 +566,36 @@ fn extract_expected_response(
 
     let first = &responses[0];
 
+    // Handle proxy response - expect any successful response from upstream
+    if first.get("proxy").is_some() {
+        // For proxy, we just verify connectivity - any 2xx is fine, no specific body expected
+        return (200, HashMap::new(), None);
+    }
+
+    // Handle inject response - expect any response from the JavaScript
+    if first.get("inject").is_some() {
+        return (200, HashMap::new(), None);
+    }
+
+    // Handle fault response
+    if let Some(fault) = first.get("fault") {
+        // If fault has a specific status, use that
+        if let Some(status) = fault.get("status").and_then(|v| v.as_u64()) {
+            return (status as u16, HashMap::new(), None);
+        }
+        // Default fault behavior might return connection errors, but we can expect 500
+        return (500, HashMap::new(), None);
+    }
+
     // Handle "is" response format
     if let Some(is_response) = first.get("is") {
         let status = is_response
             .get("statusCode")
-            .and_then(|v| v.as_u64())
+            .and_then(|v| {
+                // Try as number first, then as string
+                v.as_u64()
+                    .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+            })
             .unwrap_or(200) as u16;
 
         let headers = is_response
@@ -590,7 +616,11 @@ fn extract_expected_response(
     // Direct format without "is" wrapper
     let status = first
         .get("statusCode")
-        .and_then(|v| v.as_u64())
+        .and_then(|v| {
+            // Try as number first, then as string
+            v.as_u64()
+                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+        })
         .unwrap_or(200) as u16;
 
     let headers = first
@@ -623,12 +653,44 @@ fn parse_predicates(
     let mut headers = HashMap::new();
     let mut query_params = HashMap::new();
     let mut body = None;
+    let mut jsonpath_body: Option<serde_json::Value> = None;
 
+    // Parse predicates in order: startsWith/equals first (set base path), then contains/endsWith (modify path)
     for predicate in predicates {
+        // Handle jsonpath predicates - build a JSON body based on the selector
+        if let Some(jsonpath) = predicate.get("jsonpath") {
+            if let Some(selector) = jsonpath.get("selector").and_then(|v| v.as_str()) {
+                // Get the expected value from equals.body
+                if let Some(equals) = predicate.get("equals") {
+                    if let Some(value) = equals.get("body") {
+                        let json_value = if let Some(s) = value.as_str() {
+                            serde_json::Value::String(s.to_string())
+                        } else {
+                            value.clone()
+                        };
+
+                        // Build or merge into jsonpath_body
+                        let new_obj = build_json_from_jsonpath(selector, json_value);
+                        jsonpath_body = Some(match jsonpath_body {
+                            Some(existing) => merge_json_objects(existing, new_obj),
+                            None => new_obj,
+                        });
+                    }
+                }
+            }
+        }
         // Handle various predicate formats
 
-        // "equals" predicate
+        // "startsWith" predicate - process first to set base path
+        if let Some(starts_with) = predicate.get("startsWith") {
+            if let Some(p) = starts_with.get("path").and_then(|v| v.as_str()) {
+                path = p.to_string();
+            }
+        }
+
+        // "equals" predicate - skip body if this predicate has a jsonpath (body handled above)
         if let Some(equals) = predicate.get("equals") {
+            let skip_body = predicate.get("jsonpath").is_some();
             parse_equals_predicate(
                 equals,
                 &mut method,
@@ -636,19 +698,8 @@ fn parse_predicates(
                 &mut headers,
                 &mut query_params,
                 &mut body,
+                skip_body,
             );
-        }
-
-        // "contains" predicate
-        if let Some(contains) = predicate.get("contains") {
-            parse_contains_predicate(contains, &mut path, &mut headers, &mut body);
-        }
-
-        // "startsWith" predicate
-        if let Some(starts_with) = predicate.get("startsWith") {
-            if let Some(p) = starts_with.get("path").and_then(|v| v.as_str()) {
-                path = p.to_string();
-            }
         }
 
         // "matches" predicate (regex - use a sample value)
@@ -673,8 +724,9 @@ fn parse_predicates(
             }
         }
 
-        // "deepEquals" predicate
+        // "deepEquals" predicate - skip body if this predicate has a jsonpath (body handled above)
         if let Some(deep_equals) = predicate.get("deepEquals") {
+            let skip_body = predicate.get("jsonpath").is_some();
             parse_equals_predicate(
                 deep_equals,
                 &mut method,
@@ -682,7 +734,35 @@ fn parse_predicates(
                 &mut headers,
                 &mut query_params,
                 &mut body,
+                skip_body,
             );
+        }
+
+        // "contains" predicate - processed after base path is set
+        if let Some(contains) = predicate.get("contains") {
+            parse_contains_predicate(
+                contains,
+                &mut path,
+                &mut headers,
+                &mut body,
+                &mut query_params,
+            );
+        }
+
+        // "endsWith" predicate - append to path if needed
+        if let Some(ends_with) = predicate.get("endsWith") {
+            if let Some(p) = ends_with.get("path").and_then(|v| v.as_str()) {
+                // If path doesn't end with the required suffix, append it
+                if !path.ends_with(p) {
+                    if path == "/" {
+                        path = format!("/prefix{p}");
+                    } else if !path.ends_with('/') && !p.starts_with('/') {
+                        path = format!("{path}/{p}");
+                    } else {
+                        path = format!("{path}{p}");
+                    }
+                }
+            }
         }
 
         // "and" predicate - recursively parse all inner predicates
@@ -722,7 +802,75 @@ fn parse_predicates(
         }
     }
 
+    // If we built a jsonpath body and no explicit body was set, use it
+    if body.is_none() && jsonpath_body.is_some() {
+        body = jsonpath_body.map(|v| serde_json::to_string(&v).unwrap_or_default());
+    }
+
     (method, path, headers, query_params, body)
+}
+
+/// Build a JSON object from a jsonpath selector and value
+/// e.g., "$.receiver.context.correlationKeys.[:0].keyValue" with value "728839"
+/// becomes {"receiver":{"context":{"correlationKeys":[{"keyValue":"728839"}]}}}
+fn build_json_from_jsonpath(selector: &str, value: serde_json::Value) -> serde_json::Value {
+    // Remove leading $. if present
+    let path = selector.strip_prefix("$.").unwrap_or(selector);
+
+    // Split by . and build nested structure
+    let parts: Vec<&str> = path.split('.').collect();
+
+    // Build from inside out
+    let mut result = value;
+
+    for part in parts.iter().rev() {
+        if part.starts_with("[:") || part.starts_with("[") {
+            // Array index like "[:0]" or "[0]" - wrap in array
+            result = serde_json::json!([result]);
+        } else {
+            // Object key
+            let mut obj = serde_json::Map::new();
+            obj.insert((*part).to_string(), result);
+            result = serde_json::Value::Object(obj);
+        }
+    }
+
+    result
+}
+
+/// Merge two JSON objects recursively
+fn merge_json_objects(
+    mut base: serde_json::Value,
+    overlay: serde_json::Value,
+) -> serde_json::Value {
+    if let (serde_json::Value::Object(base_obj), serde_json::Value::Object(overlay_obj)) =
+        (&mut base, &overlay)
+    {
+        for (key, value) in overlay_obj {
+            if let Some(existing) = base_obj.get_mut(key) {
+                *existing = merge_json_objects(existing.clone(), value.clone());
+            } else {
+                base_obj.insert(key.clone(), value.clone());
+            }
+        }
+        base
+    } else if let (serde_json::Value::Array(base_arr), serde_json::Value::Array(overlay_arr)) =
+        (&mut base, &overlay)
+    {
+        // Merge arrays by extending or merging first elements
+        if !overlay_arr.is_empty() {
+            if base_arr.is_empty() {
+                base_arr.extend(overlay_arr.clone());
+            } else {
+                // Merge first elements if both are objects
+                let merged = merge_json_objects(base_arr[0].clone(), overlay_arr[0].clone());
+                base_arr[0] = merged;
+            }
+        }
+        base
+    } else {
+        overlay
+    }
 }
 
 fn parse_equals_predicate(
@@ -732,6 +880,7 @@ fn parse_equals_predicate(
     headers: &mut HashMap<String, String>,
     query_params: &mut HashMap<String, String>,
     body: &mut Option<String>,
+    skip_body: bool,
 ) {
     if let Some(m) = equals.get("method").and_then(|v| v.as_str()) {
         *method = m.to_string();
@@ -757,11 +906,14 @@ fn parse_equals_predicate(
         }
     }
 
-    if let Some(b) = equals.get("body") {
-        if let Some(s) = b.as_str() {
-            *body = Some(s.to_string());
-        } else {
-            *body = Some(serde_json::to_string(b).unwrap_or_default());
+    // Skip body if it's being handled by jsonpath
+    if !skip_body {
+        if let Some(b) = equals.get("body") {
+            if let Some(s) = b.as_str() {
+                *body = Some(s.to_string());
+            } else {
+                *body = Some(serde_json::to_string(b).unwrap_or_default());
+            }
         }
     }
 }
@@ -771,10 +923,32 @@ fn parse_contains_predicate(
     path: &mut String,
     headers: &mut HashMap<String, String>,
     body: &mut Option<String>,
+    query_params: &mut HashMap<String, String>,
 ) {
     // For "contains", we need to include the substring in our test value
     if let Some(p) = contains.get("path").and_then(|v| v.as_str()) {
-        *path = format!("/test{p}");
+        // If path already has a value from startsWith/equals, append to it
+        // Otherwise, use the contains value as the path (prefixing / if needed)
+        if *path == "/" {
+            if p.starts_with('/') {
+                *path = p.to_string();
+            } else {
+                *path = format!("/{p}");
+            }
+        } else if !path.contains(p) {
+            // Append the contains substring to the existing path if not already present
+            path.push_str(p);
+        }
+    }
+
+    // Handle query parameters in contains
+    if let Some(query) = contains.get("query").and_then(|v| v.as_object()) {
+        for (name, value) in query {
+            if let Some(v) = value.as_str() {
+                // For contains, include the substring in the query value
+                query_params.insert(name.clone(), v.to_string());
+            }
+        }
     }
 
     if let Some(hdrs) = contains.get("headers").and_then(|v| v.as_object()) {
@@ -795,18 +969,26 @@ fn generate_sample_from_regex(pattern: &str) -> String {
     // This is a best-effort approach for common regex patterns
 
     // /api/v\d+/users -> /api/v1/users
+    // Important: Replace character class patterns BEFORE stripping anchors,
+    // since [^/]+ contains ^ as negation, not as anchor
     let sample = pattern
+        // Replace character classes first (before anchor removal)
+        .replace(r"[^/]+", "item")
+        .replace(r"[a-zA-Z]+", "test")
+        .replace(r"[0-9]+", "123")
+        .replace(r"[a-z]+", "test")
+        .replace(r"[A-Z]+", "TEST")
+        // Replace other common patterns
         .replace(r"\d+", "1")
         .replace(r"\d", "1")
         .replace(r"\w+", "test")
         .replace(r"\w", "a")
         .replace(r".*", "")
-        .replace(r".+", "x")
-        .replace("^", "")
-        .replace("$", "")
-        .replace(r"[^/]+", "item")
-        .replace(r"[a-zA-Z]+", "test")
-        .replace(r"[0-9]+", "123");
+        .replace(r".+", "x");
+
+    // Strip anchors only at start/end of string
+    let sample = sample.strip_prefix('^').unwrap_or(&sample).to_string();
+    let sample = sample.strip_suffix('$').unwrap_or(&sample).to_string();
 
     if sample.is_empty() {
         "/".to_string()
@@ -880,6 +1062,7 @@ async fn execute_test(client: &Client, imposter_port: u16, test_case: &TestCase)
                 status,
                 &headers,
                 &body_text,
+                test_case.is_dynamic,
             );
 
             let success = verify_result.is_success();
@@ -939,11 +1122,19 @@ fn verify_response(
     actual_status: u16,
     actual_headers: &HashMap<String, String>,
     actual_body: &Option<String>,
+    is_dynamic: bool,
 ) -> VerifyResult {
     let mut failures = Vec::new();
 
     // Check status code
-    if expected_status != actual_status {
+    // For dynamic responses (proxy, inject), accept any 2xx status
+    let status_ok = if is_dynamic {
+        (200..300).contains(&actual_status)
+    } else {
+        expected_status == actual_status
+    };
+
+    if !status_ok {
         failures.push(FailureReason::StatusMismatch {
             expected: expected_status,
             actual: actual_status,

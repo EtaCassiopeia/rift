@@ -242,6 +242,13 @@ fn navigate_json<'a>(value: &'a serde_json::Value, path: &str) -> Option<&'a ser
                     }
                 }
                 return None;
+            } else if let Some(stripped) = index_str.strip_prefix(':') {
+                // Slice notation like [:0] - means first element (index 0)
+                // In Python slicing [:0] is empty, but in Mountebank/Solo [:0] means index 0
+                let slice_index = stripped.parse::<usize>().unwrap_or(0);
+                let arr = value.as_array()?;
+                let item = arr.get(slice_index)?;
+                return navigate_json(item, rest);
             } else if let Ok(index) = index_str.parse::<usize>() {
                 let arr = value.as_array()?;
                 let item = arr.get(index)?;
@@ -410,6 +417,27 @@ mod tests {
         assert_eq!(
             extract_json_path(body, "$.items[*].id"),
             Some("1".to_string())
+        );
+    }
+
+    #[test]
+    fn test_json_path_slice_notation() {
+        // Test [:0] slice notation used by Solo/Mountebank
+        let body = r#"{"receiver":{"context":{"correlationKeys":[{"keyValue":"728839"}]}}}"#;
+        assert_eq!(
+            extract_json_path(body, "$.receiver.context.correlationKeys.[:0].keyValue"),
+            Some("728839".to_string())
+        );
+
+        // Test with multiple items
+        let body2 = r#"{"items":[{"name":"first"},{"name":"second"}]}"#;
+        assert_eq!(
+            extract_json_path(body2, "$.items.[:0].name"),
+            Some("first".to_string())
+        );
+        assert_eq!(
+            extract_json_path(body2, "$.items.[:1].name"),
+            Some("second".to_string())
         );
     }
 
