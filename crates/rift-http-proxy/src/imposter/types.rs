@@ -113,9 +113,14 @@ pub struct DebugStubInfo {
 // ============================================================================
 
 /// Stub definition (Mountebank-compatible with Rift extensions)
+/// Field ordering matches Mountebank output: scenarioName, predicates, responses, _links
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Stub {
+    /// Optional scenario name for documentation/organization (Mountebank compatible)
+    /// Placed first to match Mountebank output ordering
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scenario_name: Option<String>,
     /// Optional unique identifier for the stub (Rift extension)
     /// Useful for targeting specific stubs for updates/deletion without relying on index
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -123,14 +128,11 @@ pub struct Stub {
     #[serde(default)]
     pub predicates: Vec<serde_json::Value>,
     pub responses: Vec<StubResponse>,
-    /// Optional scenario name for documentation/organization (Mountebank compatible)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub scenario_name: Option<String>,
 }
 
 /// Response within a stub - wrapper type that handles various formats
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(from = "StubResponseRaw", into = "StubResponseRaw")]
+#[serde(from = "StubResponseRaw", into = "StubResponseOut")]
 pub enum StubResponse {
     Is {
         is: IsResponse,
@@ -161,7 +163,7 @@ pub enum StubResponse {
 /// - Formats with `proxy: null` alongside `is` (ignored)
 /// - `statusCode` as either string or number
 /// - Rift extensions via `_rift` field
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct StubResponseRaw {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -172,10 +174,10 @@ pub(crate) struct StubResponseRaw {
     pub inject: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fault: Option<String>,
-    /// Mountebank-style behaviors (with underscore prefix)
+    /// Mountebank-style behaviors (with underscore prefix) - for deserialization
     #[serde(rename = "_behaviors", skip_serializing_if = "Option::is_none")]
     pub underscore_behaviors: Option<serde_json::Value>,
-    /// Alternative behaviors field (without underscore, used by some tools)
+    /// Alternative behaviors field (without underscore, used by some tools) - for deserialization
     #[serde(skip_serializing_if = "Option::is_none")]
     pub behaviors: Option<serde_json::Value>,
     /// Rift extensions for advanced features
@@ -183,8 +185,31 @@ pub(crate) struct StubResponseRaw {
     pub rift: Option<RiftResponseExtension>,
 }
 
-/// Raw IsResponse that handles statusCode as string or number
-#[derive(Debug, Clone, Deserialize, Serialize)]
+/// Serialization type for stub responses - outputs Mountebank-compatible format
+/// Uses `behaviors` as array (Mountebank standard format)
+/// Field ordering matches Mountebank: behaviors, is, proxy
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct StubResponseOut {
+    /// Mountebank-style behaviors as array (standard Mountebank output format)
+    /// Placed first to match Mountebank output ordering
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub behaviors: Option<Vec<serde_json::Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is: Option<IsResponseOut>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<ProxyResponse>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inject: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fault: Option<String>,
+    /// Rift extensions for advanced features
+    #[serde(rename = "_rift", skip_serializing_if = "Option::is_none")]
+    pub rift: Option<RiftResponseExtension>,
+}
+
+/// Raw IsResponse that handles statusCode as string or number (for deserialization)
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct IsResponseRaw {
     #[serde(
@@ -199,6 +224,31 @@ pub(crate) struct IsResponseRaw {
     /// Response mode: "text" (default) or "binary" (body is base64-encoded)
     #[serde(rename = "_mode", default)]
     pub mode: ResponseMode,
+}
+
+/// IsResponse for serialization - outputs statusCode as string (Mountebank format)
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct IsResponseOut {
+    /// Status code serialized as string for Mountebank compatibility
+    #[serde(serialize_with = "serialize_status_code_as_string")]
+    pub status_code: u16,
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body: Option<serde_json::Value>,
+    /// Response mode: "text" (default) or "binary" (body is base64-encoded)
+    /// Skipped when text (default) as Mountebank doesn't output it for text mode
+    #[serde(rename = "_mode", default, skip_serializing_if = "is_text_mode")]
+    pub mode: ResponseMode,
+}
+
+/// Serialize statusCode as a string for Mountebank compatibility
+fn serialize_status_code_as_string<S>(status_code: &u16, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_str(&status_code.to_string())
 }
 
 pub(crate) fn default_status_code() -> u16 {
@@ -268,15 +318,15 @@ impl From<StubResponseRaw> for StubResponse {
     }
 }
 
-impl From<StubResponse> for StubResponseRaw {
+impl From<StubResponse> for StubResponseOut {
     fn from(response: StubResponse) -> Self {
         match response {
             StubResponse::Is {
                 is,
                 behaviors,
                 rift,
-            } => StubResponseRaw {
-                is: Some(IsResponseRaw {
+            } => StubResponseOut {
+                is: Some(IsResponseOut {
                     status_code: is.status_code,
                     headers: is.headers,
                     body: is.body,
@@ -285,47 +335,75 @@ impl From<StubResponse> for StubResponseRaw {
                 proxy: None,
                 inject: None,
                 fault: None,
-                underscore_behaviors: behaviors,
-                behaviors: None,
+                // Convert behaviors object to array format for Mountebank compatibility
+                behaviors: behaviors.and_then(behaviors_to_array),
                 rift,
             },
-            StubResponse::Proxy { proxy } => StubResponseRaw {
+            StubResponse::Proxy { proxy } => StubResponseOut {
                 is: None,
                 proxy: Some(proxy),
                 inject: None,
                 fault: None,
-                underscore_behaviors: None,
                 behaviors: None,
                 rift: None,
             },
-            StubResponse::Inject { inject } => StubResponseRaw {
+            StubResponse::Inject { inject } => StubResponseOut {
                 is: None,
                 proxy: None,
                 inject: Some(inject),
                 fault: None,
-                underscore_behaviors: None,
                 behaviors: None,
                 rift: None,
             },
-            StubResponse::Fault { fault } => StubResponseRaw {
+            StubResponse::Fault { fault } => StubResponseOut {
                 is: None,
                 proxy: None,
                 inject: None,
                 fault: Some(fault),
-                underscore_behaviors: None,
                 behaviors: None,
                 rift: None,
             },
-            StubResponse::RiftScript { rift } => StubResponseRaw {
+            StubResponse::RiftScript { rift } => StubResponseOut {
                 is: None,
                 proxy: None,
                 inject: None,
                 fault: None,
-                underscore_behaviors: None,
                 behaviors: None,
                 rift: Some(rift),
             },
         }
+    }
+}
+
+/// Convert behaviors from object format to array format for Mountebank compatibility
+/// Mountebank outputs: `"behaviors": [{"wait": ...}, {"decorate": ...}]`
+/// Rift internally stores as object: `{"wait": ..., "decorate": ...}`
+fn behaviors_to_array(value: serde_json::Value) -> Option<Vec<serde_json::Value>> {
+    match value {
+        serde_json::Value::Object(obj) => {
+            if obj.is_empty() {
+                None
+            } else {
+                // Convert each key-value pair to a separate object in the array
+                let arr: Vec<serde_json::Value> = obj
+                    .into_iter()
+                    .map(|(k, v)| {
+                        let mut m = serde_json::Map::new();
+                        m.insert(k, v);
+                        serde_json::Value::Object(m)
+                    })
+                    .collect();
+                Some(arr)
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            if arr.is_empty() {
+                None
+            } else {
+                Some(arr)
+            }
+        }
+        _ => None,
     }
 }
 
