@@ -2,14 +2,28 @@
 
 use parking_lot::RwLock;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// State for a single rule's cycling behavior
+#[derive(Default, Clone)]
+struct RuleState {
+    /// Current response index
+    index: usize,
+    /// Repeat counter (how many times current response has been used)
+    repeat_count: usize,
+}
+
+/// Combined state for all rules - protected by a single lock to prevent deadlocks
+#[derive(Default)]
+struct CyclerState {
+    rules: HashMap<String, RuleState>,
+}
 
 /// Tracks response cycling state per rule
+///
+/// Uses a single lock to protect all state, avoiding the deadlock that could occur
+/// with multiple locks acquired in inconsistent order.
 pub struct ResponseCycler {
-    /// Current response index per rule
-    indices: RwLock<HashMap<String, AtomicUsize>>,
-    /// Repeat counters per rule (how many times current response has been used)
-    repeat_counters: RwLock<HashMap<String, AtomicUsize>>,
+    state: RwLock<CyclerState>,
 }
 
 impl Default for ResponseCycler {
@@ -21,13 +35,12 @@ impl Default for ResponseCycler {
 impl ResponseCycler {
     pub fn new() -> Self {
         Self {
-            indices: RwLock::new(HashMap::new()),
-            repeat_counters: RwLock::new(HashMap::new()),
+            state: RwLock::new(CyclerState::default()),
         }
     }
 
     /// Get current response index for a rule, handling repeat behavior
-    /// Returns the index and whether it advanced to a new response
+    /// Returns the index to use for this request
     pub fn get_response_index(
         &self,
         rule_id: &str,
@@ -40,68 +53,38 @@ impl ResponseCycler {
 
         let repeat_count = repeat.unwrap_or(1).max(1) as usize;
 
-        // Get or create the index and counter for this rule
-        let indices = self.indices.read();
-        let counters = self.repeat_counters.read();
+        let mut state = self.state.write();
+        let rule_state = state.rules.entry(rule_id.to_string()).or_default();
 
-        let current_index = indices
-            .get(rule_id)
-            .map(|i| i.load(Ordering::SeqCst))
-            .unwrap_or(0);
-
-        let _current_repeat = counters
-            .get(rule_id)
-            .map(|c| c.load(Ordering::SeqCst))
-            .unwrap_or(0);
-
-        // Drop read locks
-        drop(indices);
-        drop(counters);
+        let current_index = rule_state.index % response_count;
 
         // Increment repeat counter
-        let mut counters = self.repeat_counters.write();
-        let counter = counters
-            .entry(rule_id.to_string())
-            .or_insert_with(|| AtomicUsize::new(0));
-
-        let new_repeat = counter.fetch_add(1, Ordering::SeqCst) + 1;
+        rule_state.repeat_count += 1;
 
         // Check if we need to advance to next response
-        if new_repeat >= repeat_count {
-            // Reset repeat counter
-            counter.store(0, Ordering::SeqCst);
-
-            // Advance to next response
-            let mut indices = self.indices.write();
-            let index = indices
-                .entry(rule_id.to_string())
-                .or_insert_with(|| AtomicUsize::new(0));
-
-            let next_index = (current_index + 1) % response_count;
-            index.store(next_index, Ordering::SeqCst);
-
-            current_index % response_count
-        } else {
-            current_index % response_count
+        if rule_state.repeat_count >= repeat_count {
+            // Reset repeat counter and advance to next response
+            rule_state.repeat_count = 0;
+            rule_state.index = (current_index + 1) % response_count;
         }
+
+        current_index
     }
 
     /// Reset cycling state for a rule
     #[allow(dead_code)]
     pub fn reset(&self, rule_id: &str) {
-        if let Some(index) = self.indices.write().get(rule_id) {
-            index.store(0, Ordering::SeqCst);
-        }
-        if let Some(counter) = self.repeat_counters.write().get(rule_id) {
-            counter.store(0, Ordering::SeqCst);
+        let mut state = self.state.write();
+        if let Some(rule_state) = state.rules.get_mut(rule_id) {
+            rule_state.index = 0;
+            rule_state.repeat_count = 0;
         }
     }
 
     /// Reset all cycling state
     #[allow(dead_code)]
     pub fn reset_all(&self) {
-        self.indices.write().clear();
-        self.repeat_counters.write().clear();
+        self.state.write().rules.clear();
     }
 
     /// Peek at current response index without modifying state
@@ -111,12 +94,12 @@ impl ResponseCycler {
             return 0;
         }
 
-        let indices = self.indices.read();
-        if let Some(index_entry) = indices.get(rule_id) {
-            index_entry.load(Ordering::SeqCst) % response_count
-        } else {
-            0
-        }
+        let state = self.state.read();
+        state
+            .rules
+            .get(rule_id)
+            .map(|r| r.index % response_count)
+            .unwrap_or(0)
     }
 
     /// Advance the cycler for a proxy response (which has no repeat behavior)
@@ -126,14 +109,13 @@ impl ResponseCycler {
             return;
         }
 
-        let mut indices = self.indices.write();
-        let index_entry = indices
-            .entry(rule_id.to_string())
-            .or_insert_with(|| AtomicUsize::new(0));
+        let mut state = self.state.write();
+        let rule_state = state.rules.entry(rule_id.to_string()).or_default();
 
-        let current_index = index_entry.load(Ordering::SeqCst) % response_count;
-        let next_index = (current_index + 1) % response_count;
-        index_entry.store(next_index, Ordering::SeqCst);
+        let current_index = rule_state.index % response_count;
+        rule_state.index = (current_index + 1) % response_count;
+        // Reset repeat counter when advancing via proxy
+        rule_state.repeat_count = 0;
     }
 
     /// Get response index with per-response repeat values
@@ -147,36 +129,22 @@ impl ResponseCycler {
             return 0;
         }
 
-        // Get current state
-        let mut indices = self.indices.write();
-        let mut counters = self.repeat_counters.write();
+        let mut state = self.state.write();
+        let rule_state = state.rules.entry(rule_id.to_string()).or_default();
 
-        let index_entry = indices
-            .entry(rule_id.to_string())
-            .or_insert_with(|| AtomicUsize::new(0));
-        let counter_entry = counters
-            .entry(rule_id.to_string())
-            .or_insert_with(|| AtomicUsize::new(0));
-
-        let current_index = index_entry.load(Ordering::SeqCst) % responses.len();
-        let current_repeat = counter_entry.load(Ordering::SeqCst);
+        let current_index = rule_state.index % responses.len();
 
         // Get repeat value for current response
         let repeat_count = responses[current_index].get_repeat().unwrap_or(1).max(1) as usize;
 
         // Increment repeat counter
-        let new_repeat = current_repeat + 1;
+        rule_state.repeat_count += 1;
 
-        // Return current index and decide if we should advance
-        if new_repeat >= repeat_count {
-            // Reset repeat counter
-            counter_entry.store(0, Ordering::SeqCst);
-            // Advance to next response for next call
-            let next_index = (current_index + 1) % responses.len();
-            index_entry.store(next_index, Ordering::SeqCst);
-        } else {
-            // Increment repeat counter for next call
-            counter_entry.store(new_repeat, Ordering::SeqCst);
+        // Check if we should advance to next response
+        if rule_state.repeat_count >= repeat_count {
+            // Reset repeat counter and advance to next response
+            rule_state.repeat_count = 0;
+            rule_state.index = (current_index + 1) % responses.len();
         }
 
         current_index
@@ -215,5 +183,114 @@ mod tests {
         assert_eq!(cycler.get_response_index("rule1", 2, Some(3)), 1);
         assert_eq!(cycler.get_response_index("rule1", 2, Some(3)), 1);
         assert_eq!(cycler.get_response_index("rule1", 2, Some(3)), 0); // Wrap around
+    }
+
+    #[test]
+    fn test_response_cycler_independent_rules() {
+        let cycler = ResponseCycler::new();
+
+        // Different rules should have independent state
+        assert_eq!(cycler.get_response_index("rule1", 3, None), 0);
+        assert_eq!(cycler.get_response_index("rule2", 3, None), 0);
+        assert_eq!(cycler.get_response_index("rule1", 3, None), 1);
+        assert_eq!(cycler.get_response_index("rule2", 3, None), 1);
+    }
+
+    #[test]
+    fn test_response_cycler_peek() {
+        let cycler = ResponseCycler::new();
+
+        // Peek should not modify state
+        assert_eq!(cycler.peek_response_index("rule1", 3), 0);
+        assert_eq!(cycler.peek_response_index("rule1", 3), 0);
+
+        // After actual get, peek should reflect new state
+        cycler.get_response_index("rule1", 3, None);
+        assert_eq!(cycler.peek_response_index("rule1", 3), 1);
+    }
+
+    #[test]
+    fn test_response_cycler_reset() {
+        let cycler = ResponseCycler::new();
+
+        cycler.get_response_index("rule1", 3, None);
+        cycler.get_response_index("rule1", 3, None);
+        assert_eq!(cycler.peek_response_index("rule1", 3), 2);
+
+        cycler.reset("rule1");
+        assert_eq!(cycler.peek_response_index("rule1", 3), 0);
+    }
+
+    #[test]
+    fn test_response_cycler_advance_for_proxy() {
+        let cycler = ResponseCycler::new();
+
+        assert_eq!(cycler.peek_response_index("rule1", 3), 0);
+        cycler.advance_for_proxy("rule1", 3);
+        assert_eq!(cycler.peek_response_index("rule1", 3), 1);
+        cycler.advance_for_proxy("rule1", 3);
+        assert_eq!(cycler.peek_response_index("rule1", 3), 2);
+        cycler.advance_for_proxy("rule1", 3);
+        assert_eq!(cycler.peek_response_index("rule1", 3), 0); // Wrap around
+    }
+
+    #[test]
+    fn test_response_cycler_zero_responses() {
+        let cycler = ResponseCycler::new();
+
+        // Should handle zero responses gracefully
+        assert_eq!(cycler.get_response_index("rule1", 0, None), 0);
+        assert_eq!(cycler.peek_response_index("rule1", 0), 0);
+    }
+
+    struct MockResponse {
+        repeat: Option<u32>,
+    }
+
+    impl HasRepeatBehavior for MockResponse {
+        fn get_repeat(&self) -> Option<u32> {
+            self.repeat
+        }
+    }
+
+    #[test]
+    fn test_per_response_repeat() {
+        let cycler = ResponseCycler::new();
+
+        // First response repeats 2x, second repeats 3x
+        let responses = vec![
+            MockResponse { repeat: Some(2) },
+            MockResponse { repeat: Some(3) },
+        ];
+
+        // First response, repeat 2x
+        assert_eq!(
+            cycler.get_response_index_with_per_response_repeat("rule1", &responses),
+            0
+        );
+        assert_eq!(
+            cycler.get_response_index_with_per_response_repeat("rule1", &responses),
+            0
+        );
+
+        // Second response, repeat 3x
+        assert_eq!(
+            cycler.get_response_index_with_per_response_repeat("rule1", &responses),
+            1
+        );
+        assert_eq!(
+            cycler.get_response_index_with_per_response_repeat("rule1", &responses),
+            1
+        );
+        assert_eq!(
+            cycler.get_response_index_with_per_response_repeat("rule1", &responses),
+            1
+        );
+
+        // Back to first response
+        assert_eq!(
+            cycler.get_response_index_with_per_response_repeat("rule1", &responses),
+            0
+        );
     }
 }
