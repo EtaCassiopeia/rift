@@ -655,7 +655,16 @@ fn parse_predicates(
     let mut body = None;
     let mut jsonpath_body: Option<serde_json::Value> = None;
 
-    // Parse predicates in order: startsWith/equals first (set base path), then contains/endsWith (modify path)
+    // First pass: extract startsWith to set base path (regardless of predicate order)
+    for predicate in predicates {
+        if let Some(starts_with) = predicate.get("startsWith") {
+            if let Some(p) = starts_with.get("path").and_then(|v| v.as_str()) {
+                path = p.to_string();
+            }
+        }
+    }
+
+    // Second pass: process all other predicates
     for predicate in predicates {
         // Handle jsonpath predicates - build a JSON body based on the selector
         if let Some(jsonpath) = predicate.get("jsonpath") {
@@ -680,13 +689,7 @@ fn parse_predicates(
             }
         }
         // Handle various predicate formats
-
-        // "startsWith" predicate - process first to set base path
-        if let Some(starts_with) = predicate.get("startsWith") {
-            if let Some(p) = starts_with.get("path").and_then(|v| v.as_str()) {
-                path = p.to_string();
-            }
-        }
+        // Note: startsWith is already processed in first pass
 
         // "equals" predicate - skip body if this predicate has a jsonpath (body handled above)
         if let Some(equals) = predicate.get("equals") {
@@ -910,7 +913,10 @@ fn parse_equals_predicate(
     if !skip_body {
         if let Some(b) = equals.get("body") {
             if let Some(s) = b.as_str() {
-                *body = Some(s.to_string());
+                // Don't set body if it's an empty string (means "body should be absent")
+                if !s.is_empty() {
+                    *body = Some(s.to_string());
+                }
             } else {
                 *body = Some(serde_json::to_string(b).unwrap_or_default());
             }
@@ -937,6 +943,10 @@ fn parse_contains_predicate(
             }
         } else if !path.contains(p) {
             // Append the contains substring to the existing path if not already present
+            // Add a slash separator if needed
+            if !path.ends_with('/') && !p.starts_with('/') {
+                path.push('/');
+            }
             path.push_str(p);
         }
     }
