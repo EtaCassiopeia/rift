@@ -11,7 +11,6 @@ use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use parking_lot::RwLock;
 use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
@@ -38,54 +37,42 @@ impl ImposterManager {
 
     /// Create and start an imposter
     /// Returns the assigned port (which may have been auto-assigned if not specified)
-    pub async fn create_imposter(&self, config: ImposterConfig) -> Result<u16, ImposterError> {
+    pub async fn create_imposter(&self, mut config: ImposterConfig) -> Result<u16, ImposterError> {
         // Validate protocol first
         match config.protocol.as_str() {
             "http" | "https" => {}
             proto => return Err(ImposterError::InvalidProtocol(proto.to_string())),
         }
 
+        let bind_host: &str = config.host.as_deref().unwrap_or("0.0.0.0");
         // Determine port - either from config or auto-assign
-        let port = if let Some(p) = config.port {
+        let (port, listener) = if let Some(p) = config.port {
             // Check if specified port is already in use
-            let imposters = self.imposters.read();
-            if imposters.contains_key(&p) {
+            if self.imposters.read().contains_key(&p) {
                 return Err(ImposterError::PortInUse(p));
             }
-            p
+            (
+                p,
+                TcpListener::bind((bind_host, p))
+                    .await
+                    .map_err(|e| ImposterError::BindError(p, e.to_string()))?,
+            )
         } else {
             // Auto-assign port: find an available port starting from a base
-            self.find_available_port().await?
+            self.find_available_port(bind_host).await?
         };
 
-        // Create config with resolved port
-        let mut resolved_config = config;
-        resolved_config.port = Some(port);
+        config.port = Some(port);
 
-        // Determine bind address from host configuration
-        let bind_host = resolved_config
-            .host
-            .clone()
-            .unwrap_or_else(|| "0.0.0.0".to_string());
-        let bind_addr: SocketAddr = format!("{}:{}", bind_host, port).parse().map_err(|e| {
-            ImposterError::BindError(port, format!("Invalid host '{}': {}", bind_host, e))
-        })?;
-
+        info!("Imposter bound to {}:{}", bind_host, port);
         // Create imposter
-        let mut imposter = Imposter::new(resolved_config);
+        let mut imposter = Imposter::new(config);
 
         // Create shutdown channel for this imposter
         let (shutdown_tx, _) = broadcast::channel(1);
         imposter.shutdown_tx = Some(shutdown_tx.clone());
 
         let imposter = Arc::new(imposter);
-
-        // Bind to port
-        let listener = TcpListener::bind(bind_addr)
-            .await
-            .map_err(|e| ImposterError::BindError(port, e.to_string()))?;
-
-        info!("Imposter bound to {}:{}", bind_host, port);
 
         // Start serving
         let imposter_clone = Arc::clone(&imposter);
@@ -139,27 +126,27 @@ impl ImposterManager {
         Ok(port)
     }
 
-    /// Find an available port for auto-assignment
+    /// Bind to an available port for auto-assignment
     /// Starts from port 49152 (start of dynamic/private port range) and finds first available
-    async fn find_available_port(&self) -> Result<u16, ImposterError> {
+    async fn find_available_port(&self, host: &str) -> Result<(u16, TcpListener), ImposterError> {
         let existing_ports: std::collections::HashSet<u16> = {
             let imposters = self.imposters.read();
             imposters.keys().copied().collect()
         };
 
         // Start from dynamic port range (49152-65535)
+        // If we could allow random ports, rather than requiring the minimum available port,
+        // we could bind to port 0, and let the OS pick an unused ephemeral port for us.
         // Try ports in this range until we find one that's available
-        for port in 49152..=65535u16 {
+        for port in 49152..=u16::MAX {
             if existing_ports.contains(&port) {
                 continue;
             }
             // Try to bind to check if OS has it available
-            let addr = SocketAddr::from(([0, 0, 0, 0], port));
-            match TcpListener::bind(addr).await {
+            match TcpListener::bind((host, port)).await {
                 Ok(listener) => {
-                    // Port is available, drop the listener and return
-                    drop(listener);
-                    return Ok(port);
+                    // Port is available, return the port and bound listener
+                    return Ok((port, listener));
                 }
                 Err(_) => continue, // Port in use by OS, try next
             }
