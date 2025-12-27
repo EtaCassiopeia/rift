@@ -197,3 +197,40 @@ kill -9 $(pidof rift-http-proxy)
 | `1` | General error |
 | `2` | Configuration error |
 | `3` | Port binding error |
+
+---
+
+## Additional CLI Tools
+
+Rift includes additional CLI tools for working with imposters:
+
+### rift-verify
+
+Test imposters by making requests and verifying responses.
+
+```bash
+# Verify all imposters
+rift-verify
+
+# Verify specific imposter
+rift-verify --port 4545 --show-curl
+```
+
+See [Stub Analysis]({{ site.baseurl }}/features/stub-analysis/) for details.
+
+### rift-lint
+
+Validate imposter configuration files before loading.
+
+```bash
+# Lint all imposters in directory
+rift-lint ./imposters/
+
+# Strict mode for CI/CD
+rift-lint ./imposters/ --strict
+
+# JSON output
+rift-lint ./imposters/ --output json
+```
+
+See [Configuration Linting]({{ site.baseurl }}/features/linting/) for details.

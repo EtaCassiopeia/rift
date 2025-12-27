@@ -106,6 +106,10 @@ javascript = ["boa_engine"]
 name = "rift-verify"
 path = "src/bin/verify.rs"
 
+[[bin]]
+name = "rift-lint"
+path = "src/bin/lint.rs"
+
 [[bench]]
 name = "matcher_bench"
 harness = false
