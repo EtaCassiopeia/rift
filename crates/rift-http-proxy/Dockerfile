@@ -27,13 +27,15 @@ ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS="-C target-cpu=generic"
 COPY Cargo.toml ./
 COPY Cargo.lock* ./
 COPY crates/rift-http-proxy/Cargo.toml ./crates/rift-http-proxy/
+COPY crates/rift-tui/Cargo.toml ./crates/rift-tui/
 
 # Create dummy source files to build dependencies
-RUN mkdir -p crates/rift-http-proxy/src/bin crates/rift-http-proxy/benches && \
+RUN mkdir -p crates/rift-http-proxy/src/bin crates/rift-http-proxy/benches crates/rift-tui/src && \
     echo "fn main() {}" > crates/rift-http-proxy/src/main.rs && \
     echo "fn main() {}" > crates/rift-http-proxy/src/bin/verify.rs && \
     echo "fn main() {}" > crates/rift-http-proxy/src/bin/lint.rs && \
     echo "fn main() {}" > crates/rift-http-proxy/benches/matcher_bench.rs && \
+    echo "fn main() {}" > crates/rift-tui/src/main.rs && \
     cargo build --release --locked --package rift-http-proxy --features ${FEATURES} && \
     rm -rf crates/*/src crates/*/benches
 
