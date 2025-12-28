@@ -150,6 +150,7 @@ await server.close();
 - [Scripting](https://etacassiopeia.github.io/rift/features/scripting/) - Rhai, Lua, JavaScript
 - [TLS/HTTPS](https://etacassiopeia.github.io/rift/features/tls/) - Secure connections
 - [Metrics](https://etacassiopeia.github.io/rift/features/metrics/) - Prometheus integration
+- [TUI](https://etacassiopeia.github.io/rift/features/tui/) - Interactive terminal interface
 
 ### Deployment
 - [Docker](https://etacassiopeia.github.io/rift/deployment/docker/) - Container deployment
@@ -207,6 +208,51 @@ curl http://localhost:9090/metrics
 ```
 
 Metrics include request counts, latency histograms, fault injection stats, and more.
+
+---
+
+## CLI Tools
+
+Rift includes additional command-line tools:
+
+### rift-tui - Interactive Terminal UI
+
+Manage imposters and stubs through an interactive terminal interface:
+
+```bash
+# Build and run
+cargo build --release --bin rift-tui
+./target/release/rift-tui
+
+# Connect to a different admin URL
+./target/release/rift-tui --admin-url http://localhost:2525
+```
+
+Features:
+- View and manage imposters with vim-style navigation (j/k)
+- Create, edit, and delete stubs with JSON editor
+- Generate curl commands for testing stubs
+- Import/export imposter configurations
+- Search and filter imposters and stubs
+- Real-time metrics dashboard
+
+### rift-verify - Stub Verification
+
+Automatically test your imposters by generating requests from predicates:
+
+```bash
+cargo build --release --bin rift-verify
+./target/release/rift-verify --show-curl
+```
+
+### rift-lint - Configuration Linter
+
+Validate imposter configuration files before loading:
+
+```bash
+cargo build --release --bin rift-lint
+./target/release/rift-lint ./imposters/
+```
 
 ---
 

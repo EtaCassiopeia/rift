@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/rift-http-proxy",
+    "crates/rift-tui",
 ]
 exclude = [
     "examples/apps/*",
@@ -16,7 +17,7 @@ license = "Apache-2.0"
 authors = ["Rift Contributors"]
 repository = "https://github.com/EtaCassiopeia/rift"
 homepage = "https://github.com/EtaCassiopeia/rift"
-rust-version = "1.70"
+rust-version = "1.92"
 
 [workspace.dependencies]
 # Async runtime

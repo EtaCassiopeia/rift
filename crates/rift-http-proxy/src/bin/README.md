@@ -2,8 +2,64 @@
 
 This directory contains CLI tools for working with Rift imposters.
 
+- [rift-tui](#rift-tui---interactive-terminal-ui) - Interactive terminal interface
 - [rift-verify](#rift-verify---stub-verification-tool) - Test imposters by making requests
 - [rift-lint](#rift-lint---configuration-linter) - Validate imposter configuration files
+
+---
+
+# rift-tui - Interactive Terminal UI
+
+An interactive terminal user interface for managing Rift imposters and stubs. Built with Ratatui, it provides a visual way to manage your mock server without writing API calls.
+
+### Build
+
+```bash
+# From the project root
+cargo build --release --bin rift-tui
+
+# The binary will be at:
+# ./target/release/rift-tui
+```
+
+### Usage
+
+```bash
+# Connect to default admin URL (http://localhost:2525)
+rift-tui
+
+# Connect to a different admin URL
+rift-tui --admin-url http://localhost:2525
+```
+
+### Features
+
+- **Imposter Management**: Create, view, edit, and delete imposters
+- **Stub Editor**: JSON editor with syntax validation and auto-formatting
+- **Search & Filter**: Find imposters and stubs quickly with `/`
+- **Import/Export**: Load and save imposter configurations
+- **Curl Generation**: Generate curl commands from stubs with `y`
+- **Metrics Dashboard**: View request counts and statistics
+- **Vim-style Navigation**: Use j/k for navigation
+
+### Key Bindings
+
+| Key | Action |
+|-----|--------|
+| `j`/`k` | Move down/up |
+| `Enter` | Select/drill down |
+| `Esc` | Go back |
+| `n` | New imposter |
+| `p` | New proxy imposter |
+| `a` | Add stub |
+| `e` | Edit stub |
+| `d` | Delete |
+| `y` | Copy as curl |
+| `/` | Search |
+| `?` | Help |
+| `q` | Quit |
+
+For full documentation, see [Terminal UI](https://etacassiopeia.github.io/rift/features/tui/).
 
 ---
 
