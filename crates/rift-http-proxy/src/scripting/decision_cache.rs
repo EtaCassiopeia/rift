@@ -143,12 +143,25 @@ impl CacheMetrics {
     }
 }
 
+/// Combined cache state protected by a single lock to prevent deadlocks.
+#[derive(Debug)]
+struct CacheState {
+    entries: HashMap<CacheKey, CacheEntry>,
+    metrics: CacheMetrics,
+}
+
+/// Helper enum to avoid borrow checker issues when checking entry state
+enum EntryState {
+    Expired,
+    Valid(FaultDecision, u64),
+}
+
 /// Decision cache for memoizing script execution results
 #[allow(dead_code)]
 pub struct DecisionCache {
     config: DecisionCacheConfig,
-    cache: Arc<RwLock<HashMap<CacheKey, CacheEntry>>>,
-    metrics: Arc<RwLock<CacheMetrics>>,
+    /// Single lock protecting both cache entries and metrics to prevent deadlocks
+    state: Arc<RwLock<CacheState>>,
 }
 
 impl DecisionCache {
@@ -162,8 +175,10 @@ impl DecisionCache {
 
         Self {
             config,
-            cache: Arc::new(RwLock::new(HashMap::new())),
-            metrics: Arc::new(RwLock::new(CacheMetrics::default())),
+            state: Arc::new(RwLock::new(CacheState {
+                entries: HashMap::new(),
+                metrics: CacheMetrics::default(),
+            })),
         }
     }
 
@@ -174,45 +189,47 @@ impl DecisionCache {
             return None;
         }
 
-        let mut cache = self.cache.write().unwrap();
+        let mut state = self.state.write().unwrap();
         let ttl = Duration::from_secs(self.config.ttl_seconds);
 
-        if let Some(entry) = cache.get_mut(key) {
-            // Check if entry is expired
+        // First, check if entry exists and handle expiration
+        let entry_state = state.entries.get(key).map(|entry| {
             if entry.is_expired(ttl) {
-                trace!("Cache entry expired for key: {:?}", key);
-                cache.remove(key);
-
-                // Update metrics
-                let mut metrics = self.metrics.write().unwrap();
-                metrics.misses += 1;
-                metrics.expirations += 1;
-                metrics.size = cache.len();
-
-                return None;
+                EntryState::Expired
+            } else {
+                EntryState::Valid(entry.decision.clone(), entry.access_count)
             }
+        });
 
-            // Entry is valid, update access time and return
-            entry.touch();
-            trace!(
-                "Cache hit for key: {:?} (access_count: {})",
-                key,
-                entry.access_count
-            );
-
-            // Update metrics
-            let mut metrics = self.metrics.write().unwrap();
-            metrics.hits += 1;
-
-            return Some(entry.decision.clone());
+        match entry_state {
+            Some(EntryState::Expired) => {
+                trace!("Cache entry expired for key: {:?}", key);
+                state.entries.remove(key);
+                state.metrics.misses += 1;
+                state.metrics.expirations += 1;
+                state.metrics.size = state.entries.len();
+                None
+            }
+            Some(EntryState::Valid(decision, access_count)) => {
+                // Update the entry's access time
+                if let Some(entry) = state.entries.get_mut(key) {
+                    entry.touch();
+                }
+                trace!(
+                    "Cache hit for key: {:?} (access_count: {})",
+                    key,
+                    access_count + 1
+                );
+                state.metrics.hits += 1;
+                Some(decision)
+            }
+            None => {
+                // Cache miss
+                trace!("Cache miss for key: {:?}", key);
+                state.metrics.misses += 1;
+                None
+            }
         }
-
-        // Cache miss
-        trace!("Cache miss for key: {:?}", key);
-        let mut metrics = self.metrics.write().unwrap();
-        metrics.misses += 1;
-
-        None
     }
 
     /// Insert a decision into the cache
@@ -222,59 +239,56 @@ impl DecisionCache {
             return Ok(());
         }
 
-        let mut cache = self.cache.write().unwrap();
+        let mut state = self.state.write().unwrap();
 
         // Check if we need to evict entries
-        if cache.len() >= self.config.max_size && !cache.contains_key(&key) {
-            self.evict_lru(&mut cache);
+        if state.entries.len() >= self.config.max_size && !state.entries.contains_key(&key) {
+            Self::evict_lru(&mut state);
         }
 
         // Insert new entry
-        cache.insert(key.clone(), CacheEntry::new(decision));
+        state.entries.insert(key.clone(), CacheEntry::new(decision));
         trace!("Cache insert for key: {:?}", key);
 
-        // Update metrics
-        let mut metrics = self.metrics.write().unwrap();
-        metrics.inserts += 1;
-        metrics.size = cache.len();
+        state.metrics.inserts += 1;
+        state.metrics.size = state.entries.len();
 
         Ok(())
     }
 
     /// Evict the least recently used entry
+    ///
+    /// This is a static method that takes a mutable reference to the entire
+    /// CacheState, allowing atomic updates to both entries and metrics without
+    /// needing to acquire a separate lock.
     #[allow(dead_code)]
-    fn evict_lru(&self, cache: &mut HashMap<CacheKey, CacheEntry>) {
+    fn evict_lru(state: &mut CacheState) {
         // Find entry with oldest last_accessed time
-        if let Some((key_to_evict, _)) = cache
+        if let Some((key_to_evict, _)) = state
+            .entries
             .iter()
             .min_by_key(|(_, entry)| entry.last_accessed)
             .map(|(k, v)| (k.clone(), v.clone()))
         {
-            cache.remove(&key_to_evict);
+            state.entries.remove(&key_to_evict);
+            state.metrics.evictions += 1;
             trace!("Evicted LRU entry: {:?}", key_to_evict);
-
-            // Update metrics
-            let mut metrics = self.metrics.write().unwrap();
-            metrics.evictions += 1;
         }
     }
 
     /// Clear all cache entries
     #[allow(dead_code)]
     pub fn clear(&self) {
-        let mut cache = self.cache.write().unwrap();
-        cache.clear();
-
-        let mut metrics = self.metrics.write().unwrap();
-        metrics.size = 0;
-
+        let mut state = self.state.write().unwrap();
+        state.entries.clear();
+        state.metrics.size = 0;
         debug!("Cache cleared");
     }
 
     /// Get current cache metrics
     #[allow(dead_code)]
     pub fn metrics(&self) -> CacheMetrics {
-        self.metrics.read().unwrap().clone()
+        self.state.read().unwrap().metrics.clone()
     }
 
     /// Remove expired entries (can be called periodically)
@@ -284,10 +298,11 @@ impl DecisionCache {
             return;
         }
 
-        let mut cache = self.cache.write().unwrap();
+        let mut state = self.state.write().unwrap();
         let ttl = Duration::from_secs(self.config.ttl_seconds);
 
-        let expired_keys: Vec<CacheKey> = cache
+        let expired_keys: Vec<CacheKey> = state
+            .entries
             .iter()
             .filter(|(_, entry)| entry.is_expired(ttl))
             .map(|(k, _)| k.clone())
@@ -295,22 +310,20 @@ impl DecisionCache {
 
         let count = expired_keys.len();
         for key in expired_keys {
-            cache.remove(&key);
+            state.entries.remove(&key);
         }
 
         if count > 0 {
             debug!("Cleaned up {} expired cache entries", count);
-
-            let mut metrics = self.metrics.write().unwrap();
-            metrics.expirations += count as u64;
-            metrics.size = cache.len();
+            state.metrics.expirations += count as u64;
+            state.metrics.size = state.entries.len();
         }
     }
 
     /// Get cache size
     #[allow(dead_code)]
     pub fn size(&self) -> usize {
-        self.cache.read().unwrap().len()
+        self.state.read().unwrap().entries.len()
     }
 }
 
