@@ -226,6 +226,14 @@ pub fn not_found() -> Response<Full<Bytes>> {
     error_response(StatusCode::NOT_FOUND, "Not Found")
 }
 
+/// Create an "imposter not found" response for the given port
+pub fn imposter_not_found(port: u16) -> Response<Full<Bytes>> {
+    error_response(
+        StatusCode::NOT_FOUND,
+        &format!("Imposter not found on port {port}"),
+    )
+}
+
 /// Collect request body into bytes
 pub async fn collect_body(req: Request<Incoming>) -> Result<Bytes, String> {
     use http_body_util::BodyExt;

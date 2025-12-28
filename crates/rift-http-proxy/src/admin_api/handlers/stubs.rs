@@ -1,7 +1,10 @@
 //! Stub management handlers.
 
 use crate::admin_api::handlers::imposters::handle_get as handle_get_imposter;
-use crate::admin_api::types::*;
+use crate::admin_api::types::{
+    collect_body, error_response, imposter_not_found, json_response, make_stub_links,
+    AddStubRequest, ReplaceStubsRequest, StubWithLinks,
+};
 use crate::extensions::stub_analysis::{analyze_new_stub, analyze_stubs};
 use crate::imposter::{ImposterError, ImposterManager, Stub};
 use crate::scripting::{validate_stub, validate_stubs};
@@ -63,10 +66,7 @@ pub async fn handle_add(
 
     match manager.add_stub(port, add_req.stub, add_req.index) {
         Ok(()) => handle_get_imposter(port, None, base_url, manager).await,
-        Err(ImposterError::NotFound(_)) => error_response(
-            StatusCode::NOT_FOUND,
-            &format!("Imposter not found on port {port}"),
-        ),
+        Err(ImposterError::NotFound(_)) => imposter_not_found(port),
         Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
 }
@@ -115,12 +115,7 @@ pub async fn handle_replace_all(
 
     let imposter = match manager.get_imposter(port) {
         Ok(i) => i,
-        Err(ImposterError::NotFound(_)) => {
-            return error_response(
-                StatusCode::NOT_FOUND,
-                &format!("Imposter not found on port {port}"),
-            )
-        }
+        Err(ImposterError::NotFound(_)) => return imposter_not_found(port),
         Err(e) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     };
 
@@ -157,10 +152,7 @@ pub async fn handle_get_all(
                 &serde_json::json!({ "stubs": stubs_with_links }),
             )
         }
-        Err(ImposterError::NotFound(_)) => error_response(
-            StatusCode::NOT_FOUND,
-            &format!("Imposter not found on port {port}"),
-        ),
+        Err(ImposterError::NotFound(_)) => imposter_not_found(port),
         Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
 }
@@ -180,10 +172,7 @@ pub async fn handle_get(
             };
             json_response(StatusCode::OK, &stub_with_links)
         }
-        Err(ImposterError::NotFound(_)) => error_response(
-            StatusCode::NOT_FOUND,
-            &format!("Imposter not found on port {port}"),
-        ),
+        Err(ImposterError::NotFound(_)) => imposter_not_found(port),
         Err(ImposterError::StubIndexOutOfBounds(i)) => {
             error_response(StatusCode::NOT_FOUND, &format!("Stub index {i} not found"))
         }
@@ -225,10 +214,7 @@ pub async fn handle_replace(
 
     match manager.replace_stub(port, index, stub) {
         Ok(()) => handle_get_imposter(port, None, base_url, manager).await,
-        Err(ImposterError::NotFound(_)) => error_response(
-            StatusCode::NOT_FOUND,
-            &format!("Imposter not found on port {port}"),
-        ),
+        Err(ImposterError::NotFound(_)) => imposter_not_found(port),
         Err(ImposterError::StubIndexOutOfBounds(i)) => {
             error_response(StatusCode::NOT_FOUND, &format!("Stub index {i} not found"))
         }
@@ -245,10 +231,7 @@ pub async fn handle_delete(
 ) -> Response<Full<Bytes>> {
     match manager.delete_stub(port, index) {
         Ok(()) => handle_get_imposter(port, None, base_url, manager).await,
-        Err(ImposterError::NotFound(_)) => error_response(
-            StatusCode::NOT_FOUND,
-            &format!("Imposter not found on port {port}"),
-        ),
+        Err(ImposterError::NotFound(_)) => imposter_not_found(port),
         Err(ImposterError::StubIndexOutOfBounds(i)) => {
             error_response(StatusCode::NOT_FOUND, &format!("Stub index {i} not found"))
         }
