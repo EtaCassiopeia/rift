@@ -38,6 +38,7 @@ pub struct ImposterSummary {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     pub number_of_requests: u64,
+    pub enabled: bool,
     #[serde(rename = "_links")]
     pub links: ImposterLinks,
 }
@@ -66,6 +67,7 @@ pub struct ImposterDetail {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     pub number_of_requests: u64,
+    pub enabled: bool,
     pub record_requests: bool,
     pub requests: Vec<RecordedRequest>,
     pub stubs: Vec<StubWithLinks>,

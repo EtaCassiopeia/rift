@@ -1,0 +1,51 @@
+[package]
+name = "rift-tui"
+version = "0.1.0"
+edition = "2021"
+authors = ["Rift Contributors"]
+description = "Interactive Terminal User Interface for Rift HTTP Proxy"
+license = "MIT"
+repository = "https://github.com/EtaCassiopeia/rift"
+keywords = ["tui", "terminal", "http", "mock", "proxy"]
+categories = ["command-line-interface", "development-tools::testing"]
+readme = "README.md"
+
+[dependencies]
+# TUI framework - latest version
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
+crossterm = { version = "0.28", features = ["event-stream"] }
+
+# UI widgets from tui-widgets ecosystem
+tui-popup = "0.7"
+tui-prompts = "0.6.1"
+
+# Clipboard support
+arboard = "3.4"
+
+# Directory paths
+dirs = "5.0"
+
+# Async runtime
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+
+# HTTP client for Admin API
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# CLI argument parsing
+clap = { version = "4", features = ["derive", "env"] }
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+[[bin]]
+name = "rift-tui"
+path = "src/main.rs"
+
+[lib]
+name = "rift_tui"
+path = "src/lib.rs"

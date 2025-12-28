@@ -101,6 +101,7 @@ pub async fn handle_list(
                     port,
                     name: i.config.name.clone(),
                     number_of_requests: i.get_request_count(),
+                    enabled: i.is_enabled(),
                     links: make_imposter_links(base_url, port),
                 })
             })
@@ -221,6 +222,7 @@ pub async fn handle_get(
                 port: imposter.config.port.unwrap_or(port),
                 name: imposter.config.name.clone(),
                 number_of_requests: imposter.get_request_count(),
+                enabled: imposter.is_enabled(),
                 record_requests: imposter.config.record_requests,
                 requests: imposter.get_recorded_requests(),
                 stubs: stubs_with_links,
