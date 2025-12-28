@@ -7,6 +7,7 @@ use super::core::Imposter;
 use super::predicates::parse_query_string;
 use super::response::apply_js_or_rhai_decorate;
 use super::types::{DebugMatchResult, DebugRequest, DebugResponse, RecordedRequest, ResponseMode};
+use crate::admin_api::types::{build_response, build_response_with_headers};
 use crate::behaviors::{apply_copy_behaviors, RequestContext, ResponseBehaviors};
 #[cfg(feature = "javascript")]
 use crate::scripting::{execute_mountebank_inject, MountebankRequest};
@@ -32,13 +33,11 @@ pub async fn handle_imposter_request(
 ) -> Result<Response<Full<Bytes>>, Infallible> {
     // Check if enabled
     if !imposter.is_enabled() {
-        return Ok(Response::builder()
-            .status(StatusCode::SERVICE_UNAVAILABLE)
-            .header("x-rift-imposter-disabled", "true")
-            .body(Full::new(Bytes::from(
-                r#"{"error": "Imposter is disabled"}"#,
-            )))
-            .unwrap());
+        return Ok(build_response_with_headers(
+            StatusCode::SERVICE_UNAVAILABLE,
+            [("x-rift-imposter-disabled", "true")],
+            r#"{"error": "Imposter is disabled"}"#,
+        ));
     }
 
     // Increment request count
@@ -193,18 +192,22 @@ pub async fn handle_imposter_request(
                         response = response.header("x-rift-proxy-latency", ms.to_string());
                     }
 
-                    return Ok(response.body(Full::new(Bytes::from(body))).unwrap());
+                    return Ok(response
+                        .body(Full::new(Bytes::from(body)))
+                        .unwrap_or_else(|_| {
+                            build_response(
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                "Response build error",
+                            )
+                        }));
                 }
                 Err(e) => {
                     warn!("Proxy request failed: {}", e);
-                    return Ok(Response::builder()
-                        .status(StatusCode::BAD_GATEWAY)
-                        .header("x-rift-imposter", "true")
-                        .header("x-rift-proxy-error", "true")
-                        .body(Full::new(Bytes::from(format!(
-                            r#"{{"error": "Proxy error: {e}"}}"#
-                        ))))
-                        .unwrap());
+                    return Ok(build_response_with_headers(
+                        StatusCode::BAD_GATEWAY,
+                        [("x-rift-imposter", "true"), ("x-rift-proxy-error", "true")],
+                        format!(r#"{{"error": "Proxy error: {e}"}}"#),
+                    ));
                 }
             }
         }
@@ -243,18 +246,20 @@ pub async fn handle_imposter_request(
 
                     return Ok(response
                         .body(Full::new(Bytes::from(inject_response.body)))
-                        .unwrap());
+                        .unwrap_or_else(|_| {
+                            build_response(
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                "Response build error",
+                            )
+                        }));
                 }
                 Err(e) => {
                     warn!("Inject function failed: {}", e);
-                    return Ok(Response::builder()
-                        .status(StatusCode::INTERNAL_SERVER_ERROR)
-                        .header("x-rift-imposter", "true")
-                        .header("x-rift-inject-error", "true")
-                        .body(Full::new(Bytes::from(format!(
-                            r#"{{"error": "Inject error: {e}"}}"#
-                        ))))
-                        .unwrap());
+                    return Ok(build_response_with_headers(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        [("x-rift-imposter", "true"), ("x-rift-inject-error", "true")],
+                        format!(r#"{{"error": "Inject error: {e}"}}"#),
+                    ));
                 }
             }
         }
@@ -303,55 +308,60 @@ pub async fn handle_imposter_request(
                             response = response.header("x-rift-imposter", "true");
                             response = response.header("x-rift-script", &script_config.engine);
 
-                            return Ok(response.body(Full::new(Bytes::from(body))).unwrap());
+                            return Ok(response.body(Full::new(Bytes::from(body))).unwrap_or_else(
+                                |_| {
+                                    build_response(
+                                        StatusCode::INTERNAL_SERVER_ERROR,
+                                        "Response build error",
+                                    )
+                                },
+                            ));
                         }
                         Ok(FaultDecision::Latency { duration_ms, .. }) => {
                             // Apply latency then return 200 OK
                             tokio::time::sleep(Duration::from_millis(duration_ms)).await;
                             imposter.advance_cycler_for_rift_script(&stub, stub_index);
 
-                            return Ok(Response::builder()
-                                .status(StatusCode::OK)
-                                .header("x-rift-imposter", "true")
-                                .header("x-rift-script", &script_config.engine)
-                                .header("x-rift-latency-ms", duration_ms.to_string())
-                                .body(Full::new(Bytes::new()))
-                                .unwrap());
+                            return Ok(build_response_with_headers(
+                                StatusCode::OK,
+                                [
+                                    ("x-rift-imposter", "true"),
+                                    ("x-rift-script", &script_config.engine),
+                                    ("x-rift-latency-ms", &duration_ms.to_string()),
+                                ],
+                                Bytes::new(),
+                            ));
                         }
                         Ok(FaultDecision::None) => {
                             // Script says no fault - return 200 OK
                             imposter.advance_cycler_for_rift_script(&stub, stub_index);
 
-                            return Ok(Response::builder()
-                                .status(StatusCode::OK)
-                                .header("x-rift-imposter", "true")
-                                .header("x-rift-script", &script_config.engine)
-                                .body(Full::new(Bytes::new()))
-                                .unwrap());
+                            return Ok(build_response_with_headers(
+                                StatusCode::OK,
+                                [
+                                    ("x-rift-imposter", "true"),
+                                    ("x-rift-script", script_config.engine.as_str()),
+                                ],
+                                Bytes::new(),
+                            ));
                         }
                         Err(e) => {
                             warn!("Rift script execution failed: {}", e);
-                            return Ok(Response::builder()
-                                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                                .header("x-rift-imposter", "true")
-                                .header("x-rift-script-error", "true")
-                                .body(Full::new(Bytes::from(format!(
-                                    r#"{{"error": "Script error: {e}"}}"#
-                                ))))
-                                .unwrap());
+                            return Ok(build_response_with_headers(
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                [("x-rift-imposter", "true"), ("x-rift-script-error", "true")],
+                                format!(r#"{{"error": "Script error: {e}"}}"#),
+                            ));
                         }
                     }
                 }
                 Err(e) => {
                     warn!("Failed to create script engine: {}", e);
-                    return Ok(Response::builder()
-                        .status(StatusCode::INTERNAL_SERVER_ERROR)
-                        .header("x-rift-imposter", "true")
-                        .header("x-rift-script-error", "true")
-                        .body(Full::new(Bytes::from(format!(
-                            r#"{{"error": "Script engine error: {e}"}}"#
-                        ))))
-                        .unwrap());
+                    return Ok(build_response_with_headers(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        [("x-rift-imposter", "true"), ("x-rift-script-error", "true")],
+                        format!(r#"{{"error": "Script engine error: {e}"}}"#),
+                    ));
                 }
             }
         }
@@ -452,7 +462,9 @@ pub async fn handle_imposter_request(
                 ResponseMode::Text => Bytes::from(body),
             };
 
-            return Ok(response.body(Full::new(body_bytes)).unwrap());
+            return Ok(response.body(Full::new(body_bytes)).unwrap_or_else(|_| {
+                build_response(StatusCode::INTERNAL_SERVER_ERROR, "Response build error")
+            }));
         }
     }
 
@@ -494,16 +506,17 @@ pub async fn handle_imposter_request(
         response = response.header("x-rift-imposter", "true");
         response = response.header("x-rift-default-response", "true");
 
-        return Ok(response.body(Full::new(body_bytes)).unwrap());
+        return Ok(response.body(Full::new(body_bytes)).unwrap_or_else(|_| {
+            build_response(StatusCode::INTERNAL_SERVER_ERROR, "Response build error")
+        }));
     }
 
     // No match and no default - Mountebank returns 200 with empty body
-    Ok(Response::builder()
-        .status(StatusCode::OK)
-        .header("x-rift-imposter", "true")
-        .header("x-rift-no-match", "true")
-        .body(Full::new(Bytes::new()))
-        .unwrap())
+    Ok(build_response_with_headers(
+        StatusCode::OK,
+        [("x-rift-imposter", "true"), ("x-rift-no-match", "true")],
+        Bytes::new(),
+    ))
 }
 
 /// Handle debug mode request
@@ -598,12 +611,14 @@ fn handle_debug_request(
     let json_body = serde_json::to_string_pretty(&debug_response)
         .unwrap_or_else(|_| r#"{"error": "Failed to serialize debug response"}"#.to_string());
 
-    Ok(Response::builder()
-        .status(StatusCode::OK)
-        .header("Content-Type", "application/json")
-        .header("X-Rift-Debug-Response", "true")
-        .body(Full::new(Bytes::from(json_body)))
-        .unwrap())
+    Ok(build_response_with_headers(
+        StatusCode::OK,
+        [
+            ("Content-Type", "application/json"),
+            ("X-Rift-Debug-Response", "true"),
+        ],
+        json_body,
+    ))
 }
 
 /// Handle fault response types
@@ -612,24 +627,22 @@ fn handle_fault_response(fault_type: &str) -> Result<Response<Full<Bytes>>, Infa
         "CONNECTION_RESET_BY_PEER" => {
             // Return empty response to simulate connection reset
             // In real Mountebank, this would actually reset the TCP connection
-            Ok(Response::builder()
-                .status(StatusCode::BAD_GATEWAY)
-                .header("x-rift-fault", "CONNECTION_RESET_BY_PEER")
-                .body(Full::new(Bytes::new()))
-                .unwrap())
+            Ok(build_response_with_headers(
+                StatusCode::BAD_GATEWAY,
+                [("x-rift-fault", "CONNECTION_RESET_BY_PEER")],
+                Bytes::new(),
+            ))
         }
-        "RANDOM_DATA_THEN_CLOSE" => Ok(Response::builder()
-            .status(StatusCode::BAD_GATEWAY)
-            .header("x-rift-fault", "RANDOM_DATA_THEN_CLOSE")
-            .body(Full::new(Bytes::from_static(b"\x00\xff\xfe\xfd")))
-            .unwrap()),
-        _ => Ok(Response::builder()
-            .status(StatusCode::INTERNAL_SERVER_ERROR)
-            .header("x-rift-fault", fault_type)
-            .body(Full::new(Bytes::from(format!(
-                "Unknown fault: {fault_type}"
-            ))))
-            .unwrap()),
+        "RANDOM_DATA_THEN_CLOSE" => Ok(build_response_with_headers(
+            StatusCode::BAD_GATEWAY,
+            [("x-rift-fault", "RANDOM_DATA_THEN_CLOSE")],
+            Bytes::from_static(b"\x00\xff\xfe\xfd"),
+        )),
+        _ => Ok(build_response_with_headers(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            [("x-rift-fault", fault_type)],
+            format!("Unknown fault: {fault_type}"),
+        )),
     }
 }
 
@@ -691,7 +704,13 @@ async fn apply_rift_fault(
             response = response.header("x-rift-fault", "error");
 
             let error_body = error.body.clone().unwrap_or_default();
-            return Some(response.body(Full::new(Bytes::from(error_body))).unwrap());
+            return Some(
+                response
+                    .body(Full::new(Bytes::from(error_body)))
+                    .unwrap_or_else(|_| {
+                        build_response(StatusCode::INTERNAL_SERVER_ERROR, "Response build error")
+                    }),
+            );
         }
     }
 
@@ -700,23 +719,19 @@ async fn apply_rift_fault(
         match tcp_fault.as_str() {
             "reset" | "CONNECTION_RESET_BY_PEER" => {
                 debug!("Applying _rift.fault TCP reset");
-                return Some(
-                    Response::builder()
-                        .status(StatusCode::BAD_GATEWAY)
-                        .header("x-rift-fault", "CONNECTION_RESET_BY_PEER")
-                        .body(Full::new(Bytes::new()))
-                        .unwrap(),
-                );
+                return Some(build_response_with_headers(
+                    StatusCode::BAD_GATEWAY,
+                    [("x-rift-fault", "CONNECTION_RESET_BY_PEER")],
+                    Bytes::new(),
+                ));
             }
             "garbage" | "RANDOM_DATA_THEN_CLOSE" => {
                 debug!("Applying _rift.fault TCP garbage");
-                return Some(
-                    Response::builder()
-                        .status(StatusCode::BAD_GATEWAY)
-                        .header("x-rift-fault", "RANDOM_DATA_THEN_CLOSE")
-                        .body(Full::new(Bytes::from_static(b"\x00\xff\xfe\xfd")))
-                        .unwrap(),
-                );
+                return Some(build_response_with_headers(
+                    StatusCode::BAD_GATEWAY,
+                    [("x-rift-fault", "RANDOM_DATA_THEN_CLOSE")],
+                    Bytes::from_static(b"\x00\xff\xfe\xfd"),
+                ));
             }
             _ => {
                 warn!("Unknown TCP fault type: {}", tcp_fault);

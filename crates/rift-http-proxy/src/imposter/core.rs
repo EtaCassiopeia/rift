@@ -16,6 +16,7 @@ use crate::backends::InMemoryFlowStore;
 use crate::behaviors::ResponseCycler;
 use crate::extensions::flow_state::{FlowStore, NoOpFlowStore};
 use crate::recording::{ProxyMode, RecordedResponse, RecordingStore, RequestSignature};
+use anyhow::Context;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -661,7 +662,7 @@ impl Imposter {
         headers: &HashMap<String, String>,
         body: Option<&str>,
         stub_index: usize,
-    ) -> Result<(u16, HashMap<String, String>, String, Option<u64>), String> {
+    ) -> anyhow::Result<(u16, HashMap<String, String>, String, Option<u64>)> {
         let client = get_http_client();
 
         info!("Proxy config - addDecorateBehavior: {:?}, addWaitBehavior: {}, predicateGenerators: {:?}",
@@ -736,7 +737,10 @@ impl Imposter {
         }
 
         // Send request
-        let response = request.send().await.map_err(|e| e.to_string())?;
+        let response = request
+            .send()
+            .await
+            .with_context(|| format!("Failed to send proxy request to {}", target_url))?;
         let latency_ms = start.elapsed().as_millis() as u64;
 
         let status = response.status().as_u16();
@@ -745,7 +749,10 @@ impl Imposter {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
             .collect();
-        let body_bytes = response.bytes().await.map_err(|e| e.to_string())?;
+        let body_bytes = response
+            .bytes()
+            .await
+            .with_context(|| format!("Failed to read response body from {}", target_url))?;
         let body_str = String::from_utf8_lossy(&body_bytes).to_string();
 
         // Record the response

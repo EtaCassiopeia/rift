@@ -174,11 +174,40 @@ pub fn make_stub_links(base_url: &str, port: u16, index: usize) -> StubLinks {
 /// Create a JSON response
 pub fn json_response<T: Serialize>(status: StatusCode, body: &T) -> Response<Full<Bytes>> {
     let json = serde_json::to_string_pretty(body).unwrap_or_else(|_| "{}".to_string());
+    build_response_with_headers(status, [("Content-Type", "application/json")], json)
+}
+
+/// Build an HTTP response with the given status and body.
+///
+/// This function handles the unlikely case where Response::builder() fails
+/// by returning a minimal 500 error response.
+pub fn build_response(status: StatusCode, body: impl Into<Bytes>) -> Response<Full<Bytes>> {
     Response::builder()
         .status(status)
-        .header("Content-Type", "application/json")
-        .body(Full::new(Bytes::from(json)))
-        .unwrap()
+        .body(Full::new(body.into()))
+        .unwrap_or_else(|_| {
+            // This should never happen with valid StatusCode, but handle gracefully
+            Response::new(Full::new(Bytes::from("Internal Server Error")))
+        })
+}
+
+/// Build an HTTP response with headers.
+///
+/// This function handles the unlikely case where Response::builder() fails
+/// by returning a minimal 500 error response.
+pub fn build_response_with_headers(
+    status: StatusCode,
+    headers: impl IntoIterator<Item = (impl AsRef<str>, impl AsRef<str>)>,
+    body: impl Into<Bytes>,
+) -> Response<Full<Bytes>> {
+    let mut builder = Response::builder().status(status);
+    for (key, value) in headers {
+        builder = builder.header(key.as_ref(), value.as_ref());
+    }
+    builder.body(Full::new(body.into())).unwrap_or_else(|_| {
+        // This should never happen with valid inputs, but handle gracefully
+        Response::new(Full::new(Bytes::from("Internal Server Error")))
+    })
 }
 
 /// Create an error response

@@ -11,6 +11,6 @@
 mod handlers;
 mod router;
 mod server;
-mod types;
+pub mod types;
 
 pub use server::AdminApiServer;
