@@ -137,28 +137,83 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         .alignment(Alignment::Left);
         frame.render_widget(paragraph, area);
     } else {
-        let (line1, line2) = get_help_text(&app.view);
-        let lines = if let Some(l2) = line2 {
-            vec![
-                Line::from(Span::styled(
-                    format!(" {}", line1),
-                    Style::default().fg(app.theme.muted),
-                )),
-                Line::from(Span::styled(
-                    format!(" {}", l2),
-                    Style::default().fg(app.theme.muted),
-                )),
-            ]
+        let (commands1, commands2) = get_commands(&app.view);
+        let line1 = build_command_line(&commands1, app);
+        let lines = if let Some(cmds2) = commands2 {
+            let line2 = build_command_line(&cmds2, app);
+            vec![line1, line2]
         } else {
-            vec![Line::from(Span::styled(
-                format!(" {}", line1),
-                Style::default().fg(app.theme.muted),
-            ))]
+            vec![line1]
         };
         let paragraph = Paragraph::new(lines)
             .block(block)
             .alignment(Alignment::Left);
         frame.render_widget(paragraph, area);
+    }
+}
+
+/// Command definition (key, label)
+type Command = (&'static str, &'static str);
+
+/// Build an htop-style command line with colored key backgrounds
+fn build_command_line(commands: &[Command], app: &App) -> Line<'static> {
+    let mut spans = vec![Span::raw(" ")];
+    for (i, (key, label)) in commands.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::raw(" "));
+        }
+        // Key with background color
+        spans.push(Span::styled(
+            (*key).to_string(),
+            Style::default().fg(app.theme.key_fg).bg(app.theme.key_bg),
+        ));
+        // Label
+        spans.push(Span::styled(
+            (*label).to_string(),
+            Style::default().fg(app.theme.cmd_fg),
+        ));
+    }
+    Line::from(spans)
+}
+
+/// Get context-sensitive commands as (key, label) pairs
+fn get_commands(view: &View) -> (Vec<Command>, Option<Vec<Command>>) {
+    match view {
+        View::ImposterList => (
+            vec![
+                ("n", "New"), ("p", "Proxy"), ("d", "Del"), ("t", "Toggle"),
+                ("m", "Metrics"), ("/", "Search"), ("T", "Theme"), ("?", "Help"), ("q", "Quit"),
+            ],
+            Some(vec![
+                ("i", "Import"), ("I", "ImportDir"), ("e", "Export"), ("E", "ExportDir"),
+            ]),
+        ),
+        View::ImposterDetail { .. } => (
+            vec![
+                ("a", "Add"), ("e", "Edit"), ("d", "Del"), ("y", "Curl"),
+                ("t", "Toggle"), ("/", "Search"), ("?", "Help"),
+            ],
+            Some(vec![
+                ("c", "ClearReq"), ("C", "ClearProxy"), ("x", "ExportStubs"), ("X", "ExportFull"), ("A", "Apply"),
+            ]),
+        ),
+        View::StubDetail { .. } => (
+            vec![
+                ("e", "Edit"), ("d", "Delete"), ("y", "Curl"), ("Esc", "Back"), ("?", "Help"),
+            ],
+            None,
+        ),
+        View::StubEdit { .. } => (
+            vec![
+                ("^S", "Save"), ("^F", "Format"), ("^A", "SelAll"),
+                ("^C", "Copy"), ("^X", "Cut"), ("^V", "Paste"), ("Esc", "Cancel"),
+            ],
+            None,
+        ),
+        View::Metrics => (
+            vec![("r", "Refresh"), ("Esc", "Back"), ("?", "Help")],
+            None,
+        ),
     }
 }
 
@@ -218,32 +273,6 @@ fn draw_search_bar(frame: &mut Frame, app: &App, area: Rect) {
 
     let paragraph = Paragraph::new(line);
     frame.render_widget(paragraph, inner);
-}
-
-/// Get context-sensitive help text (two lines for better readability)
-fn get_help_text(view: &View) -> (String, Option<String>) {
-    match view {
-        View::ImposterList => (
-            "[n]ew [p]roxy [d]el [t]oggle [m]etrics [/]search [?]help [q]uit".to_string(),
-            Some("[i]mport file [I]mport folder │ [e]xport file [E]xport folder".to_string()),
-        ),
-        View::ImposterDetail { .. } => (
-            "[a]dd [e]dit [d]el [y]curl [t]oggle [/]search [?]help".to_string(),
-            Some(
-                "[c]lear reqs [C]lear proxy │ [x]port stubs [X]port full │ [A]pply recorded"
-                    .to_string(),
-            ),
-        ),
-        View::StubDetail { .. } => (
-            "[e]dit [d]elete [y]curl [Esc]back [?]help".to_string(),
-            None,
-        ),
-        View::StubEdit { .. } => (
-            "^S Save  ^F Format  ^A Select  ^C Copy  ^X Cut  ^V Paste  Esc Cancel".to_string(),
-            None,
-        ),
-        View::Metrics => ("[r]efresh [Esc]back [?]help".to_string(), None),
-    }
 }
 
 /// Calculate a centered rect for modals

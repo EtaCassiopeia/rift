@@ -403,6 +403,15 @@ impl App {
         }
     }
 
+    /// Cycle to the next theme
+    pub fn cycle_theme(&mut self) {
+        self.theme.next();
+        self.set_status(
+            format!("Theme: {}", self.theme.preset.name()),
+            StatusLevel::Info,
+        );
+    }
+
     /// Navigate to a new view
     pub fn navigate(&mut self, view: View) {
         self.view_stack.push(self.view.clone());
@@ -1960,6 +1969,10 @@ impl App {
             }
             KeyCode::Char('r') => {
                 self.refresh().await;
+                return;
+            }
+            KeyCode::Char('T') => {
+                self.cycle_theme();
                 return;
             }
             _ => {}
