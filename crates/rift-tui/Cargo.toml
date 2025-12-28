@@ -15,11 +15,11 @@ keywords = ["tui", "terminal", "http", "mock", "proxy"]
 categories = ["command-line-interface", "development-tools::testing"]
 
 [dependencies]
-# TUI framework - latest version
+# TUI framework
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
 crossterm = { version = "0.28", features = ["event-stream"] }
 
-# UI widgets from tui-widgets ecosystem
+# UI widgets
 tui-popup = "0.7"
 tui-prompts = "0.6.1"
 

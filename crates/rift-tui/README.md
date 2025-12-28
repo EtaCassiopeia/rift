@@ -83,22 +83,6 @@ rift-tui --admin-url http://localhost:2525
 | `Ctrl+C/X/V` | Copy/Cut/Paste |
 | `Esc` | Cancel |
 
-## Screenshot
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│  Rift TUI │ ● Connected │ http://localhost:2525 │ Imposters: 3 │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  ▶ ● :4545  │ User Service         │ 5 stubs │   1,234 reqs   │
-│    ○ :4546  │ Order Service        │ 3 stubs │      56 reqs   │
-│    ● :4547  │ Payment Gateway      │ 8 stubs │     890 reqs   │
-│                                                                 │
-├─────────────────────────────────────────────────────────────────┤
-│ [n]ew [p]roxy [d]el [t]oggle [m]etrics [/]search [?]help [q]uit│
-└─────────────────────────────────────────────────────────────────┘
-```
-
 ## Documentation
 
 Full documentation available at [etacassiopeia.github.io/rift/features/tui](https://etacassiopeia.github.io/rift/features/tui/).
