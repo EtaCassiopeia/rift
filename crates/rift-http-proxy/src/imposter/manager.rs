@@ -22,7 +22,6 @@ pub struct ImposterManager {
     /// Active imposters by port
     imposters: RwLock<HashMap<u16, Arc<Imposter>>>,
     /// Global shutdown signal (for future graceful shutdown)
-    #[allow(dead_code)]
     shutdown_tx: broadcast::Sender<()>,
 }
 
@@ -226,7 +225,6 @@ impl ImposterManager {
     }
 
     /// Get imposter count (for future metrics)
-    #[allow(dead_code)]
     pub fn count(&self) -> usize {
         self.imposters.read().len()
     }
@@ -268,7 +266,6 @@ impl ImposterManager {
     }
 
     /// Shutdown all imposters (for future graceful shutdown)
-    #[allow(dead_code)]
     pub async fn shutdown(&self) {
         let _ = self.shutdown_tx.send(());
         self.delete_all().await;

@@ -47,7 +47,7 @@ pub struct ProxyServer {
     decision_cache: Option<Arc<DecisionCache>>, // Decision cache for memoization
     http_client: HttpClient,                    // Shared HTTP client for HTTP/1.1
     // Mountebank-compatible behavior state
-    #[allow(dead_code)] // Will be wired up when response cycling is fully integrated
+    // Will be wired up when response cycling is fully integrated
     response_cycler: Arc<ResponseCycler>, // Response cycling state (repeat behavior)
     csv_cache: Arc<CsvCache>,             // CSV data cache (lookup behavior)
     recording_store: Arc<RecordingStore>, // Recording store (proxyOnce/proxyAlways modes)

@@ -58,7 +58,7 @@ pub use stub_validator::{validate_stub, validate_stubs};
 
 /// Script execution result for fault injection decisions
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
+
 pub enum FaultDecision {
     None,
     Latency {
@@ -75,7 +75,7 @@ pub enum FaultDecision {
 
 /// Unified script engine that supports Rhai, Lua, and JavaScript
 #[derive(Clone)]
-#[allow(dead_code)]
+
 pub enum ScriptEngine {
     Rhai(RhaiEngine),
     #[cfg(feature = "lua")]
@@ -86,7 +86,6 @@ pub enum ScriptEngine {
 
 impl ScriptEngine {
     /// Create a new script engine based on the engine type
-    #[allow(dead_code)]
     pub fn new(engine_type: &str, script: &str, rule_id: String) -> Result<Self> {
         match engine_type {
             "rhai" => Ok(ScriptEngine::Rhai(RhaiEngine::new(script, rule_id)?)),
@@ -107,7 +106,6 @@ impl ScriptEngine {
     }
 
     /// Execute the script and determine if a fault should be injected
-    #[allow(dead_code)]
     pub fn should_inject_fault(
         &self,
         request: &ScriptRequest,
@@ -125,7 +123,7 @@ impl ScriptEngine {
 
 /// Request context passed to scripts
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
+
 pub struct ScriptRequest {
     pub method: String,
     pub path: String,
@@ -140,19 +138,17 @@ pub struct ScriptRequest {
 /// Wrapper for FlowStore that can be used in scripts (both Rhai and Lua)
 /// Uses direct synchronous calls since FlowStore is no longer async
 #[derive(Clone)]
-#[allow(dead_code)]
+
 pub struct ScriptFlowStore {
     store: Arc<dyn FlowStore>,
 }
 
 impl ScriptFlowStore {
-    #[allow(dead_code)]
     pub fn new(store: Arc<dyn FlowStore>) -> Self {
         Self { store }
     }
 
     /// Get a value from flow state
-    #[allow(dead_code)]
     pub fn get(&mut self, flow_id: String, key: String) -> Dynamic {
         match self.store.get(&flow_id, &key) {
             Ok(Some(val)) => rhai_engine::json_to_dynamic(val),
@@ -161,32 +157,27 @@ impl ScriptFlowStore {
     }
 
     /// Set a value in flow state
-    #[allow(dead_code)]
     pub fn set(&mut self, flow_id: String, key: String, value: Dynamic) -> bool {
         let json_val = rhai_engine::dynamic_to_json(value);
         self.store.set(&flow_id, &key, json_val).is_ok()
     }
 
     /// Check if a key exists
-    #[allow(dead_code)]
     pub fn exists(&mut self, flow_id: String, key: String) -> bool {
         self.store.exists(&flow_id, &key).unwrap_or(false)
     }
 
     /// Delete a key
-    #[allow(dead_code)]
     pub fn delete(&mut self, flow_id: String, key: String) -> bool {
         self.store.delete(&flow_id, &key).is_ok()
     }
 
     /// Increment a counter
-    #[allow(dead_code)]
     pub fn increment(&mut self, flow_id: String, key: String) -> i64 {
         self.store.increment(&flow_id, &key).unwrap_or(0)
     }
 
     /// Set TTL for a flow
-    #[allow(dead_code)]
     pub fn set_ttl(&mut self, flow_id: String, ttl_seconds: i64) -> bool {
         self.store.set_ttl(&flow_id, ttl_seconds).is_ok()
     }

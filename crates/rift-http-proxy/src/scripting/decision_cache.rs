@@ -8,16 +8,13 @@ use tracing::{debug, trace};
 
 /// Configuration for the decision cache
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
+
 pub struct DecisionCacheConfig {
     /// Enable decision caching
-    #[allow(dead_code)]
     pub enabled: bool,
     /// Maximum number of cache entries (LRU eviction when exceeded)
-    #[allow(dead_code)]
     pub max_size: usize,
     /// TTL for cache entries in seconds (0 = no expiration)
-    #[allow(dead_code)]
     pub ttl_seconds: u64,
 }
 
@@ -48,7 +45,6 @@ pub struct CacheKey {
 
 impl CacheKey {
     /// Create a new cache key from request properties
-    #[allow(dead_code)]
     pub fn new(
         method: String,
         path: String,
@@ -72,7 +68,6 @@ impl CacheKey {
     }
 
     /// Hash a JSON value for cache key generation
-    #[allow(dead_code)]
     fn hash_json(value: &serde_json::Value) -> u64 {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         // Use canonical JSON string for consistent hashing
@@ -84,7 +79,7 @@ impl CacheKey {
 
 /// Cache entry with TTL tracking
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
+
 struct CacheEntry {
     decision: FaultDecision,
     created_at: Instant,
@@ -93,7 +88,6 @@ struct CacheEntry {
 }
 
 impl CacheEntry {
-    #[allow(dead_code)]
     fn new(decision: FaultDecision) -> Self {
         let now = Instant::now();
         Self {
@@ -104,7 +98,6 @@ impl CacheEntry {
         }
     }
 
-    #[allow(dead_code)]
     fn is_expired(&self, ttl: Duration) -> bool {
         if ttl.is_zero() {
             return false; // No expiration
@@ -112,7 +105,6 @@ impl CacheEntry {
         self.created_at.elapsed() > ttl
     }
 
-    #[allow(dead_code)]
     fn touch(&mut self) {
         self.last_accessed = Instant::now();
         self.access_count += 1;
@@ -121,7 +113,7 @@ impl CacheEntry {
 
 /// Metrics for cache performance
 #[derive(Clone, Debug, Default)]
-#[allow(dead_code)]
+
 pub struct CacheMetrics {
     pub hits: u64,
     pub misses: u64,
@@ -132,7 +124,6 @@ pub struct CacheMetrics {
 }
 
 impl CacheMetrics {
-    #[allow(dead_code)]
     pub fn hit_rate(&self) -> f64 {
         let total = self.hits + self.misses;
         if total == 0 {
@@ -157,7 +148,6 @@ enum EntryState {
 }
 
 /// Decision cache for memoizing script execution results
-#[allow(dead_code)]
 pub struct DecisionCache {
     config: DecisionCacheConfig,
     /// Single lock protecting both cache entries and metrics to prevent deadlocks
@@ -166,7 +156,6 @@ pub struct DecisionCache {
 
 impl DecisionCache {
     /// Create a new decision cache
-    #[allow(dead_code)]
     pub fn new(config: DecisionCacheConfig) -> Self {
         debug!(
             "Creating decision cache: enabled={}, max_size={}, ttl={}s",
@@ -183,7 +172,6 @@ impl DecisionCache {
     }
 
     /// Get a decision from cache if available and not expired
-    #[allow(dead_code)]
     pub fn get(&self, key: &CacheKey) -> Option<FaultDecision> {
         if !self.config.enabled {
             return None;
@@ -233,7 +221,6 @@ impl DecisionCache {
     }
 
     /// Insert a decision into the cache
-    #[allow(dead_code)]
     pub fn insert(&self, key: CacheKey, decision: FaultDecision) -> Result<()> {
         if !self.config.enabled {
             return Ok(());
@@ -261,7 +248,6 @@ impl DecisionCache {
     /// This is a static method that takes a mutable reference to the entire
     /// CacheState, allowing atomic updates to both entries and metrics without
     /// needing to acquire a separate lock.
-    #[allow(dead_code)]
     fn evict_lru(state: &mut CacheState) {
         // Find entry with oldest last_accessed time
         if let Some((key_to_evict, _)) = state
@@ -277,7 +263,6 @@ impl DecisionCache {
     }
 
     /// Clear all cache entries
-    #[allow(dead_code)]
     pub fn clear(&self) {
         let mut state = self.state.write().unwrap();
         state.entries.clear();
@@ -286,13 +271,11 @@ impl DecisionCache {
     }
 
     /// Get current cache metrics
-    #[allow(dead_code)]
     pub fn metrics(&self) -> CacheMetrics {
         self.state.read().unwrap().metrics.clone()
     }
 
     /// Remove expired entries (can be called periodically)
-    #[allow(dead_code)]
     pub fn cleanup_expired(&self) {
         if !self.config.enabled || self.config.ttl_seconds == 0 {
             return;
@@ -321,7 +304,6 @@ impl DecisionCache {
     }
 
     /// Get cache size
-    #[allow(dead_code)]
     pub fn size(&self) -> usize {
         self.state.read().unwrap().entries.len()
     }

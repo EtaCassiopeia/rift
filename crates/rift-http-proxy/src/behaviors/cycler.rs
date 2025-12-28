@@ -72,7 +72,6 @@ impl ResponseCycler {
     }
 
     /// Reset cycling state for a rule
-    #[allow(dead_code)]
     pub fn reset(&self, rule_id: &str) {
         let mut state = self.state.write();
         if let Some(rule_state) = state.rules.get_mut(rule_id) {
@@ -82,7 +81,6 @@ impl ResponseCycler {
     }
 
     /// Reset all cycling state
-    #[allow(dead_code)]
     pub fn reset_all(&self) {
         self.state.write().rules.clear();
     }

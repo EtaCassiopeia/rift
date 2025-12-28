@@ -160,7 +160,7 @@ impl JsEngine {
 /// Returns serialized bytecode that can be loaded efficiently
 /// Note: Boa doesn't support bytecode serialization yet, so we store the source
 /// and validate it compiles
-#[allow(dead_code)] // Used by proxy.rs but cross-module analysis doesn't see it
+// Used by proxy.rs but cross-module analysis doesn't see it
 pub fn compile_js_to_bytecode(script: &str) -> Result<Vec<u8>> {
     // Validate the script compiles
     let mut context = Context::default();
@@ -754,7 +754,6 @@ fn save_imposter_state(port: u16, state: serde_json::Map<String, Value>) {
 }
 
 /// Clear state for an imposter (called when imposter is deleted)
-#[allow(dead_code)]
 pub fn clear_imposter_state(port: u16) {
     let mut states = IMPOSTER_STATE.lock().unwrap();
     states.remove(&port);

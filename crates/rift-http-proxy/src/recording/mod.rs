@@ -33,7 +33,7 @@ use std::collections::HashMap;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 /// Get current unix timestamp in seconds
-#[allow(dead_code)] // Used in tests and helpers
+// Used in tests and helpers
 fn unix_timestamp() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -42,7 +42,7 @@ fn unix_timestamp() -> u64 {
 }
 
 /// Record a response with timing
-#[allow(dead_code)] // Public API for future use (higher-level recording helper)
+// Public API for future use (higher-level recording helper)
 pub fn record_with_timing<F, T>(store: &RecordingStore, signature: RequestSignature, f: F) -> T
 where
     F: FnOnce() -> (T, u16, HashMap<String, String>, Vec<u8>),

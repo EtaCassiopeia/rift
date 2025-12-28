@@ -8,7 +8,6 @@ pub struct Router {
 }
 
 struct CompiledRoute {
-    #[allow(dead_code)]
     name: String,
     upstream: String,
     host: Option<CompiledHost>,

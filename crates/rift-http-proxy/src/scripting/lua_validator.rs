@@ -3,7 +3,7 @@ use std::error::Error;
 use std::fmt;
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
+
 pub enum LuaValidationError {
     SyntaxError(String),
     MissingReturnStatement(String),
@@ -26,14 +26,11 @@ impl fmt::Display for LuaValidationError {
 
 impl Error for LuaValidationError {}
 
-#[allow(dead_code)]
 pub struct LuaValidator {
-    #[allow(dead_code)]
     lua: Lua,
 }
 
 impl LuaValidator {
-    #[allow(dead_code)]
     pub fn new() -> Self {
         Self { lua: Lua::new() }
     }
@@ -46,7 +43,6 @@ impl LuaValidator {
     /// 3. Script contains a return statement (expected structure)
     ///
     /// Note: This validates syntax only - runtime behavior depends on request/flow_store context
-    #[allow(dead_code)]
     pub fn validate(&self, script: &str) -> Result<(), LuaValidationError> {
         // Try to compile (load and parse) - this catches syntax errors
         match self.lua.load(script).eval::<mlua::Value>() {
@@ -72,7 +68,6 @@ impl LuaValidator {
     }
 
     /// Validate multiple scripts and return all errors
-    #[allow(dead_code)]
     pub fn validate_batch<'a>(
         &self,
         scripts: &[(&'a str, &str)],

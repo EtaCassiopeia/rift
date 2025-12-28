@@ -44,10 +44,8 @@ pub struct Imposter {
     /// Mutable stubs (can be modified at runtime)
     pub stubs: RwLock<Vec<Stub>>,
     /// Response cycling state (for future use with response arrays)
-    #[allow(dead_code)]
     pub response_cycler: ResponseCycler,
     /// Recording store for proxy responses (for future proxy mode support)
-    #[allow(dead_code)]
     pub recording_store: Arc<RecordingStore>,
     /// Recorded requests (if record_requests is true)
     pub recorded_requests: RwLock<Vec<RecordedRequest>>,
@@ -56,10 +54,8 @@ pub struct Imposter {
     /// Whether imposter is enabled
     pub enabled: AtomicBool,
     /// Creation timestamp (for future metrics/admin display)
-    #[allow(dead_code)]
     pub created_at: chrono::DateTime<chrono::Utc>,
     /// Shutdown signal sender (for future graceful shutdown)
-    #[allow(dead_code)]
     pub shutdown_tx: Option<broadcast::Sender<()>>,
     /// Flow store for Rift extensions (stateful scripting)
     pub flow_store: Arc<dyn FlowStore>,
@@ -430,7 +426,7 @@ impl Imposter {
 
     /// Check if a stub response is an inject and return the inject function
     /// Note: This peeks at the current response without advancing the cycler
-    #[allow(dead_code)] // Used with javascript feature
+    // Used with javascript feature
     pub fn get_inject_response(&self, stub: &Stub, stub_index: usize) -> Option<String> {
         if stub.responses.is_empty() {
             return None;
@@ -451,7 +447,7 @@ impl Imposter {
 
     /// Advance the response cycler for an inject response
     /// This should be called after successfully handling an inject response
-    #[allow(dead_code)] // Used with javascript feature
+    // Used with javascript feature
     pub fn advance_cycler_for_inject(&self, stub: &Stub, stub_index: usize) {
         let rule_id = format!("stub_{stub_index}");
         self.response_cycler

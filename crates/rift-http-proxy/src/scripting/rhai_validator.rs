@@ -3,7 +3,7 @@ use std::error::Error;
 use std::fmt;
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
+
 pub enum ValidationError {
     SyntaxError(String),
     MissingFunction(String),
@@ -28,14 +28,11 @@ impl fmt::Display for ValidationError {
 
 impl Error for ValidationError {}
 
-#[allow(dead_code)]
 pub struct RhaiValidator {
-    #[allow(dead_code)]
     engine: Engine,
 }
 
 impl RhaiValidator {
-    #[allow(dead_code)]
     pub fn new() -> Self {
         let engine = Engine::new();
         Self { engine }
@@ -49,7 +46,6 @@ impl RhaiValidator {
     ///
     /// Note: This does NOT validate runtime behavior - only syntax.
     /// The actual should_inject function must be verified at runtime.
-    #[allow(dead_code)]
     pub fn validate(&self, script: &str) -> Result<AST, ValidationError> {
         // Compile the script - this catches syntax errors
         let ast = self
@@ -68,7 +64,6 @@ impl RhaiValidator {
     }
 
     /// Validate multiple scripts and return all errors
-    #[allow(dead_code)]
     pub fn validate_batch<'a>(
         &self,
         scripts: &[(&'a str, &str)],

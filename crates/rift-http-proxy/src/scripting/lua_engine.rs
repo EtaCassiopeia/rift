@@ -310,7 +310,6 @@ impl LuaEngine {
 
 /// Compile Lua script to bytecode for efficient execution
 /// Returns bytecode that can be loaded and executed by any Lua instance
-#[allow(dead_code)]
 pub fn compile_to_bytecode(script: &str) -> Result<Vec<u8>> {
     let lua = Lua::new();
 
@@ -430,7 +429,6 @@ pub fn execute_lua_bytecode(
 
 /// Public function to execute Lua script with a reusable Lua state (for script pool)
 /// This eliminates the expensive thread spawning and runtime creation overhead
-#[allow(dead_code)]
 pub fn execute_lua_with_state(
     lua: &Lua,
     script: &str,

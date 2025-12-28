@@ -4,7 +4,7 @@ use super::types::{RecordedResponse, RequestSignature};
 use std::collections::HashMap;
 
 /// Generate a Mountebank-compatible stub from a recorded request/response
-#[allow(dead_code)] // Public API for predicate generator export
+// Public API for predicate generator export
 pub fn generate_stub(
     signature: &RequestSignature,
     response: &RecordedResponse,

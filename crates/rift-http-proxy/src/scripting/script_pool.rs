@@ -15,15 +15,13 @@ use mlua::Lua;
 
 /// Configuration for the script thread pool
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
+
 pub struct ScriptPoolConfig {
     /// Number of worker threads. 0 means auto-detect (num_cpus / 2)
     pub workers: usize,
     /// Maximum queue size for pending tasks
-    #[allow(dead_code)]
     pub queue_size: usize,
     /// Timeout in milliseconds for script execution
-    #[allow(dead_code)]
     pub timeout_ms: u64,
 }
 
@@ -41,7 +39,7 @@ impl Default for ScriptPoolConfig {
 
 /// Compiled script representation for efficient execution
 #[derive(Clone)]
-#[allow(dead_code)]
+
 pub enum CompiledScript {
     Rhai {
         ast: Arc<AST>,
@@ -61,7 +59,6 @@ pub enum CompiledScript {
 }
 
 /// A task submitted to the script pool for execution
-#[allow(dead_code)]
 pub struct ScriptTask {
     pub engine: CompiledScript,
     pub request: ScriptRequest,
@@ -77,7 +74,6 @@ struct ScriptWorker {
 }
 
 impl ScriptWorker {
-    #[allow(dead_code)]
     fn spawn(worker_id: usize, work_rx: Receiver<ScriptTask>, shutdown_rx: Receiver<()>) -> Self {
         let handle = thread::Builder::new()
             .name(format!("script-worker-{worker_id}"))
@@ -159,7 +155,6 @@ impl ScriptWorker {
         }
     }
 
-    #[allow(dead_code)]
     fn execute_rhai(
         engine: &rhai::Engine,
         ast: &Arc<AST>,
@@ -174,7 +169,6 @@ impl ScriptWorker {
     }
 
     #[cfg(feature = "lua")]
-    #[allow(dead_code)]
     fn execute_lua(
         lua: &Lua,
         bytecode: &Arc<Vec<u8>>,
@@ -189,7 +183,6 @@ impl ScriptWorker {
     }
 
     #[cfg(feature = "javascript")]
-    #[allow(dead_code)]
     fn execute_javascript(
         bytecode: &Arc<Vec<u8>>,
         request: &ScriptRequest,
@@ -211,24 +204,21 @@ impl ScriptWorker {
 }
 
 /// Script execution thread pool
-#[allow(dead_code)]
 pub struct ScriptPool {
     workers: Vec<ScriptWorker>,
-    #[allow(dead_code)]
+
     work_tx: Sender<ScriptTask>,
     shutdown_tx: Sender<()>,
     config: ScriptPoolConfig,
 
     // Metrics
-    #[allow(dead_code)]
     queue_depth: Arc<AtomicUsize>,
-    #[allow(dead_code)]
+
     active_tasks: Arc<AtomicUsize>,
 }
 
 impl ScriptPool {
     /// Create a new script pool with the given configuration
-    #[allow(dead_code)]
     pub fn new(config: ScriptPoolConfig) -> Result<Self> {
         info!(
             "Creating script pool with {} workers, queue size {}",
@@ -257,7 +247,6 @@ impl ScriptPool {
     }
 
     /// Execute a script task asynchronously
-    #[allow(dead_code)]
     pub async fn execute(
         &self,
         engine: CompiledScript,
@@ -310,19 +299,16 @@ impl ScriptPool {
     }
 
     /// Get current queue depth (for metrics)
-    #[allow(dead_code)]
     pub fn queue_depth(&self) -> usize {
         self.queue_depth.load(Ordering::Relaxed)
     }
 
     /// Get number of active tasks (for metrics)
-    #[allow(dead_code)]
     pub fn active_tasks(&self) -> usize {
         self.active_tasks.load(Ordering::Relaxed)
     }
 
     /// Get number of workers
-    #[allow(dead_code)]
     pub fn worker_count(&self) -> usize {
         self.config.workers
     }

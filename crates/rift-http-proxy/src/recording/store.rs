@@ -70,31 +70,31 @@ impl RecordingStore {
     }
 
     /// Get all recorded responses (for export)
-    #[allow(dead_code)] // Public API for future use (mb replay export)
+    // Public API for future use (mb replay export)
     pub fn get_all(&self) -> HashMap<RequestSignature, Vec<RecordedResponse>> {
         self.responses.read().clone()
     }
 
     /// Clear all recordings
-    #[allow(dead_code)] // Public API for future use (admin endpoints)
+    // Public API for future use (admin endpoints)
     pub fn clear(&self) {
         self.responses.write().clear();
     }
 
     /// Get number of recorded signatures
-    #[allow(dead_code)] // Public API for future use (metrics/debugging)
+    // Public API for future use (metrics/debugging)
     pub fn len(&self) -> usize {
         self.responses.read().len()
     }
 
     /// Check if empty
-    #[allow(dead_code)] // Public API for future use (metrics/debugging)
+    // Public API for future use (metrics/debugging)
     pub fn is_empty(&self) -> bool {
         self.responses.read().is_empty()
     }
 
     /// Save recordings to file (JSON format)
-    #[allow(dead_code)] // Public API for persistence
+    // Public API for persistence
     pub fn save_to_file(&self, path: &Path) -> Result<(), std::io::Error> {
         let data = self.responses.read();
         let serializable: Vec<_> = data
@@ -111,7 +111,7 @@ impl RecordingStore {
     }
 
     /// Load recordings from file (JSON format)
-    #[allow(dead_code)] // Public API for persistence
+    // Public API for persistence
     pub fn load_from_file(&self, path: &Path) -> Result<usize, std::io::Error> {
         if !path.exists() {
             debug!("Recording file {:?} does not exist, starting fresh", path);
@@ -133,7 +133,7 @@ impl RecordingStore {
     }
 
     /// Export all recordings as Mountebank-compatible stubs
-    #[allow(dead_code)] // Public API for mb replay export
+    // Public API for mb replay export
     pub fn export_as_stubs(
         &self,
         include_method: bool,

@@ -123,14 +123,13 @@ fn create_request_map(request: &ScriptRequest) -> Map {
 /// }
 /// ```
 #[derive(Clone)]
-#[allow(dead_code)]
+
 pub struct RhaiEngine {
     ast: Arc<AST>, // Wrapped in Arc for efficient sharing with script pool
     rule_id: String,
 }
 
 impl RhaiEngine {
-    #[allow(dead_code)]
     pub fn new(script: &str, rule_id: String) -> Result<Self> {
         let engine = Self::create_engine();
         let ast = engine
@@ -144,18 +143,15 @@ impl RhaiEngine {
     }
 
     /// Get a reference to the cached AST (for script pool)
-    #[allow(dead_code)]
     pub fn ast(&self) -> &Arc<AST> {
         &self.ast
     }
 
     /// Get the rule ID
-    #[allow(dead_code)]
     pub fn rule_id(&self) -> &str {
         &self.rule_id
     }
 
-    #[allow(dead_code)]
     pub fn create_engine() -> Engine {
         let mut engine = Engine::new();
 
@@ -238,7 +234,6 @@ impl RhaiEngine {
         engine
     }
 
-    #[allow(dead_code)]
     pub fn should_inject_fault(
         &self,
         request: &ScriptRequest,
@@ -272,7 +267,6 @@ impl RhaiEngine {
         self.parse_fault_decision(result)
     }
 
-    #[allow(dead_code)]
     fn parse_fault_decision(&self, result: Dynamic) -> Result<FaultDecision> {
         if result.is_unit() {
             return Ok(FaultDecision::None);
@@ -361,7 +355,6 @@ impl RhaiEngine {
 
 /// Public function to execute Rhai script with a reusable engine (for script pool)
 /// This is used by the script_pool module to execute scripts efficiently
-#[allow(dead_code)]
 pub fn execute_rhai_with_engine(
     engine: &Engine,
     ast: &Arc<AST>,
@@ -397,7 +390,6 @@ pub fn execute_rhai_with_engine(
 }
 
 /// Helper to parse fault decision with a given rule_id
-#[allow(dead_code)]
 fn parse_fault_decision_with_rule_id(result: Dynamic, rule_id: &str) -> Result<FaultDecision> {
     if result.is_unit() {
         return Ok(FaultDecision::None);
@@ -485,7 +477,6 @@ fn parse_fault_decision_with_rule_id(result: Dynamic, rule_id: &str) -> Result<F
 
 // Helper functions to convert between Rhai Dynamic and serde_json::Value
 
-#[allow(dead_code)]
 pub(super) fn json_to_dynamic(value: Value) -> Dynamic {
     match value {
         Value::Null => Dynamic::UNIT,
@@ -514,7 +505,6 @@ pub(super) fn json_to_dynamic(value: Value) -> Dynamic {
     }
 }
 
-#[allow(dead_code)]
 pub(super) fn dynamic_to_json(value: Dynamic) -> Value {
     if value.is_unit() {
         Value::Null

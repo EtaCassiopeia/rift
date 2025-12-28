@@ -220,7 +220,6 @@ impl CompiledRule {
     }
 }
 
-#[allow(dead_code)]
 pub fn find_matching_rule<'a>(
     rules: &'a [CompiledRule],
     method: &Method,

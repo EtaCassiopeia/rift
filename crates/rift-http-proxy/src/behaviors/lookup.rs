@@ -99,7 +99,6 @@ impl CsvCache {
     }
 
     /// Clear cache
-    #[allow(dead_code)]
     pub fn clear(&self) {
         self.data.write().clear();
     }

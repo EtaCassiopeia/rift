@@ -1606,7 +1606,6 @@ fn print_diff(expected: &str, actual: &str) {
 
 /// Demonstrates the enhanced error output by printing sample failure scenarios.
 /// Run with: cargo run --bin rift-verify -- --demo
-#[allow(dead_code)]
 fn demo_enhanced_error_output() {
     println!("{BOLD}{CYAN}Enhanced Error Reporting Demo{RESET}");
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
