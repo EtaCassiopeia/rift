@@ -50,6 +50,7 @@ Rift provides advanced features for service virtualization and chaos engineering
 | Debug Mode | — | ✅ `X-Rift-Debug` header |
 | Prometheus Metrics | ✅ | ✅ |
 | Config Linting | — | ✅ `rift-lint` |
+| Terminal UI | — | ✅ `rift-tui` |
 
 ---
 
@@ -62,3 +63,4 @@ Rift provides advanced features for service virtualization and chaos engineering
 - [TLS/HTTPS]({{ site.baseurl }}/features/tls/) - Secure connections
 - [Metrics]({{ site.baseurl }}/features/metrics/) - Prometheus monitoring
 - [Configuration Linting]({{ site.baseurl }}/features/linting/) - Validate imposter configs before loading
+- [Terminal UI]({{ site.baseurl }}/features/tui/) - Interactive imposter management
