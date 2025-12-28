@@ -1,14 +1,18 @@
 [package]
 name = "rift-tui"
-version = "0.1.0"
-edition = "2021"
-authors = ["Rift Contributors"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+
+# Crate metadata
 description = "Interactive Terminal User Interface for Rift HTTP Proxy"
-license = "MIT"
-repository = "https://github.com/EtaCassiopeia/rift"
+readme = "README.md"
 keywords = ["tui", "terminal", "http", "mock", "proxy"]
 categories = ["command-line-interface", "development-tools::testing"]
-readme = "README.md"
 
 [dependencies]
 # TUI framework - latest version
