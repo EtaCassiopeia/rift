@@ -37,18 +37,15 @@ impl RequestContext {
             if let Ok(v) = value.to_str() {
                 // Preserve header case for Mountebank compatibility
                 // Convert from hyper's lowercase to title case (e.g., "content-type" -> "Content-Type")
-                let title_case_name = name
-                    .as_str()
-                    .split('-')
-                    .map(|part| {
-                        let mut chars: Vec<char> = part.chars().collect();
-                        if let Some(first) = chars.first_mut() {
-                            *first = first.to_uppercase().next().unwrap_or(*first);
-                        }
-                        chars.into_iter().collect::<String>()
-                    })
-                    .collect::<Vec<String>>()
-                    .join("-");
+                let name = name.as_str();
+                let mut title_case_name = String::with_capacity(name.len());
+                for part in name.split_inclusive('-') {
+                    let mut chars = part.chars();
+                    if let Some(first_char) = chars.next() {
+                        title_case_name.push(first_char.to_ascii_uppercase());
+                    }
+                    title_case_name.push_str(chars.as_str());
+                }
                 header_map.insert(title_case_name, v.to_string());
             }
         }
