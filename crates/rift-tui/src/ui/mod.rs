@@ -155,21 +155,24 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
 /// Command definition (key, label)
 type Command = (&'static str, &'static str);
 
-/// Build an htop-style command line with colored key backgrounds
+/// Build a nvim-style command line with [key] notation and separators
 fn build_command_line(commands: &[Command], app: &App) -> Line<'static> {
     let mut spans = vec![Span::raw(" ")];
     for (i, (key, label)) in commands.iter().enumerate() {
         if i > 0 {
-            spans.push(Span::raw(" "));
+            // Subtle separator
+            spans.push(Span::styled(" │ ", Style::default().fg(app.theme.border)));
         }
-        // Key with background color
+        // Key in brackets with accent color
         spans.push(Span::styled(
-            (*key).to_string(),
-            Style::default().fg(app.theme.key_fg).bg(app.theme.key_bg),
+            format!("[{}]", key),
+            Style::default()
+                .fg(app.theme.key_fg)
+                .add_modifier(Modifier::BOLD),
         ));
-        // Label
+        // Label in muted color
         spans.push(Span::styled(
-            (*label).to_string(),
+            format!(" {}", label),
             Style::default().fg(app.theme.cmd_fg),
         ));
     }
@@ -181,39 +184,64 @@ fn get_commands(view: &View) -> (Vec<Command>, Option<Vec<Command>>) {
     match view {
         View::ImposterList => (
             vec![
-                ("n", "New"), ("p", "Proxy"), ("d", "Del"), ("t", "Toggle"),
-                ("m", "Metrics"), ("/", "Search"), ("T", "Theme"), ("?", "Help"), ("q", "Quit"),
+                ("n", "New"),
+                ("p", "Proxy"),
+                ("d", "Del"),
+                ("t", "Toggle"),
+                ("m", "Metrics"),
+                ("/", "Search"),
+                ("T", "Theme"),
+                ("?", "Help"),
+                ("q", "Quit"),
             ],
             Some(vec![
-                ("i", "Import"), ("I", "ImportDir"), ("e", "Export"), ("E", "ExportDir"),
+                ("i", "Import"),
+                ("I", "ImportDir"),
+                ("e", "Export"),
+                ("E", "ExportDir"),
             ]),
         ),
         View::ImposterDetail { .. } => (
             vec![
-                ("a", "Add"), ("e", "Edit"), ("d", "Del"), ("y", "Curl"),
-                ("t", "Toggle"), ("/", "Search"), ("?", "Help"),
+                ("a", "Add"),
+                ("e", "Edit"),
+                ("d", "Del"),
+                ("y", "Curl"),
+                ("t", "Toggle"),
+                ("/", "Search"),
+                ("?", "Help"),
             ],
             Some(vec![
-                ("c", "ClearReq"), ("C", "ClearProxy"), ("x", "ExportStubs"), ("X", "ExportFull"), ("A", "Apply"),
+                ("c", "ClearReq"),
+                ("C", "ClearProxy"),
+                ("x", "ExportStubs"),
+                ("X", "ExportFull"),
+                ("A", "Apply"),
             ]),
         ),
         View::StubDetail { .. } => (
             vec![
-                ("e", "Edit"), ("d", "Delete"), ("y", "Curl"), ("Esc", "Back"), ("?", "Help"),
+                ("e", "Edit"),
+                ("d", "Delete"),
+                ("y", "Curl"),
+                ("Esc", "Back"),
+                ("?", "Help"),
             ],
             None,
         ),
         View::StubEdit { .. } => (
             vec![
-                ("^S", "Save"), ("^F", "Format"), ("^A", "SelAll"),
-                ("^C", "Copy"), ("^X", "Cut"), ("^V", "Paste"), ("Esc", "Cancel"),
+                ("^S", "Save"),
+                ("^F", "Format"),
+                ("^A", "SelAll"),
+                ("^C", "Copy"),
+                ("^X", "Cut"),
+                ("^V", "Paste"),
+                ("Esc", "Cancel"),
             ],
             None,
         ),
-        View::Metrics => (
-            vec![("r", "Refresh"), ("Esc", "Back"), ("?", "Help")],
-            None,
-        ),
+        View::Metrics => (vec![("r", "Refresh"), ("Esc", "Back"), ("?", "Help")], None),
     }
 }
 

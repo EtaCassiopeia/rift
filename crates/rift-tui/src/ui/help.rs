@@ -65,7 +65,10 @@ fn build_help_text() -> Vec<Line<'static>> {
         help_line("Tab", "Switch focus between panes"),
         help_line("r", "Refresh data"),
         help_line("/", "Search / filter items"),
-        help_line("T (Shift+t)", "Cycle theme (Default/Dark/Light/Nord/Dracula)"),
+        help_line(
+            "T (Shift+t)",
+            "Cycle theme (Default/Dark/Light/Nord/Dracula)",
+        ),
         help_line("?", "Toggle this help"),
         Line::from(""),
         section_header("IMPOSTER LIST (Main View)"),
