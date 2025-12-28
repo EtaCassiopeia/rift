@@ -1,6 +1,10 @@
 //! Imposter CRUD handlers.
 
-use crate::admin_api::types::*;
+use crate::admin_api::types::{
+    collect_body, error_response, imposter_not_found, json_response, make_imposter_links,
+    make_stub_links, ImposterDetail, ImposterQueryParams, ImposterSummary, ListImpostersResponse,
+    RiftImposterExtensions, StubWithLinks,
+};
 use crate::extensions::stub_analysis::analyze_stubs;
 use crate::imposter::{ImposterConfig, ImposterError, ImposterManager, StubResponse};
 use crate::scripting::validate_stubs;
@@ -231,10 +235,7 @@ pub async fn handle_get(
             };
             json_response(StatusCode::OK, &detail)
         }
-        Err(ImposterError::NotFound(_)) => error_response(
-            StatusCode::NOT_FOUND,
-            &format!("Imposter not found on port {port}"),
-        ),
+        Err(ImposterError::NotFound(_)) => imposter_not_found(port),
         Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
 }
@@ -299,10 +300,7 @@ async fn handle_set_enabled(
                 &serde_json::json!({"message": format!("Imposter {}", state)}),
             )
         }
-        Err(ImposterError::NotFound(_)) => error_response(
-            StatusCode::NOT_FOUND,
-            &format!("Imposter not found on port {port}"),
-        ),
+        Err(ImposterError::NotFound(_)) => imposter_not_found(port),
         Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
 }
@@ -318,10 +316,7 @@ pub async fn handle_clear_requests(
             imposter.clear_recorded_requests();
             handle_get(port, None, base_url, manager).await
         }
-        Err(ImposterError::NotFound(_)) => error_response(
-            StatusCode::NOT_FOUND,
-            &format!("Imposter not found on port {port}"),
-        ),
+        Err(ImposterError::NotFound(_)) => imposter_not_found(port),
         Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
 }
@@ -337,10 +332,7 @@ pub async fn handle_clear_proxy_responses(
             imposter.clear_proxy_responses();
             handle_get(port, None, base_url, manager).await
         }
-        Err(ImposterError::NotFound(_)) => error_response(
-            StatusCode::NOT_FOUND,
-            &format!("Imposter not found on port {port}"),
-        ),
+        Err(ImposterError::NotFound(_)) => imposter_not_found(port),
         Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
 }

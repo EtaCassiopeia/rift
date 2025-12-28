@@ -2,7 +2,7 @@ use crate::extensions::flow_state::FlowStore;
 use anyhow::Result;
 use serde_json::Value;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime};
 
 /// In-memory implementation of FlowStore
@@ -11,14 +11,14 @@ use std::time::{Duration, SystemTime};
 /// Useful for testing, development, and single-instance deployments.
 pub struct InMemoryFlowStore {
     #[allow(clippy::type_complexity)]
-    data: Arc<Mutex<HashMap<String, (Value, Option<SystemTime>)>>>,
+    data: Arc<RwLock<HashMap<String, (Value, Option<SystemTime>)>>>,
     default_ttl: Duration,
 }
 
 impl InMemoryFlowStore {
     pub fn new(default_ttl_seconds: u64) -> Self {
         Self {
-            data: Arc::new(Mutex::new(HashMap::new())),
+            data: Arc::new(RwLock::new(HashMap::new())),
             default_ttl: Duration::from_secs(default_ttl_seconds),
         }
     }
@@ -54,9 +54,9 @@ impl InMemoryFlowStore {
 
 impl FlowStore for InMemoryFlowStore {
     fn get(&self, flow_id: &str, key: &str) -> Result<Option<Value>> {
-        // Single lock acquisition - no cleanup to avoid race window
+        // Use read lock for concurrent read access
         let key_str = self.make_key(flow_id, key);
-        let data = self.data.lock().unwrap();
+        let data = self.data.read().unwrap();
 
         match data.get(&key_str) {
             Some((value, expiry)) if !self.is_expired(expiry) => Ok(Some(value.clone())),
@@ -67,7 +67,7 @@ impl FlowStore for InMemoryFlowStore {
     fn set(&self, flow_id: &str, key: &str, value: Value) -> Result<()> {
         let key_str = self.make_key(flow_id, key);
         let expiry = SystemTime::now() + self.default_ttl;
-        let mut data = self.data.lock().unwrap();
+        let mut data = self.data.write().unwrap();
 
         // Opportunistically clean up this specific key if expired
         Self::cleanup_on_write(&mut data, &key_str, |exp| self.is_expired(exp));
@@ -77,9 +77,9 @@ impl FlowStore for InMemoryFlowStore {
     }
 
     fn exists(&self, flow_id: &str, key: &str) -> Result<bool> {
-        // Single lock acquisition - no cleanup to avoid race window
+        // Use read lock for concurrent read access
         let key_str = self.make_key(flow_id, key);
-        let data = self.data.lock().unwrap();
+        let data = self.data.read().unwrap();
 
         match data.get(&key_str) {
             Some((_, expiry)) if !self.is_expired(expiry) => Ok(true),
@@ -89,7 +89,7 @@ impl FlowStore for InMemoryFlowStore {
 
     fn delete(&self, flow_id: &str, key: &str) -> Result<()> {
         let key_str = self.make_key(flow_id, key);
-        let mut data = self.data.lock().unwrap();
+        let mut data = self.data.write().unwrap();
         data.remove(&key_str);
         Ok(())
     }
@@ -97,7 +97,7 @@ impl FlowStore for InMemoryFlowStore {
     fn increment(&self, flow_id: &str, key: &str) -> Result<i64> {
         let key_str = self.make_key(flow_id, key);
         let expiry = SystemTime::now() + self.default_ttl;
-        let mut data = self.data.lock().unwrap();
+        let mut data = self.data.write().unwrap();
 
         // Opportunistically clean up this specific key if expired
         Self::cleanup_on_write(&mut data, &key_str, |exp| self.is_expired(exp));
@@ -114,7 +114,7 @@ impl FlowStore for InMemoryFlowStore {
     fn set_ttl(&self, flow_id: &str, ttl_seconds: i64) -> Result<()> {
         let prefix = format!("flow:{flow_id}:");
         let new_expiry = SystemTime::now() + Duration::from_secs(ttl_seconds as u64);
-        let mut data = self.data.lock().unwrap();
+        let mut data = self.data.write().unwrap();
 
         for (key, (_, expiry)) in data.iter_mut() {
             if key.starts_with(&prefix) {
