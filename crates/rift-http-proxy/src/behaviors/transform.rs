@@ -41,10 +41,9 @@ pub fn apply_shell_transform(
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("Shell transform failed: {stderr}"),
-        ))
+        Err(std::io::Error::other(format!(
+            "Shell transform failed: {stderr}"
+        )))
     }
 }
 
