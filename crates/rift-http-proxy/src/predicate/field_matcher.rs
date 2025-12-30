@@ -74,24 +74,25 @@ impl CompiledFieldMatcher {
     /// * `config` - The field matcher configuration
     /// * `lowercase_name` - Whether to lowercase the field name (true for headers)
     pub fn compile(config: &FieldMatcher, lowercase_name: bool) -> Result<Self, regex::Error> {
-        match config {
-            FieldMatcher::Simple { name, value } => {
-                let field_name = if lowercase_name {
-                    name.to_lowercase()
-                } else {
-                    name.clone()
-                };
-                Ok(CompiledFieldMatcher {
-                    name: field_name,
-                    matcher: CompiledFieldMatcherInner::Single(CompiledStringMatcher::Equals {
-                        value: value.clone(),
-                        lower: value.to_lowercase(),
-                    }),
-                    case_sensitive: true,
-                    not: false,
-                    except: None,
-                })
+        let normalize_name = |name: &str| {
+            if lowercase_name {
+                name.to_lowercase()
+            } else {
+                name.to_string()
             }
+        };
+
+        match config {
+            FieldMatcher::Simple { name, value } => Ok(CompiledFieldMatcher {
+                name: normalize_name(name),
+                matcher: CompiledFieldMatcherInner::Single(CompiledStringMatcher::Equals {
+                    value: value.clone(),
+                    lower: value.to_lowercase(),
+                }),
+                case_sensitive: true,
+                not: false,
+                except: None,
+            }),
             FieldMatcher::Or { name, or, options } => {
                 let compiled: Result<Vec<_>, _> =
                     or.iter().map(CompiledStringMatcher::compile).collect();
@@ -100,13 +101,8 @@ impl CompiledFieldMatcher {
                     .as_ref()
                     .map(|p| CompiledExcept::compile(p))
                     .transpose()?;
-                let field_name = if lowercase_name {
-                    name.to_lowercase()
-                } else {
-                    name.clone()
-                };
                 Ok(CompiledFieldMatcher {
-                    name: field_name,
+                    name: normalize_name(name),
                     matcher: CompiledFieldMatcherInner::Or(compiled?),
                     case_sensitive: options.case_sensitive,
                     not: options.not,
@@ -123,13 +119,8 @@ impl CompiledFieldMatcher {
                     .as_ref()
                     .map(|p| CompiledExcept::compile(p))
                     .transpose()?;
-                let field_name = if lowercase_name {
-                    name.to_lowercase()
-                } else {
-                    name.clone()
-                };
                 Ok(CompiledFieldMatcher {
-                    name: field_name,
+                    name: normalize_name(name),
                     matcher: CompiledFieldMatcherInner::Single(CompiledStringMatcher::compile(
                         matcher,
                     )?),
