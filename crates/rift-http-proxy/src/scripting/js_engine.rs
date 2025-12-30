@@ -456,63 +456,33 @@ fn flow_store_set_ttl(_this: &JsValue, args: &[JsValue], _ctx: &mut Context) -> 
     Ok(JsValue::from(result))
 }
 
+/// Register a native function method on a JS object.
+fn register_method(
+    obj: &JsObject,
+    name: &str,
+    func: fn(&JsValue, &[JsValue], &mut Context) -> JsResult<JsValue>,
+    context: &mut Context,
+) -> Result<()> {
+    obj.set(
+        PropertyKey::from(js_string!(name)),
+        NativeFunction::from_fn_ptr(func).to_js_function(context.realm()),
+        false,
+        context,
+    )
+    .map(|_| ())
+    .map_err(|e| anyhow!("Failed to set {name} method: {e}"))
+}
+
 /// Create flow_store object with methods using thread-local storage
 fn create_flow_store_object(context: &mut Context) -> Result<JsValue> {
     let obj = create_js_object(context);
 
-    // Register get method
-    obj.set(
-        js_string!("get"),
-        NativeFunction::from_fn_ptr(flow_store_get).to_js_function(context.realm()),
-        false,
-        context,
-    )
-    .map_err(|e| anyhow!("Failed to set get method: {e}"))?;
-
-    // Register set method
-    obj.set(
-        js_string!("set"),
-        NativeFunction::from_fn_ptr(flow_store_set).to_js_function(context.realm()),
-        false,
-        context,
-    )
-    .map_err(|e| anyhow!("Failed to set set method: {e}"))?;
-
-    // Register exists method
-    obj.set(
-        js_string!("exists"),
-        NativeFunction::from_fn_ptr(flow_store_exists).to_js_function(context.realm()),
-        false,
-        context,
-    )
-    .map_err(|e| anyhow!("Failed to set exists method: {e}"))?;
-
-    // Register delete method
-    obj.set(
-        js_string!("delete"),
-        NativeFunction::from_fn_ptr(flow_store_delete).to_js_function(context.realm()),
-        false,
-        context,
-    )
-    .map_err(|e| anyhow!("Failed to set delete method: {e}"))?;
-
-    // Register increment method
-    obj.set(
-        js_string!("increment"),
-        NativeFunction::from_fn_ptr(flow_store_increment).to_js_function(context.realm()),
-        false,
-        context,
-    )
-    .map_err(|e| anyhow!("Failed to set increment method: {e}"))?;
-
-    // Register set_ttl method
-    obj.set(
-        js_string!("set_ttl"),
-        NativeFunction::from_fn_ptr(flow_store_set_ttl).to_js_function(context.realm()),
-        false,
-        context,
-    )
-    .map_err(|e| anyhow!("Failed to set set_ttl method: {e}"))?;
+    register_method(&obj, "get", flow_store_get, context)?;
+    register_method(&obj, "set", flow_store_set, context)?;
+    register_method(&obj, "exists", flow_store_exists, context)?;
+    register_method(&obj, "delete", flow_store_delete, context)?;
+    register_method(&obj, "increment", flow_store_increment, context)?;
+    register_method(&obj, "set_ttl", flow_store_set_ttl, context)?;
 
     Ok(obj.into())
 }
