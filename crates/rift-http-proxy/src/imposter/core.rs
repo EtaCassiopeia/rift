@@ -88,59 +88,69 @@ impl Imposter {
 
     /// Create flow store based on _rift.flowState configuration
     fn create_flow_store(config: &ImposterConfig) -> Arc<dyn FlowStore> {
-        if let Some(ref rift_config) = config.rift {
-            if let Some(ref flow_state_config) = rift_config.flow_state {
-                match flow_state_config.backend.as_str() {
-                    "inmemory" => {
-                        info!(
-                            "Creating InMemory FlowStore for imposter (ttl={}s)",
-                            flow_state_config.ttl_seconds
-                        );
-                        Arc::new(InMemoryFlowStore::new(flow_state_config.ttl_seconds as u64))
-                    }
-                    "redis" => {
-                        #[cfg(feature = "redis-backend")]
-                        {
-                            if let Some(ref redis_config) = flow_state_config.redis {
-                                use crate::backends::RedisFlowStore;
-                                match RedisFlowStore::new(
-                                    &redis_config.url,
-                                    redis_config.pool_size,
-                                    redis_config.key_prefix.clone(),
-                                    flow_state_config.ttl_seconds,
-                                ) {
-                                    Ok(store) => {
-                                        info!(
-                                            "Created Redis FlowStore for imposter (url={}, ttl={}s)",
-                                            redis_config.url, flow_state_config.ttl_seconds
-                                        );
-                                        return Arc::new(store);
-                                    }
-                                    Err(e) => {
-                                        error!("Failed to create Redis FlowStore: {}, falling back to NoOp", e);
-                                    }
-                                }
-                            } else {
-                                error!("Redis backend selected but no redis config provided, falling back to NoOp");
-                            }
-                        }
-                        #[cfg(not(feature = "redis-backend"))]
-                        {
-                            error!("Redis backend not available (compile with --features redis-backend), falling back to NoOp");
-                        }
-                        Arc::new(NoOpFlowStore)
-                    }
-                    other => {
-                        warn!("Unknown flow state backend '{}', using NoOp", other);
-                        Arc::new(NoOpFlowStore)
-                    }
-                }
-            } else {
-                // No flow state config, use NoOp
+        let Some(ref rift_config) = config.rift else {
+            return Arc::new(NoOpFlowStore);
+        };
+
+        let Some(ref flow_state_config) = rift_config.flow_state else {
+            return Arc::new(NoOpFlowStore);
+        };
+
+        match flow_state_config.backend.as_str() {
+            "inmemory" => {
+                info!(
+                    "Creating InMemory FlowStore for imposter (ttl={}s)",
+                    flow_state_config.ttl_seconds
+                );
+                Arc::new(InMemoryFlowStore::new(flow_state_config.ttl_seconds as u64))
+            }
+            "redis" => Self::create_redis_flow_store(flow_state_config),
+            other => {
+                warn!("Unknown flow state backend '{}', using NoOp", other);
                 Arc::new(NoOpFlowStore)
             }
-        } else {
-            // No rift config, use NoOp
+        }
+    }
+
+    /// Create Redis flow store if configured and available
+    #[allow(unused_variables)]
+    fn create_redis_flow_store(
+        flow_state_config: &crate::imposter::types::RiftFlowStateConfig,
+    ) -> Arc<dyn FlowStore> {
+        #[cfg(feature = "redis-backend")]
+        {
+            let Some(ref redis_config) = flow_state_config.redis else {
+                error!("Redis backend selected but no redis config provided, falling back to NoOp");
+                return Arc::new(NoOpFlowStore);
+            };
+
+            use crate::backends::RedisFlowStore;
+            match RedisFlowStore::new(
+                &redis_config.url,
+                redis_config.pool_size,
+                redis_config.key_prefix.clone(),
+                flow_state_config.ttl_seconds,
+            ) {
+                Ok(store) => {
+                    info!(
+                        "Created Redis FlowStore for imposter (url={}, ttl={}s)",
+                        redis_config.url, flow_state_config.ttl_seconds
+                    );
+                    Arc::new(store)
+                }
+                Err(e) => {
+                    error!(
+                        "Failed to create Redis FlowStore: {}, falling back to NoOp",
+                        e
+                    );
+                    Arc::new(NoOpFlowStore)
+                }
+            }
+        }
+
+        #[cfg(not(feature = "redis-backend"))]
+        {
+            error!("Redis backend not available (compile with --features redis-backend), falling back to NoOp");
             Arc::new(NoOpFlowStore)
         }
     }
