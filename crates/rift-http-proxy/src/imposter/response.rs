@@ -11,6 +11,15 @@ use super::types::{
     StubResponse,
 };
 
+/// Truncate a string with ellipsis if it exceeds the maximum length.
+fn truncate_with_ellipsis(text: &str, max_len: usize) -> String {
+    if text.len() > max_len {
+        format!("{}...", &text[..max_len])
+    } else {
+        text.to_string()
+    }
+}
+
 // Implement HasRepeatBehavior for StubResponse
 impl HasRepeatBehavior for StubResponse {
     fn get_repeat(&self) -> Option<u32> {
@@ -31,20 +40,10 @@ pub fn create_response_preview(response: &StubResponse) -> DebugResponsePreview 
     match response {
         StubResponse::Is { is, .. } => {
             let body_preview = is.body.as_ref().map(|b| match b {
-                serde_json::Value::String(s) => {
-                    if s.len() > 500 {
-                        format!("{}...", &s[..500])
-                    } else {
-                        s.clone()
-                    }
-                }
+                serde_json::Value::String(s) => truncate_with_ellipsis(s, 500),
                 other => {
                     let json = serde_json::to_string(other).unwrap_or_default();
-                    if json.len() > 500 {
-                        format!("{}...", &json[..500])
-                    } else {
-                        json
-                    }
+                    truncate_with_ellipsis(&json, 500)
                 }
             });
             let headers = if is.headers.is_empty() {
@@ -75,12 +74,8 @@ pub fn create_response_preview(response: &StubResponse) -> DebugResponsePreview 
             status_code: None,
             headers: None,
             body_preview: Some(format!(
-                "JavaScript inject: {}...",
-                if inject.len() > 50 {
-                    &inject[..50]
-                } else {
-                    inject
-                }
+                "JavaScript inject: {}",
+                truncate_with_ellipsis(inject, 50)
             )),
         },
         StubResponse::Fault { fault, .. } => DebugResponsePreview {
