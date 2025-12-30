@@ -1,8 +1,8 @@
 //! Imposter CRUD handlers.
 
 use crate::admin_api::types::{
-    collect_body, error_response, imposter_not_found, json_response, make_imposter_links,
-    make_stub_links, ImposterDetail, ImposterQueryParams, ImposterSummary, ListImpostersResponse,
+    collect_body, error_response, json_response, make_imposter_links, make_stub_links,
+    ImposterDetail, ImposterQueryParams, ImposterSummary, ListImpostersResponse,
     RiftImposterExtensions, StubWithLinks,
 };
 use crate::extensions::stub_analysis::analyze_stubs;
@@ -59,18 +59,7 @@ pub async fn handle_create(
             new_parts.status = StatusCode::CREATED;
             Response::from_parts(new_parts, body)
         }
-        Err(ImposterError::PortInUse(p)) => error_response(
-            StatusCode::BAD_REQUEST,
-            &format!("Port {p} is already in use"),
-        ),
-        Err(ImposterError::InvalidProtocol(p)) => {
-            error_response(StatusCode::BAD_REQUEST, &format!("Invalid protocol: {p}"))
-        }
-        Err(ImposterError::BindError(p, e)) => error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("Failed to bind port {p}: {e}"),
-        ),
-        Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+        Err(e) => e.into(),
     }
 }
 
@@ -235,8 +224,7 @@ pub async fn handle_get(
             };
             json_response(StatusCode::OK, &detail)
         }
-        Err(ImposterError::NotFound(_)) => imposter_not_found(port),
-        Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+        Err(e) => e.into(),
     }
 }
 
@@ -270,8 +258,9 @@ pub async fn handle_delete(
             });
             json_response(StatusCode::OK, &response)
         }
+        // For delete, NotFound returns empty object (idempotent delete)
         Err(ImposterError::NotFound(_)) => json_response(StatusCode::OK, &serde_json::json!({})),
-        Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+        Err(e) => e.into(),
     }
 }
 
@@ -300,8 +289,7 @@ async fn handle_set_enabled(
                 &serde_json::json!({"message": format!("Imposter {}", state)}),
             )
         }
-        Err(ImposterError::NotFound(_)) => imposter_not_found(port),
-        Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+        Err(e) => e.into(),
     }
 }
 
@@ -316,8 +304,7 @@ pub async fn handle_clear_requests(
             imposter.clear_recorded_requests();
             handle_get(port, None, base_url, manager).await
         }
-        Err(ImposterError::NotFound(_)) => imposter_not_found(port),
-        Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+        Err(e) => e.into(),
     }
 }
 
@@ -332,8 +319,7 @@ pub async fn handle_clear_proxy_responses(
             imposter.clear_proxy_responses();
             handle_get(port, None, base_url, manager).await
         }
-        Err(ImposterError::NotFound(_)) => imposter_not_found(port),
-        Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+        Err(e) => e.into(),
     }
 }
 

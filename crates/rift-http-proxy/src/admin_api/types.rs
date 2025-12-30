@@ -1,7 +1,7 @@
 //! Response types and HATEOAS structures for the Admin API.
 
 use crate::extensions::stub_analysis::StubWarning;
-use crate::imposter::{RecordedRequest, Stub};
+use crate::imposter::{ImposterError, RecordedRequest, Stub};
 use bytes::Bytes;
 use http_body_util::Full;
 use hyper::body::Incoming;
@@ -219,6 +219,32 @@ pub fn error_response(status: StatusCode, message: &str) -> Response<Full<Bytes>
         }],
     };
     json_response(status, &error)
+}
+
+/// Convert ImposterError to HTTP Response for cleaner error handling in handlers.
+impl From<ImposterError> for Response<Full<Bytes>> {
+    fn from(err: ImposterError) -> Self {
+        match err {
+            ImposterError::PortInUse(p) => error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("Port {p} is already in use"),
+            ),
+            ImposterError::NotFound(p) => error_response(
+                StatusCode::NOT_FOUND,
+                &format!("Imposter not found on port {p}"),
+            ),
+            ImposterError::BindError(p, e) => error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("Failed to bind port {p}: {e}"),
+            ),
+            ImposterError::InvalidProtocol(p) => {
+                error_response(StatusCode::BAD_REQUEST, &format!("Invalid protocol: {p}"))
+            }
+            ImposterError::StubIndexOutOfBounds(i) => {
+                error_response(StatusCode::NOT_FOUND, &format!("Stub index {i} not found"))
+            }
+        }
+    }
 }
 
 /// Create a not found response
