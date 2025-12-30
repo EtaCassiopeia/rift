@@ -201,6 +201,42 @@ fi
 
 ---
 
+## Library Usage
+
+The linter is also available as a Rust library for integration into other tools (like rift-tui):
+
+```rust
+use rift_lint::{lint_file, lint_json, lint_value, LintOptions, LintResult};
+use std::path::Path;
+
+// Lint a file from disk
+let result = lint_file(Path::new("imposter.json"), &LintOptions::default());
+
+// Lint a JSON string (useful for in-memory validation)
+let json = r#"{"port": 4545, "protocol": "http", "stubs": []}"#;
+let result = lint_json(json, "inline", &LintOptions::default());
+
+// Lint already-parsed JSON
+let value: serde_json::Value = serde_json::from_str(json).unwrap();
+let result = lint_value(&value, "inline", &LintOptions::default());
+
+// Check results
+if result.has_errors() {
+    for issue in &result.issues {
+        println!("[{}] {}: {}", issue.severity.label(), issue.code, issue.message);
+    }
+}
+```
+
+Add to your `Cargo.toml`:
+
+```toml
+[dependencies]
+rift-lint = { path = "../rift-lint", default-features = false }
+```
+
+---
+
 ## See Also
 
 - [rift-verify]({{ site.baseurl }}/features/stub-analysis/) - Test imposters by making requests

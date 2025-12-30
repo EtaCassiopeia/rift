@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/rift-http-proxy",
+    "crates/rift-lint",
     "crates/rift-tui",
 ]
 exclude = [

@@ -1,0 +1,45 @@
+[package]
+name = "rift-lint"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+
+description = "Configuration linter library and CLI for Rift HTTP Proxy"
+readme = "README.md"
+keywords = ["lint", "validation", "http", "mock", "mountebank"]
+categories = ["development-tools::testing", "command-line-utilities"]
+
+[dependencies]
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Regex for pattern validation
+regex = "1"
+
+# CLI argument parsing (only needed for binary)
+clap = { version = "4", features = ["derive"], optional = true }
+
+# JavaScript validation (optional)
+boa_engine = { version = "0.19", optional = true }
+
+# Error handling
+thiserror = "1.0"
+
+[features]
+default = ["cli"]
+cli = ["dep:clap"]
+javascript = ["dep:boa_engine"]
+
+[[bin]]
+name = "rift-lint"
+path = "src/main.rs"
+required-features = ["cli"]
+
+[lib]
+name = "rift_lint"
+path = "src/lib.rs"

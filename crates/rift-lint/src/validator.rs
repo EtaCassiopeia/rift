@@ -1,0 +1,838 @@
+//! Core validation logic for imposter configurations.
+
+use crate::types::{LintIssue, LintOptions, LintResult};
+use regex::Regex;
+use serde_json::Value;
+use std::collections::HashSet;
+use std::path::Path;
+
+/// JavaScript syntax validator using boa_engine.
+#[cfg(feature = "javascript")]
+mod js_validator {
+    use boa_engine::{Context, Source};
+
+    pub fn validate_javascript(script: &str) -> Result<(), String> {
+        let mut context = Context::default();
+
+        // Mountebank uses function expressions that need to be wrapped
+        let script_trimmed = script.trim();
+        let wrapped =
+            if script_trimmed.starts_with("function") && !script_trimmed.contains("function ") {
+                format!("var __fn = ({script_trimmed})")
+            } else {
+                script_trimmed.to_string()
+            };
+
+        match context.eval(Source::from_bytes(&wrapped)) {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                let err_str = e.to_string();
+                if err_str.contains("SyntaxError") || err_str.contains("unexpected") {
+                    Err(err_str)
+                } else {
+                    Ok(())
+                }
+            }
+        }
+    }
+}
+
+#[cfg(not(feature = "javascript"))]
+mod js_validator {
+    #[allow(dead_code)]
+    pub fn validate_javascript(_script: &str) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+/// Validate a complete imposter configuration.
+pub fn validate_imposter(
+    file: &Path,
+    imposter: &Value,
+    result: &mut LintResult,
+    options: &LintOptions,
+) {
+    check_required_fields(file, imposter, result);
+    check_protocol(file, imposter, result);
+    check_port_range(file, imposter, result);
+
+    if let Some(stubs) = imposter.get("stubs").and_then(|v| v.as_array()) {
+        for (idx, stub) in stubs.iter().enumerate() {
+            validate_stub(file, stub, idx, result, options);
+        }
+    }
+}
+
+/// Check that required fields are present.
+fn check_required_fields(file: &Path, imposter: &Value, result: &mut LintResult) {
+    let required = ["port", "protocol", "stubs"];
+
+    for field in required {
+        if imposter.get(field).is_none() {
+            result.add_issue(
+                LintIssue::error(
+                    "E003",
+                    format!("Missing required field: {field}"),
+                    file.to_path_buf(),
+                )
+                .with_suggestion(format!("Add \"{field}\" to the imposter configuration")),
+            );
+        }
+    }
+}
+
+/// Check that the protocol is valid.
+fn check_protocol(file: &Path, imposter: &Value, result: &mut LintResult) {
+    if let Some(protocol) = imposter.get("protocol").and_then(|v| v.as_str()) {
+        if !["http", "https", "tcp"].contains(&protocol) {
+            result.add_issue(
+                LintIssue::error(
+                    "E004",
+                    format!("Invalid protocol: {protocol}"),
+                    file.to_path_buf(),
+                )
+                .with_location("protocol")
+                .with_suggestion("Use 'http', 'https', or 'tcp'"),
+            );
+        }
+    }
+}
+
+/// Check that the port is in a valid range.
+fn check_port_range(file: &Path, imposter: &Value, result: &mut LintResult) {
+    if let Some(port) = imposter.get("port").and_then(|v| v.as_u64()) {
+        if !(1..=65535).contains(&port) {
+            result.add_issue(
+                LintIssue::error(
+                    "E005",
+                    format!("Port {port} is out of valid range (1-65535)"),
+                    file.to_path_buf(),
+                )
+                .with_location("port"),
+            );
+        } else if port < 1024 {
+            result.add_issue(
+                LintIssue::warning(
+                    "W001",
+                    format!("Port {port} is a privileged port (requires root)"),
+                    file.to_path_buf(),
+                )
+                .with_location("port")
+                .with_suggestion("Consider using a port >= 1024"),
+            );
+        }
+    }
+}
+
+/// Validate a single stub.
+pub fn validate_stub(
+    file: &Path,
+    stub: &Value,
+    idx: usize,
+    result: &mut LintResult,
+    options: &LintOptions,
+) {
+    let location = format!("stubs[{idx}]");
+
+    if let Some(predicates) = stub.get("predicates").and_then(|v| v.as_array()) {
+        for (pred_idx, predicate) in predicates.iter().enumerate() {
+            validate_predicate(
+                file,
+                predicate,
+                &format!("{location}.predicates[{pred_idx}]"),
+                result,
+                options,
+            );
+        }
+    }
+
+    if let Some(responses) = stub.get("responses").and_then(|v| v.as_array()) {
+        if responses.is_empty() {
+            result.add_issue(
+                LintIssue::warning("W002", "Stub has no responses defined", file.to_path_buf())
+                    .with_location(&location)
+                    .with_suggestion("Add at least one response"),
+            );
+        }
+
+        for (resp_idx, response) in responses.iter().enumerate() {
+            validate_response(
+                file,
+                response,
+                &format!("{location}.responses[{resp_idx}]"),
+                result,
+                options,
+            );
+        }
+    } else {
+        result.add_issue(
+            LintIssue::error("E006", "Stub missing 'responses' field", file.to_path_buf())
+                .with_location(location),
+        );
+    }
+}
+
+/// Validate a predicate.
+pub fn validate_predicate(
+    file: &Path,
+    predicate: &Value,
+    location: &str,
+    result: &mut LintResult,
+    options: &LintOptions,
+) {
+    let valid_operators = [
+        "equals",
+        "deepEquals",
+        "contains",
+        "startsWith",
+        "endsWith",
+        "matches",
+        "exists",
+        "not",
+        "or",
+        "and",
+        "inject",
+    ];
+
+    let pred_obj = match predicate.as_object() {
+        Some(obj) => obj,
+        None => {
+            result.add_issue(
+                LintIssue::error("E007", "Predicate must be an object", file.to_path_buf())
+                    .with_location(location),
+            );
+            return;
+        }
+    };
+
+    let modifier_keys: HashSet<&str> = ["jsonpath", "xpath", "caseSensitive", "except"]
+        .into_iter()
+        .collect();
+    let operator_keys: Vec<&String> = pred_obj
+        .keys()
+        .filter(|k| !modifier_keys.contains(k.as_str()))
+        .collect();
+
+    if operator_keys.is_empty() {
+        result.add_issue(
+            LintIssue::error("E008", "Predicate has no operator", file.to_path_buf())
+                .with_location(location)
+                .with_suggestion(format!("Add one of: {}", valid_operators.join(", "))),
+        );
+        return;
+    }
+
+    for operator in &operator_keys {
+        if !valid_operators.contains(&operator.as_str()) {
+            result.add_issue(
+                LintIssue::error(
+                    "E009",
+                    format!("Unknown predicate operator: {operator}"),
+                    file.to_path_buf(),
+                )
+                .with_location(location)
+                .with_suggestion(format!("Use one of: {}", valid_operators.join(", "))),
+            );
+        }
+    }
+
+    if let Some(jsonpath) = predicate.get("jsonpath") {
+        validate_jsonpath(file, jsonpath, location, result);
+    }
+
+    if let Some(matches) = predicate.get("matches") {
+        validate_regex_patterns(file, matches, location, result, options);
+    }
+
+    // Recursively validate nested predicates
+    for key in ["and", "or", "not"] {
+        if let Some(nested) = predicate.get(key) {
+            if key == "not" {
+                if let Some(nested_pred) = nested.as_object() {
+                    validate_predicate(
+                        file,
+                        &Value::Object(nested_pred.clone()),
+                        &format!("{location}.not"),
+                        result,
+                        options,
+                    );
+                }
+            } else if let Some(nested_array) = nested.as_array() {
+                for (i, nested_pred) in nested_array.iter().enumerate() {
+                    validate_predicate(
+                        file,
+                        nested_pred,
+                        &format!("{location}.{key}[{i}]"),
+                        result,
+                        options,
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Validate JSONPath selector.
+fn validate_jsonpath(file: &Path, jsonpath: &Value, location: &str, result: &mut LintResult) {
+    if let Some(selector) = jsonpath.get("selector").and_then(|v| v.as_str()) {
+        let slice_re = Regex::new(r"\[:(\d+)\]").unwrap();
+        if slice_re.is_match(selector) {
+            result.add_issue(
+                LintIssue::info(
+                    "I001",
+                    format!("JSONPath uses Mountebank slice notation: {selector}"),
+                    file.to_path_buf(),
+                )
+                .with_location(format!("{location}.jsonpath.selector"))
+                .with_suggestion("This is supported by Rift but not standard JSONPath"),
+            );
+        }
+
+        let open_brackets = selector.chars().filter(|c| *c == '[').count();
+        let close_brackets = selector.chars().filter(|c| *c == ']').count();
+        if open_brackets != close_brackets {
+            result.add_issue(
+                LintIssue::error(
+                    "E010",
+                    "Unbalanced brackets in JSONPath selector",
+                    file.to_path_buf(),
+                )
+                .with_location(format!("{location}.jsonpath.selector")),
+            );
+        }
+    } else {
+        result.add_issue(
+            LintIssue::error(
+                "E011",
+                "JSONPath missing 'selector' field",
+                file.to_path_buf(),
+            )
+            .with_location(format!("{location}.jsonpath")),
+        );
+    }
+}
+
+/// Validate regex patterns in matches predicate.
+fn validate_regex_patterns(
+    file: &Path,
+    matches: &Value,
+    location: &str,
+    result: &mut LintResult,
+    _options: &LintOptions,
+) {
+    if let Some(obj) = matches.as_object() {
+        for (field, pattern) in obj {
+            if let Some(pattern_str) = pattern.as_str() {
+                if let Err(e) = Regex::new(pattern_str) {
+                    result.add_issue(
+                        LintIssue::error(
+                            "E013",
+                            format!("Invalid regex pattern in '{field}': {e}"),
+                            file.to_path_buf(),
+                        )
+                        .with_location(format!("{location}.matches.{field}"))
+                        .with_suggestion("Check regex syntax"),
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Validate a response object.
+pub fn validate_response(
+    file: &Path,
+    response: &Value,
+    location: &str,
+    result: &mut LintResult,
+    options: &LintOptions,
+) {
+    let has_is = response.get("is").is_some();
+    let has_proxy = response
+        .get("proxy")
+        .map(|p| !p.is_null() && p.is_object() && p.get("to").is_some())
+        .unwrap_or(false);
+    let has_inject = response.get("inject").is_some();
+    let has_fault = response.get("fault").is_some();
+
+    let response_types = [has_is, has_proxy, has_inject, has_fault];
+    let active_types = response_types.iter().filter(|&&t| t).count();
+
+    if active_types == 0 {
+        result.add_issue(
+            LintIssue::error(
+                "E014",
+                "Response has no response type (is, proxy, inject, or fault)",
+                file.to_path_buf(),
+            )
+            .with_location(location)
+            .with_suggestion("Add 'is', 'proxy', 'inject', or 'fault' to define the response"),
+        );
+    } else if active_types > 1 && has_is && has_proxy {
+        let proxy_val = response.get("proxy");
+        if proxy_val.map(|p| !p.is_null()).unwrap_or(false) {
+            result.add_issue(
+                LintIssue::warning(
+                    "W003",
+                    "Response has both 'is' and 'proxy' defined",
+                    file.to_path_buf(),
+                )
+                .with_location(location)
+                .with_suggestion("Use either 'is' for static responses or 'proxy' for forwarding"),
+            );
+        }
+    }
+
+    if let Some(is_response) = response.get("is") {
+        validate_is_response(file, is_response, &format!("{location}.is"), result);
+    }
+
+    if let Some(proxy) = response.get("proxy") {
+        if !proxy.is_null() {
+            validate_proxy_response(file, proxy, &format!("{location}.proxy"), result);
+        }
+    }
+
+    if let Some(behaviors) = response.get("behaviors").and_then(|v| v.as_array()) {
+        for (idx, behavior) in behaviors.iter().enumerate() {
+            validate_behavior(
+                file,
+                behavior,
+                &format!("{location}.behaviors[{idx}]"),
+                result,
+                options,
+            );
+        }
+    }
+}
+
+/// Validate an "is" response.
+pub fn validate_is_response(
+    file: &Path,
+    is_response: &Value,
+    location: &str,
+    result: &mut LintResult,
+) {
+    if let Some(status) = is_response.get("statusCode") {
+        let status_num = status
+            .as_u64()
+            .or_else(|| status.as_str().and_then(|s| s.parse().ok()));
+
+        match status_num {
+            Some(code) if !(100..=599).contains(&code) => {
+                result.add_issue(
+                    LintIssue::error(
+                        "E015",
+                        format!("Invalid HTTP status code: {code}"),
+                        file.to_path_buf(),
+                    )
+                    .with_location(format!("{location}.statusCode"))
+                    .with_suggestion("Use a valid HTTP status code (100-599)"),
+                );
+            }
+            None => {
+                result.add_issue(
+                    LintIssue::error(
+                        "E016",
+                        "statusCode must be a number or numeric string",
+                        file.to_path_buf(),
+                    )
+                    .with_location(format!("{location}.statusCode")),
+                );
+            }
+            _ => {}
+        }
+    }
+
+    if let Some(headers) = is_response.get("headers") {
+        validate_headers(file, headers, &format!("{location}.headers"), result);
+    }
+
+    // Check if body is valid JSON when Content-Type is application/json
+    if let Some(body) = is_response.get("body") {
+        if let Some(headers) = is_response.get("headers").and_then(|h| h.as_object()) {
+            let content_type = headers
+                .iter()
+                .find(|(k, _)| k.to_lowercase() == "content-type")
+                .and_then(|(_, v)| v.as_str());
+
+            if content_type
+                .map(|ct| ct.contains("application/json"))
+                .unwrap_or(false)
+            {
+                if let Some(body_str) = body.as_str() {
+                    if serde_json::from_str::<Value>(body_str).is_err() {
+                        result.add_issue(
+                            LintIssue::warning(
+                                "W004",
+                                "Body is not valid JSON but Content-Type is application/json",
+                                file.to_path_buf(),
+                            )
+                            .with_location(format!("{location}.body"))
+                            .with_suggestion("Verify the body is valid JSON"),
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Validate response headers.
+pub fn validate_headers(file: &Path, headers: &Value, location: &str, result: &mut LintResult) {
+    let Some(headers_obj) = headers.as_object() else {
+        result.add_issue(
+            LintIssue::error("E021", "Headers must be an object", file.to_path_buf())
+                .with_location(location),
+        );
+        return;
+    };
+
+    for (name, value) in headers_obj {
+        if name.is_empty() {
+            result.add_issue(
+                LintIssue::error("E017", "Empty header name", file.to_path_buf())
+                    .with_location(location),
+            );
+        }
+
+        if value.is_array() {
+            result.add_issue(
+                LintIssue::error(
+                    "E018",
+                    format!("Header '{name}' value is an array, must be a string"),
+                    file.to_path_buf(),
+                )
+                .with_location(format!("{location}.{name}"))
+                .with_suggestion("Convert array to comma-separated string"),
+            );
+        } else if value.is_number() {
+            result.add_issue(
+                LintIssue::error(
+                    "E019",
+                    format!("Header '{name}' value is a number, must be a string"),
+                    file.to_path_buf(),
+                )
+                .with_location(format!("{location}.{name}"))
+                .with_suggestion(format!("Change to: \"{name}\": \"{}\"", value)),
+            );
+        } else if value.is_boolean() {
+            result.add_issue(
+                LintIssue::error(
+                    "E020",
+                    format!("Header '{name}' value is a boolean, must be a string"),
+                    file.to_path_buf(),
+                )
+                .with_location(format!("{location}.{name}"))
+                .with_suggestion(format!("Change to: \"{name}\": \"{}\"", value)),
+            );
+        } else if value.is_null() {
+            result.add_issue(
+                LintIssue::warning(
+                    "W005",
+                    format!("Header '{name}' value is null"),
+                    file.to_path_buf(),
+                )
+                .with_location(format!("{location}.{name}"))
+                .with_suggestion("Remove header or set a string value"),
+            );
+        }
+
+        if name.to_lowercase() == "content-length" {
+            if let Some(len_str) = value.as_str() {
+                if let Ok(len) = len_str.parse::<u64>() {
+                    if len < 10 {
+                        result.add_issue(
+                            LintIssue::warning(
+                                "W006",
+                                format!("Content-Length is very small ({len}), may cause issues"),
+                                file.to_path_buf(),
+                            )
+                            .with_location(format!("{location}.{name}"))
+                            .with_suggestion("Verify Content-Length matches actual body length"),
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Validate a proxy response.
+pub fn validate_proxy_response(
+    file: &Path,
+    proxy: &Value,
+    location: &str,
+    result: &mut LintResult,
+) {
+    if let Some(to) = proxy.get("to") {
+        if let Some(url) = to.as_str() {
+            if !url.starts_with("http://") && !url.starts_with("https://") {
+                result.add_issue(
+                    LintIssue::error(
+                        "E022",
+                        format!("Proxy 'to' URL must start with http:// or https://: {url}"),
+                        file.to_path_buf(),
+                    )
+                    .with_location(format!("{location}.to")),
+                );
+            }
+
+            if url.contains("localhost:") || url.contains("127.0.0.1:") {
+                let port_re = Regex::new(r":(\d+)").unwrap();
+                if let Some(captures) = port_re.captures(url) {
+                    if let Ok(port) = captures[1].parse::<u16>() {
+                        if port > 10000 {
+                            result.add_issue(
+                                LintIssue::info(
+                                    "I002",
+                                    format!("Proxy targets localhost:{port}"),
+                                    file.to_path_buf(),
+                                )
+                                .with_location(format!("{location}.to"))
+                                .with_suggestion("Ensure upstream service is running on this port"),
+                            );
+                        }
+                    }
+                }
+            }
+        } else {
+            result.add_issue(
+                LintIssue::error(
+                    "E023",
+                    "Proxy 'to' must be a string URL",
+                    file.to_path_buf(),
+                )
+                .with_location(format!("{location}.to")),
+            );
+        }
+    } else {
+        result.add_issue(
+            LintIssue::error(
+                "E024",
+                "Proxy missing required 'to' field",
+                file.to_path_buf(),
+            )
+            .with_location(location),
+        );
+    }
+
+    if let Some(mode) = proxy.get("mode").and_then(|v| v.as_str()) {
+        let valid_modes = ["proxyOnce", "proxyAlways", "proxyTransparent"];
+        if !valid_modes.contains(&mode) {
+            result.add_issue(
+                LintIssue::warning(
+                    "W007",
+                    format!("Unknown proxy mode: {mode}"),
+                    file.to_path_buf(),
+                )
+                .with_location(format!("{location}.mode"))
+                .with_suggestion(format!("Use one of: {}", valid_modes.join(", "))),
+            );
+        }
+    }
+}
+
+/// Validate a behavior.
+pub fn validate_behavior(
+    file: &Path,
+    behavior: &Value,
+    location: &str,
+    result: &mut LintResult,
+    options: &LintOptions,
+) {
+    let Some(obj) = behavior.as_object() else {
+        return;
+    };
+
+    if let Some(wait) = obj.get("wait") {
+        if let Some(script) = wait.as_str() {
+            validate_javascript_behavior(
+                file,
+                script,
+                &format!("{location}.wait"),
+                result,
+                options,
+            );
+        } else if !wait.is_number() {
+            result.add_issue(
+                LintIssue::error(
+                    "E025",
+                    "Wait behavior must be a number or JavaScript function string",
+                    file.to_path_buf(),
+                )
+                .with_location(format!("{location}.wait")),
+            );
+        }
+    }
+
+    if let Some(decorate) = obj.get("decorate") {
+        if let Some(script) = decorate.as_str() {
+            validate_javascript_behavior(
+                file,
+                script,
+                &format!("{location}.decorate"),
+                result,
+                options,
+            );
+        }
+    }
+
+    if let Some(shell) = obj.get("shellTransform") {
+        if let Some(cmd) = shell.as_str() {
+            let dangerous_patterns = ["rm ", "rm -", "sudo ", "chmod ", "dd ", "> /dev/"];
+            for pattern in dangerous_patterns {
+                if cmd.contains(pattern) {
+                    result.add_issue(
+                        LintIssue::warning(
+                            "W008",
+                            format!(
+                                "shellTransform contains potentially dangerous command: {pattern}"
+                            ),
+                            file.to_path_buf(),
+                        )
+                        .with_location(format!("{location}.shellTransform"))
+                        .with_suggestion("Review this command for safety"),
+                    );
+                }
+            }
+        }
+    }
+
+    if let Some(copy) = obj.get("copy") {
+        validate_copy_behavior(file, copy, &format!("{location}.copy"), result);
+    }
+
+    if let Some(lookup) = obj.get("lookup") {
+        validate_lookup_behavior(file, lookup, &format!("{location}.lookup"), result);
+    }
+}
+
+/// Validate JavaScript in a behavior.
+fn validate_javascript_behavior(
+    file: &Path,
+    script: &str,
+    location: &str,
+    result: &mut LintResult,
+    _options: &LintOptions,
+) {
+    let script_trimmed = script.trim();
+
+    if !script_trimmed.starts_with("function") && !script_trimmed.is_empty() {
+        result.add_issue(
+            LintIssue::warning(
+                "W009",
+                "JavaScript behavior should be a function expression",
+                file.to_path_buf(),
+            )
+            .with_location(location)
+            .with_suggestion("Wrap code in: function() { ... }"),
+        );
+    }
+
+    let open_braces = script.chars().filter(|c| *c == '{').count();
+    let close_braces = script.chars().filter(|c| *c == '}').count();
+    if open_braces != close_braces {
+        result.add_issue(
+            LintIssue::error(
+                "E026",
+                "Unbalanced braces in JavaScript",
+                file.to_path_buf(),
+            )
+            .with_location(location),
+        );
+    }
+
+    let open_parens = script.chars().filter(|c| *c == '(').count();
+    let close_parens = script.chars().filter(|c| *c == ')').count();
+    if open_parens != close_parens {
+        result.add_issue(
+            LintIssue::error(
+                "E027",
+                "Unbalanced parentheses in JavaScript",
+                file.to_path_buf(),
+            )
+            .with_location(location),
+        );
+    }
+
+    #[cfg(feature = "javascript")]
+    {
+        if let Err(e) = js_validator::validate_javascript(script) {
+            result.add_issue(
+                LintIssue::error(
+                    "E028",
+                    format!("JavaScript syntax error: {e}"),
+                    file.to_path_buf(),
+                )
+                .with_location(location),
+            );
+        }
+    }
+}
+
+/// Validate copy behavior.
+fn validate_copy_behavior(file: &Path, copy: &Value, location: &str, result: &mut LintResult) {
+    if let Some(arr) = copy.as_array() {
+        for (idx, item) in arr.iter().enumerate() {
+            if let Some(obj) = item.as_object() {
+                if obj.get("from").is_none() {
+                    result.add_issue(
+                        LintIssue::error(
+                            "E029",
+                            "Copy behavior item missing 'from' field",
+                            file.to_path_buf(),
+                        )
+                        .with_location(format!("{location}[{idx}]")),
+                    );
+                }
+                if obj.get("into").is_none() {
+                    result.add_issue(
+                        LintIssue::error(
+                            "E030",
+                            "Copy behavior item missing 'into' field",
+                            file.to_path_buf(),
+                        )
+                        .with_location(format!("{location}[{idx}]")),
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Validate lookup behavior.
+fn validate_lookup_behavior(file: &Path, lookup: &Value, location: &str, result: &mut LintResult) {
+    if let Some(obj) = lookup.as_object() {
+        if obj.get("key").is_none() {
+            result.add_issue(
+                LintIssue::error(
+                    "E031",
+                    "Lookup behavior missing 'key' field",
+                    file.to_path_buf(),
+                )
+                .with_location(location),
+            );
+        }
+        if obj.get("fromDataSource").is_none() {
+            result.add_issue(
+                LintIssue::error(
+                    "E032",
+                    "Lookup behavior missing 'fromDataSource' field",
+                    file.to_path_buf(),
+                )
+                .with_location(location),
+            );
+        }
+        if obj.get("into").is_none() {
+            result.add_issue(
+                LintIssue::error(
+                    "E033",
+                    "Lookup behavior missing 'into' field",
+                    file.to_path_buf(),
+                )
+                .with_location(location),
+            );
+        }
+    }
+}
