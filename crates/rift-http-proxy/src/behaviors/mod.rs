@@ -34,7 +34,7 @@ pub use extraction::{extract_jsonpath, extract_xpath, ExtractionMethod};
 pub use lookup::{
     apply_lookup_behaviors, CsvCache, CsvData, CsvDataSource, DataSource, LookupBehavior, LookupKey,
 };
-pub use request::RequestContext;
+pub use request::{header_to_title_case, RequestContext};
 pub use transform::{apply_decorate, apply_shell_transform};
 pub use types::ResponseBehaviors;
 #[allow(unused_imports)]

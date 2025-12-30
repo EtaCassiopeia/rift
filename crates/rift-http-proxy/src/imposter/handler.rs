@@ -8,7 +8,9 @@ use super::predicates::parse_query_string;
 use super::response::apply_js_or_rhai_decorate;
 use super::types::{DebugMatchResult, DebugRequest, DebugResponse, RecordedRequest, ResponseMode};
 use crate::admin_api::types::{build_response, build_response_with_headers};
-use crate::behaviors::{apply_copy_behaviors, RequestContext, ResponseBehaviors};
+use crate::behaviors::{
+    apply_copy_behaviors, header_to_title_case, RequestContext, ResponseBehaviors,
+};
 #[cfg(feature = "javascript")]
 use crate::scripting::{execute_mountebank_inject, MountebankRequest};
 use crate::scripting::{FaultDecision, ScriptEngine, ScriptRequest};
@@ -50,20 +52,10 @@ pub async fn handle_imposter_request(
         .headers()
         .iter()
         .map(|(k, v)| {
-            // Preserve original header case by capitalizing like Mountebank does
-            let key = k.as_str().to_string();
-            let capitalized_key = key
-                .split('-')
-                .map(|part| {
-                    let mut chars = part.chars();
-                    match chars.next() {
-                        None => String::new(),
-                        Some(c) => c.to_uppercase().chain(chars).collect(),
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join("-");
-            (capitalized_key, v.to_str().unwrap_or("").to_string())
+            (
+                header_to_title_case(k.as_str()),
+                v.to_str().unwrap_or("").to_string(),
+            )
         })
         .collect();
     let path = uri.path().to_string();

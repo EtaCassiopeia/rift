@@ -2,6 +2,21 @@
 
 use std::collections::HashMap;
 
+/// Convert a header name to title case (e.g., "content-type" -> "Content-Type").
+///
+/// This is used for Mountebank compatibility, which expects title-cased header names.
+pub fn header_to_title_case(name: &str) -> String {
+    let mut title_case = String::with_capacity(name.len());
+    for part in name.split_inclusive('-') {
+        let mut chars = part.chars();
+        if let Some(first_char) = chars.next() {
+            title_case.push(first_char.to_ascii_uppercase());
+        }
+        title_case.push_str(chars.as_str());
+    }
+    title_case
+}
+
 /// Request context for behavior processing
 #[derive(Debug, Clone, Default)]
 pub struct RequestContext {
@@ -35,18 +50,7 @@ impl RequestContext {
         let mut header_map = HashMap::new();
         for (name, value) in headers.iter() {
             if let Ok(v) = value.to_str() {
-                // Preserve header case for Mountebank compatibility
-                // Convert from hyper's lowercase to title case (e.g., "content-type" -> "Content-Type")
-                let name = name.as_str();
-                let mut title_case_name = String::with_capacity(name.len());
-                for part in name.split_inclusive('-') {
-                    let mut chars = part.chars();
-                    if let Some(first_char) = chars.next() {
-                        title_case_name.push(first_char.to_ascii_uppercase());
-                    }
-                    title_case_name.push_str(chars.as_str());
-                }
-                header_map.insert(title_case_name, v.to_string());
+                header_map.insert(header_to_title_case(name.as_str()), v.to_string());
             }
         }
 
