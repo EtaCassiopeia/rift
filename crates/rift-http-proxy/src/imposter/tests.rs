@@ -7,6 +7,7 @@
 //! - ImposterManager lifecycle
 
 use super::*;
+use crate::imposter::core::StubState;
 use std::collections::HashMap;
 
 #[test]
@@ -135,7 +136,7 @@ fn test_execute_stub() {
         scenario_name: None,
     };
 
-    let result = imposter.execute_stub(&stub, 0);
+    let result = imposter.execute_stub(&StubState::new(stub));
     assert!(result.is_some());
     let (status, _headers, body, _behaviors, is_fault) = result.unwrap();
     assert_eq!(status, 201);

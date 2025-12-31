@@ -27,7 +27,7 @@ mod wait;
 // Re-export main types for library consumers
 #[allow(unused_imports)]
 pub use copy::{apply_copy_behaviors, CopyBehavior, CopySource};
-pub use cycler::{HasRepeatBehavior, ResponseCycler};
+pub use cycler::{HasRepeatBehavior, ResponseCycler, RuleCycler};
 #[allow(unused_imports)]
 pub use extraction::{extract_jsonpath, extract_xpath, ExtractionMethod};
 #[allow(unused_imports)]

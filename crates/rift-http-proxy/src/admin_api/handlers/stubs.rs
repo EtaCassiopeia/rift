@@ -117,13 +117,7 @@ pub async fn handle_replace_all(
         Err(e) => return e.into(),
     };
 
-    {
-        let mut stubs = imposter.stubs.write();
-        stubs.clear();
-        for stub in replace_req.stubs {
-            stubs.push(stub);
-        }
-    }
+    imposter.replace_stubs(replace_req.stubs);
 
     handle_get_imposter(port, None, base_url, manager).await
 }
