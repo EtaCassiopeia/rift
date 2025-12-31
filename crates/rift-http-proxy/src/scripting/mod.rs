@@ -11,46 +11,49 @@ pub use rhai_engine::RhaiEngine;
 
 // Script pool for optimized execution
 mod script_pool;
-#[allow(unused_imports)]
 pub use script_pool::{CompiledScript, ScriptPool, ScriptPoolConfig};
 
 // Decision cache for memoization
 mod decision_cache;
-#[allow(unused_imports)]
 pub use decision_cache::{CacheKey, DecisionCache, DecisionCacheConfig};
 
 #[cfg(feature = "lua")]
 mod lua_engine;
 #[cfg(feature = "lua")]
-#[allow(unused_imports)]
 pub use lua_engine::{compile_to_bytecode, LuaEngine};
 
 #[cfg(feature = "javascript")]
 mod js_engine;
 #[cfg(feature = "javascript")]
-#[allow(unused_imports)]
 pub use js_engine::{
-    clear_imposter_state, compile_js_to_bytecode, execute_js_bytecode, execute_mountebank_decorate,
-    execute_mountebank_inject, JsEngine, MountebankDecorateResponse, MountebankInjectResponse,
-    MountebankRequest,
+    clear_imposter_state, compile_js_to_bytecode, execute_mountebank_decorate,
+    execute_mountebank_inject, JsEngine, MountebankRequest,
 };
+#[cfg(feature = "javascript")]
+#[expect(unused_imports, reason = "public API for library consumers")]
+pub use js_engine::{execute_js_bytecode, MountebankDecorateResponse, MountebankInjectResponse};
 
-// Validator modules (not actively used, kept for future tooling)
+// Validator modules - used by config validation and stub_validator
 mod rhai_validator;
-#[allow(dead_code, unused_imports)]
-pub use rhai_validator::{RhaiValidator, ValidationError};
+pub use rhai_validator::RhaiValidator;
+#[expect(unused_imports, reason = "public API for library consumers")]
+pub use rhai_validator::ValidationError;
 
 #[cfg(feature = "lua")]
 mod lua_validator;
 #[cfg(feature = "lua")]
-#[allow(dead_code, unused_imports)]
-pub use lua_validator::{LuaValidationError, LuaValidator};
+#[expect(unused_imports, reason = "public API for library consumers")]
+pub use lua_validator::LuaValidationError;
+#[cfg(feature = "lua")]
+pub use lua_validator::LuaValidator;
 
 #[cfg(feature = "javascript")]
 mod js_validator;
 #[cfg(feature = "javascript")]
-#[allow(dead_code, unused_imports)]
-pub use js_validator::{JsValidationError, JsValidator};
+#[expect(unused_imports, reason = "public API for library consumers")]
+pub use js_validator::JsValidationError;
+#[cfg(feature = "javascript")]
+pub use js_validator::JsValidator;
 
 // Stub script validation for Admin API
 mod stub_validator;
