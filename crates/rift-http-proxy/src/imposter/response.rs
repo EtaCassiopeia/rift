@@ -20,12 +20,7 @@ fn truncate_with_ellipsis(text: &str, max_len: usize) -> String {
         return text.to_string();
     }
 
-    // Find the last valid UTF-8 character boundary at or before max_len
-    let mut end = max_len;
-    while end > 0 && !text.is_char_boundary(end) {
-        end -= 1;
-    }
-
+    let end = text.floor_char_boundary(max_len);
     format!("{}...", &text[..end])
 }
 
@@ -377,35 +372,27 @@ mod tests {
     #[test]
     fn test_truncate_with_ellipsis_unicode_safe() {
         // "日本語" is 9 bytes (3 bytes per character)
-        // Truncating at byte 5 would be mid-character, should not panic
+        // Truncating at byte 5 would be mid-character
+        // floor_char_boundary(5) returns 3 (end of first char)
         let text = "日本語";
         assert_eq!(text.len(), 9);
-
-        // Should truncate to first character (3 bytes) since byte 5 is mid-character
-        let result = truncate_with_ellipsis(text, 5);
-        assert!(result.ends_with("..."));
-        // Should contain at least the first character
-        assert!(result.starts_with("日"));
+        assert_eq!(truncate_with_ellipsis(text, 5), "日...");
     }
 
     #[test]
     fn test_truncate_with_ellipsis_emoji() {
-        // Emoji can be 4 bytes
+        // Each emoji is 4 bytes
+        // floor_char_boundary(5) returns 4 (end of first emoji)
         let text = "👋🌍🎉";
-        // Truncating at byte 5 (mid-second emoji) should be safe
-        let result = truncate_with_ellipsis(text, 5);
-        assert!(result.ends_with("..."));
-        assert!(result.starts_with("👋"));
+        assert_eq!(truncate_with_ellipsis(text, 5), "👋...");
     }
 
     #[test]
     fn test_truncate_with_ellipsis_mixed_content() {
-        let text = "Hello 世界!";
         // "Hello " is 6 bytes, "世" is 3 bytes, "界" is 3 bytes, "!" is 1 byte = 13 bytes
-        let result = truncate_with_ellipsis(text, 8);
-        assert!(result.ends_with("..."));
-        // Should include "Hello " (6 bytes) + first CJK char boundary
-        assert!(result.starts_with("Hello "));
+        // floor_char_boundary(8) returns 6 (byte 8 is mid-character of "世")
+        let text = "Hello 世界!";
+        assert_eq!(truncate_with_ellipsis(text, 8), "Hello ...");
     }
 
     #[test]
