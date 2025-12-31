@@ -11,13 +11,17 @@ use super::types::{
     StubResponse,
 };
 
-/// Truncate a string with ellipsis if it exceeds the maximum length.
+/// Truncate a string with ellipsis if it exceeds the maximum byte length.
+///
+/// This function is unicode-safe and will not panic on multi-byte characters.
+/// It finds the nearest valid UTF-8 character boundary at or before `max_len`.
 fn truncate_with_ellipsis(text: &str, max_len: usize) -> String {
-    if text.len() > max_len {
-        format!("{}...", &text[..max_len])
-    } else {
-        text.to_string()
+    if text.len() <= max_len {
+        return text.to_string();
     }
+
+    let end = text.floor_char_boundary(max_len);
+    format!("{}...", &text[..end])
 }
 
 // Implement HasRepeatBehavior for StubResponse
@@ -343,5 +347,61 @@ pub fn apply_js_or_rhai_decorate(
     } else {
         // Assume it's Rhai script
         apply_decorate(script, request, body, status, headers)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_truncate_with_ellipsis_short_string() {
+        assert_eq!(truncate_with_ellipsis("hello", 10), "hello");
+    }
+
+    #[test]
+    fn test_truncate_with_ellipsis_exact_length() {
+        assert_eq!(truncate_with_ellipsis("hello", 5), "hello");
+    }
+
+    #[test]
+    fn test_truncate_with_ellipsis_long_string() {
+        assert_eq!(truncate_with_ellipsis("hello world", 5), "hello...");
+    }
+
+    #[test]
+    fn test_truncate_with_ellipsis_unicode_safe() {
+        // "日本語" is 9 bytes (3 bytes per character)
+        // Truncating at byte 5 would be mid-character
+        // floor_char_boundary(5) returns 3 (end of first char)
+        let text = "日本語";
+        assert_eq!(text.len(), 9);
+        assert_eq!(truncate_with_ellipsis(text, 5), "日...");
+    }
+
+    #[test]
+    fn test_truncate_with_ellipsis_emoji() {
+        // Each emoji is 4 bytes
+        // floor_char_boundary(5) returns 4 (end of first emoji)
+        let text = "👋🌍🎉";
+        assert_eq!(truncate_with_ellipsis(text, 5), "👋...");
+    }
+
+    #[test]
+    fn test_truncate_with_ellipsis_mixed_content() {
+        // "Hello " is 6 bytes, "世" is 3 bytes, "界" is 3 bytes, "!" is 1 byte = 13 bytes
+        // floor_char_boundary(8) returns 6 (byte 8 is mid-character of "世")
+        let text = "Hello 世界!";
+        assert_eq!(truncate_with_ellipsis(text, 8), "Hello ...");
+    }
+
+    #[test]
+    fn test_truncate_with_ellipsis_empty_string() {
+        assert_eq!(truncate_with_ellipsis("", 10), "");
+    }
+
+    #[test]
+    fn test_truncate_with_ellipsis_zero_max_len() {
+        assert_eq!(truncate_with_ellipsis("hello", 0), "...");
     }
 }
