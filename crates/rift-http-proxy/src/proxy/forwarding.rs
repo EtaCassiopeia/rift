@@ -4,6 +4,9 @@
 //! including support for recording (Mountebank-compatible).
 
 use super::client::HttpClient;
+use super::headers::{
+    RiftHeadersExt, VALUE_TRUE, X_RIFT_PROXIED, X_RIFT_RECORDED, X_RIFT_REPLAYED,
+};
 use crate::recording::{ProxyMode, RecordedResponse, RecordingStore, RequestSignature};
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full};
@@ -65,9 +68,7 @@ pub async fn forward_request_with_body(
                 }
             };
             let mut response = Response::from_parts(parts, Full::new(body_bytes));
-            response
-                .headers_mut()
-                .insert("x-rift-proxied", "true".parse().unwrap());
+            response.set_header(&X_RIFT_PROXIED, &VALUE_TRUE);
             response
         }
         Err(e) => {
@@ -110,9 +111,7 @@ pub async fn forward_request_streaming(
     match http_client.request(upstream_req).await {
         Ok(upstream_response) => {
             let (mut parts, body) = upstream_response.into_parts();
-            parts
-                .headers
-                .insert("x-rift-proxied", "true".parse().unwrap());
+            parts.set_header(&X_RIFT_PROXIED, &VALUE_TRUE);
             Response::from_parts(parts, BoxBody::new(body))
         }
         Err(e) => {
@@ -188,7 +187,7 @@ pub async fn forward_with_recording(
             }
 
             // Add replay indicator header
-            response = response.header("x-rift-replayed", "true");
+            response = response.header(X_RIFT_REPLAYED.clone(), VALUE_TRUE.clone());
 
             return response
                 .body(BoxBody::new(
@@ -254,9 +253,7 @@ pub async fn forward_with_recording(
 
     // Reconstruct response
     let mut response = Response::from_parts(parts, Full::new(response_body_bytes));
-    response
-        .headers_mut()
-        .insert("x-rift-recorded", "true".parse().unwrap());
+    response.set_header(&X_RIFT_RECORDED, &VALUE_TRUE);
 
     response.map(|b| BoxBody::new(b.map_err(|never: Infallible| match never {})))
 }
