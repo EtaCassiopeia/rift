@@ -20,6 +20,7 @@
 mod client;
 mod forwarding;
 mod handler;
+mod headers;
 mod network;
 mod server;
 mod tls;

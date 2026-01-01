@@ -7,6 +7,11 @@
 
 use super::client::HttpClient;
 use super::forwarding::{error_response, forward_request_with_body, forward_with_recording};
+use super::headers::{
+    RiftHeadersExt, VALUE_ERROR, VALUE_LATENCY, VALUE_TCP, VALUE_TRUE, X_RIFT_BEHAVIOR_COPY,
+    X_RIFT_BEHAVIOR_DECORATE, X_RIFT_BEHAVIOR_LOOKUP, X_RIFT_BEHAVIOR_SHELL, X_RIFT_BEHAVIOR_WAIT,
+    X_RIFT_FAULT, X_RIFT_LATENCY_MS, X_RIFT_RULE_ID, X_RIFT_SCRIPT, X_RIFT_TCP_FAULT,
+};
 use crate::behaviors::{
     apply_copy_behaviors, apply_decorate, apply_lookup_behaviors, apply_shell_transform, CsvCache,
     RequestContext,
@@ -359,15 +364,9 @@ async fn handle_script_result(
             let mut response =
                 create_error_response(status, body, fixed_headers.as_ref(), Some(&script_headers))
                     .unwrap();
-            response
-                .headers_mut()
-                .insert("x-rift-fault", "error".parse().unwrap());
-            response
-                .headers_mut()
-                .insert("x-rift-rule-id", rule_id.parse().unwrap());
-            response
-                .headers_mut()
-                .insert("x-rift-script", "true".parse().unwrap());
+            response.set_header(&X_RIFT_FAULT, &VALUE_ERROR);
+            response.set_header_value(&X_RIFT_RULE_ID, &rule_id);
+            response.set_header(&X_RIFT_SCRIPT, &VALUE_TRUE);
             response.map(|b| BoxBody::new(b.map_err(|never| match never {})))
         }
         Ok(ScriptFaultDecision::Latency {
@@ -402,19 +401,10 @@ async fn handle_script_result(
             metrics::record_proxy_duration(method.as_str(), total_duration, "script");
             metrics::record_request(method.as_str(), status);
 
-            response
-                .headers_mut()
-                .insert("x-rift-fault", "latency".parse().unwrap());
-            response
-                .headers_mut()
-                .insert("x-rift-rule-id", rule_id.parse().unwrap());
-            response
-                .headers_mut()
-                .insert("x-rift-script", "true".parse().unwrap());
-            response.headers_mut().insert(
-                "x-rift-latency-ms",
-                duration_ms.to_string().parse().unwrap(),
-            );
+            response.set_header(&X_RIFT_FAULT, &VALUE_LATENCY);
+            response.set_header_value(&X_RIFT_RULE_ID, &rule_id);
+            response.set_header(&X_RIFT_SCRIPT, &VALUE_TRUE);
+            response.set_header_value(&X_RIFT_LATENCY_MS, &duration_ms.to_string());
             response.map(|b| BoxBody::new(b.map_err(|never| match never {})))
         }
         Ok(ScriptFaultDecision::None) => {
@@ -508,16 +498,9 @@ async fn handle_yaml_rule(
             };
 
             let mut response = create_error_response(status, body, None, None).unwrap();
-            response
-                .headers_mut()
-                .insert("x-rift-fault", "tcp".parse().unwrap());
-            response
-                .headers_mut()
-                .insert("x-rift-rule-id", rule_id.parse().unwrap());
-            response.headers_mut().insert(
-                "x-rift-tcp-fault",
-                format!("{fault_type:?}").to_lowercase().parse().unwrap(),
-            );
+            response.set_header(&X_RIFT_FAULT, &VALUE_TCP);
+            response.set_header_value(&X_RIFT_RULE_ID, &rule_id);
+            response.set_header_value(&X_RIFT_TCP_FAULT, &format!("{fault_type:?}").to_lowercase());
             RuleHandlingResult::Response(
                 response.map(|b| BoxBody::new(b.map_err(|never| match never {}))),
             )
@@ -634,39 +617,25 @@ async fn handle_yaml_rule(
             let mut response =
                 create_error_response(final_status, processed_body, Some(&response_headers), None)
                     .unwrap();
-            response
-                .headers_mut()
-                .insert("x-rift-fault", "error".parse().unwrap());
-            response
-                .headers_mut()
-                .insert("x-rift-rule-id", rule_id.parse().unwrap());
+            response.set_header(&X_RIFT_FAULT, &VALUE_ERROR);
+            response.set_header_value(&X_RIFT_RULE_ID, &rule_id);
 
             // Add behavior headers for debugging/testing
             if let Some(ref bhvs) = behaviors {
                 if bhvs.wait.is_some() {
-                    response
-                        .headers_mut()
-                        .insert("x-rift-behavior-wait", "true".parse().unwrap());
+                    response.set_header(&X_RIFT_BEHAVIOR_WAIT, &VALUE_TRUE);
                 }
                 if !bhvs.copy.is_empty() {
-                    response
-                        .headers_mut()
-                        .insert("x-rift-behavior-copy", "true".parse().unwrap());
+                    response.set_header(&X_RIFT_BEHAVIOR_COPY, &VALUE_TRUE);
                 }
                 if !bhvs.lookup.is_empty() {
-                    response
-                        .headers_mut()
-                        .insert("x-rift-behavior-lookup", "true".parse().unwrap());
+                    response.set_header(&X_RIFT_BEHAVIOR_LOOKUP, &VALUE_TRUE);
                 }
                 if bhvs.shell_transform.is_some() {
-                    response
-                        .headers_mut()
-                        .insert("x-rift-behavior-shell", "true".parse().unwrap());
+                    response.set_header(&X_RIFT_BEHAVIOR_SHELL, &VALUE_TRUE);
                 }
                 if bhvs.decorate.is_some() {
-                    response
-                        .headers_mut()
-                        .insert("x-rift-behavior-decorate", "true".parse().unwrap());
+                    response.set_header(&X_RIFT_BEHAVIOR_DECORATE, &VALUE_TRUE);
                 }
             }
 
@@ -694,12 +663,8 @@ async fn handle_yaml_rule(
                 Err(e) => {
                     error!("Failed to collect request body: {}", e);
                     let mut response = error_response(500, "Failed to read request body");
-                    response
-                        .headers_mut()
-                        .insert("x-rift-fault", "latency".parse().unwrap());
-                    response
-                        .headers_mut()
-                        .insert("x-rift-rule-id", rule_id.parse().unwrap());
+                    response.set_header(&X_RIFT_FAULT, &VALUE_LATENCY);
+                    response.set_header_value(&X_RIFT_RULE_ID, &rule_id);
                     return RuleHandlingResult::Response(
                         response.map(|b| BoxBody::new(b.map_err(|never| match never {}))),
                     );
@@ -722,16 +687,9 @@ async fn handle_yaml_rule(
             metrics::record_proxy_duration(method.as_str(), total_duration, "latency");
             metrics::record_request(method.as_str(), status);
 
-            response
-                .headers_mut()
-                .insert("x-rift-fault", "latency".parse().unwrap());
-            response
-                .headers_mut()
-                .insert("x-rift-rule-id", rule_id.parse().unwrap());
-            response.headers_mut().insert(
-                "x-rift-latency-ms",
-                duration_ms.to_string().parse().unwrap(),
-            );
+            response.set_header(&X_RIFT_FAULT, &VALUE_LATENCY);
+            response.set_header_value(&X_RIFT_RULE_ID, &rule_id);
+            response.set_header_value(&X_RIFT_LATENCY_MS, &duration_ms.to_string());
             RuleHandlingResult::Response(
                 response.map(|b| BoxBody::new(b.map_err(|never| match never {}))),
             )
