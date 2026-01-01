@@ -3522,6 +3522,7 @@ dependencies = [
  "dirs",
  "ratatui",
  "reqwest",
+ "rift-lint",
  "serde",
  "serde_json",
  "thiserror 1.0.69",

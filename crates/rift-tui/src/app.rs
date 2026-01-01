@@ -5,6 +5,7 @@ use crate::api::{
 };
 use crate::components::{EditorAction, TextEditor};
 use crate::theme::Theme;
+use crate::validation::{validate_imposter_json, validate_stub_json, ValidationReport};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::ListState;
 use std::collections::{HashMap, VecDeque};
@@ -51,6 +52,19 @@ pub enum Overlay {
     Success {
         message: String,
     },
+    ValidationResult {
+        report: ValidationReport,
+        action: ValidationAction,
+    },
+}
+
+/// Actions to take after viewing validation results
+#[derive(Debug, Clone, PartialEq)]
+pub enum ValidationAction {
+    /// Import a file despite warnings
+    ProceedWithImport { path: String, content: String },
+    /// Editor validation - just informational
+    EditorInfo,
 }
 
 /// File-related actions
@@ -132,6 +146,7 @@ pub enum FocusArea {
 pub struct StubEditor {
     pub editor: TextEditor,
     pub validation_error: Option<String>,
+    pub validation_report: Option<ValidationReport>,
     pub original_json: String,
 }
 
@@ -148,20 +163,34 @@ impl StubEditor {
         Self {
             editor,
             validation_error: None,
+            validation_report: None,
             original_json: json.to_string(),
         }
     }
 
-    /// Validate the JSON content
+    /// Validate the JSON content using rift-lint
     pub fn validate(&mut self) -> bool {
         let content = self.editor.content();
+
+        // First check if it's valid JSON that can be parsed as a Stub
         match serde_json::from_str::<Stub>(&content) {
             Ok(_) => {
-                self.validation_error = None;
-                true
+                // Valid JSON, now run lint validation
+                let report = validate_stub_json(&content);
+                let is_valid = !report.has_errors();
+
+                if report.has_issues() {
+                    self.validation_error = Some(report.summary());
+                } else {
+                    self.validation_error = None;
+                }
+                self.validation_report = Some(report);
+
+                is_valid
             }
             Err(e) => {
                 self.validation_error = Some(format!("Invalid JSON: {}", e));
+                self.validation_report = None;
                 false
             }
         }
@@ -180,6 +209,7 @@ impl StubEditor {
             if let Ok(formatted) = serde_json::to_string_pretty(&v) {
                 self.editor.set_content(&formatted);
                 self.validation_error = None;
+                self.validation_report = None;
             }
         }
     }
@@ -251,6 +281,7 @@ pub struct App {
     pub stub_editor: Option<StubEditor>,
     pub input_state: InputState,
     pub export_scroll_offset: u16,
+    pub validation_scroll_offset: u16,
     pub help_scroll: u16,
     pub help_max_scroll: u16,
 
@@ -298,6 +329,7 @@ impl App {
                 ..Default::default()
             },
             export_scroll_offset: 0,
+            validation_scroll_offset: 0,
             help_scroll: 0,
             help_max_scroll: 0,
 
@@ -1407,48 +1439,78 @@ impl App {
         };
     }
 
-    /// Import imposter from file
+    /// Import imposter from file with validation
     pub async fn import_from_file(&mut self, path: &str) {
         self.is_loading = true;
         let expanded_path = Self::expand_path(path);
 
         match std::fs::read_to_string(&expanded_path) {
-            Ok(content) => match serde_json::from_str::<serde_json::Value>(&content) {
-                Ok(config) => {
-                    let url = format!("{}/imposters", self.client.base_url());
-                    let resp = self.client.client().post(url).json(&config).send().await;
+            Ok(content) => {
+                // Validate the content before importing
+                let report = validate_imposter_json(&content, &expanded_path);
 
-                    match resp {
-                        Ok(r) if r.status().is_success() => {
-                            self.set_status(
-                                format!("Imported from {}", expanded_path),
-                                StatusLevel::Success,
-                            );
-                            self.overlay = Overlay::None;
-                            self.refresh().await;
-                        }
-                        Ok(r) => {
-                            let body = r.text().await.unwrap_or_default();
-                            self.set_status(
-                                format!("Failed to import: {}", body),
-                                StatusLevel::Error,
-                            );
-                        }
-                        Err(e) => {
-                            self.set_status(format!("Failed to import: {}", e), StatusLevel::Error);
-                        }
-                    }
+                if report.has_errors() {
+                    // Block import on errors - show validation results
+                    self.validation_scroll_offset = 0;
+                    self.overlay = Overlay::ValidationResult {
+                        report,
+                        action: ValidationAction::EditorInfo, // Can't proceed with errors
+                    };
+                    self.is_loading = false;
+                    return;
                 }
-                Err(e) => {
-                    self.set_status(format!("Invalid JSON: {}", e), StatusLevel::Error);
+
+                if report.has_warnings() {
+                    // Show warnings but allow proceeding
+                    self.validation_scroll_offset = 0;
+                    self.overlay = Overlay::ValidationResult {
+                        report,
+                        action: ValidationAction::ProceedWithImport {
+                            path: expanded_path.clone(),
+                            content: content.clone(),
+                        },
+                    };
+                    self.is_loading = false;
+                    return;
                 }
-            },
+
+                // No issues - proceed with import
+                self.do_import(&content).await;
+            }
             Err(e) => {
                 self.set_status(format!("Failed to read file: {}", e), StatusLevel::Error);
             }
         }
 
         self.is_loading = false;
+    }
+
+    /// Actually perform the import (called after validation passes or user confirms)
+    pub async fn do_import(&mut self, content: &str) {
+        match serde_json::from_str::<serde_json::Value>(content) {
+            Ok(config) => {
+                let url = format!("{}/imposters", self.client.base_url());
+                let resp = self.client.client().post(url).json(&config).send().await;
+
+                match resp {
+                    Ok(r) if r.status().is_success() => {
+                        self.set_status("Import successful".to_string(), StatusLevel::Success);
+                        self.overlay = Overlay::None;
+                        self.refresh().await;
+                    }
+                    Ok(r) => {
+                        let body = r.text().await.unwrap_or_default();
+                        self.set_status(format!("Failed to import: {}", body), StatusLevel::Error);
+                    }
+                    Err(e) => {
+                        self.set_status(format!("Failed to import: {}", e), StatusLevel::Error);
+                    }
+                }
+            }
+            Err(e) => {
+                self.set_status(format!("Invalid JSON: {}", e), StatusLevel::Error);
+            }
+        }
     }
 
     /// Import imposters from folder
@@ -1736,6 +1798,31 @@ impl App {
         self.go_back();
     }
 
+    /// Show validation results for the current editor content
+    pub fn show_editor_validation(&mut self) {
+        if let Some(editor) = &self.stub_editor {
+            if let Some(report) = &editor.validation_report {
+                if report.has_issues() {
+                    self.validation_scroll_offset = 0;
+                    self.overlay = Overlay::ValidationResult {
+                        report: report.clone(),
+                        action: ValidationAction::EditorInfo,
+                    };
+                } else {
+                    self.set_status(
+                        "No validation issues found".to_string(),
+                        StatusLevel::Success,
+                    );
+                }
+            } else {
+                self.set_status(
+                    "Run validation first (edit the content)".to_string(),
+                    StatusLevel::Info,
+                );
+            }
+        }
+    }
+
     /// Confirm delete stub
     pub fn confirm_delete_stub(&mut self) {
         if let View::ImposterDetail { port } = self.view {
@@ -1926,6 +2013,11 @@ impl App {
                 self.overlay = Overlay::None;
                 return;
             }
+            Overlay::ValidationResult { action, .. } => {
+                self.handle_validation_overlay_event(key, action.clone())
+                    .await;
+                return;
+            }
             Overlay::None => {}
         }
 
@@ -2052,6 +2144,11 @@ impl App {
                     if let Some(editor) = &mut self.stub_editor {
                         editor.format();
                     }
+                    return;
+                }
+                KeyCode::Char('l') => {
+                    // Show full lint validation results
+                    self.show_editor_validation();
                     return;
                 }
                 _ => {}
@@ -2296,6 +2393,45 @@ impl App {
                 self.input_state.cursor_pos += 1;
             }
             _ => {}
+        }
+    }
+
+    /// Handle validation result overlay events
+    async fn handle_validation_overlay_event(&mut self, key: KeyEvent, action: ValidationAction) {
+        if let Overlay::ValidationResult { report, .. } = &self.overlay {
+            let total_issues = report.issues.len() as u16;
+            match key.code {
+                KeyCode::Esc => {
+                    self.overlay = Overlay::None;
+                    self.validation_scroll_offset = 0;
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.validation_scroll_offset = self.validation_scroll_offset.saturating_sub(1);
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    let max_scroll = total_issues.saturating_sub(5);
+                    self.validation_scroll_offset =
+                        (self.validation_scroll_offset + 1).min(max_scroll);
+                }
+                KeyCode::PageUp => {
+                    self.validation_scroll_offset = self.validation_scroll_offset.saturating_sub(5);
+                }
+                KeyCode::PageDown => {
+                    let max_scroll = total_issues.saturating_sub(5);
+                    self.validation_scroll_offset =
+                        (self.validation_scroll_offset + 5).min(max_scroll);
+                }
+                KeyCode::Enter => {
+                    // Only allow proceeding if action supports it
+                    if let ValidationAction::ProceedWithImport { content, .. } = &action {
+                        let content = content.clone();
+                        self.overlay = Overlay::None;
+                        self.validation_scroll_offset = 0;
+                        self.do_import(&content).await;
+                    }
+                }
+                _ => {}
+            }
         }
     }
 

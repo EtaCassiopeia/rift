@@ -63,6 +63,9 @@ pub fn draw(frame: &mut Frame, app: &App) {
         ),
         Overlay::FilePathInput { prompt, .. } => dialogs::draw_file_path_input(frame, app, prompt),
         Overlay::Success { message } => dialogs::draw_success(frame, message),
+        Overlay::ValidationResult { report, action } => {
+            dialogs::draw_validation_result(frame, report, action, app.validation_scroll_offset)
+        }
         Overlay::None => {}
     }
 }
@@ -233,6 +236,7 @@ fn get_commands(view: &View) -> (Vec<Command>, Option<Vec<Command>>) {
             vec![
                 ("^S", "Save"),
                 ("^F", "Format"),
+                ("^L", "Lint"),
                 ("^A", "SelAll"),
                 ("^C", "Copy"),
                 ("^X", "Cut"),

@@ -46,6 +46,9 @@ clap = { version = "4", features = ["derive", "env"] }
 anyhow = "1.0"
 thiserror = "1.0"
 
+# Validation
+rift-lint = { path = "../rift-lint", default-features = false }
+
 [[bin]]
 name = "rift-tui"
 path = "src/main.rs"

@@ -31,6 +31,7 @@ pub mod components;
 pub mod event;
 pub mod theme;
 pub mod ui;
+pub mod validation;
 
 pub use app::App;
 pub use event::{Event, EventHandler};

@@ -1,6 +1,7 @@
 //! Modal dialogs using tui-popup and tui-prompts for a cleaner implementation
 
-use crate::app::{App, InputAction};
+use crate::app::{App, InputAction, ValidationAction};
+use crate::validation::{IssueSeverity, ValidationReport};
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -543,4 +544,143 @@ pub fn draw_file_path_input(frame: &mut Frame, app: &App, prompt: &str) {
 
     let help_paragraph = Paragraph::new(help).alignment(Alignment::Center);
     frame.render_widget(help_paragraph, chunks[5]);
+}
+
+/// Draw a validation results popup
+pub fn draw_validation_result(
+    frame: &mut Frame,
+    report: &ValidationReport,
+    action: &ValidationAction,
+    scroll_offset: u16,
+) {
+    let area = super::centered_rect(75, 70, frame.area());
+
+    // Clear the background
+    frame.render_widget(Clear, area);
+
+    // Determine border color based on severity
+    let border_color = if report.has_errors() {
+        Color::Red
+    } else if report.has_warnings() {
+        Color::Yellow
+    } else {
+        Color::Green
+    };
+
+    // Title with summary
+    let title = format!(" Validation Results: {} ", report.summary());
+
+    let block = Block::default()
+        .title(title)
+        .title_alignment(Alignment::Center)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(border_color))
+        .style(Style::default().bg(Color::Black));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    // Split for issues list and help
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(5),    // Issues list
+            Constraint::Length(2), // Help
+        ])
+        .split(inner);
+
+    // Build lines for each issue
+    let mut lines: Vec<Line> = Vec::new();
+
+    for issue in &report.issues {
+        // Severity indicator
+        let (severity_style, severity_icon) = match issue.severity {
+            IssueSeverity::Error => (
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                "ERROR",
+            ),
+            IssueSeverity::Warning => (
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+                "WARN ",
+            ),
+            IssueSeverity::Info => (Style::default().fg(Color::Cyan), "INFO "),
+        };
+
+        // Issue header: [E001] Error message
+        lines.push(Line::from(vec![
+            Span::styled(format!("[{}] ", issue.code), severity_style),
+            Span::styled(severity_icon, severity_style),
+            Span::raw(" "),
+            Span::styled(&issue.message, Style::default().fg(Color::White)),
+        ]));
+
+        // Location if available
+        if let Some(location) = &issue.location {
+            lines.push(Line::from(vec![
+                Span::raw("       "),
+                Span::styled("at: ", Style::default().fg(Color::DarkGray)),
+                Span::styled(location, Style::default().fg(Color::Gray)),
+            ]));
+        }
+
+        // Suggestion if available
+        if let Some(suggestion) = &issue.suggestion {
+            lines.push(Line::from(vec![
+                Span::raw("       "),
+                Span::styled("fix: ", Style::default().fg(Color::Green)),
+                Span::styled(suggestion, Style::default().fg(Color::Gray)),
+            ]));
+        }
+
+        // Blank line between issues
+        lines.push(Line::from(""));
+    }
+
+    let total_lines = lines.len() as u16;
+
+    let issues_paragraph = Paragraph::new(lines)
+        .style(Style::default().fg(Color::White))
+        .scroll((scroll_offset, 0))
+        .wrap(Wrap { trim: false });
+    frame.render_widget(issues_paragraph, chunks[0]);
+
+    // Scrollbar if needed
+    if total_lines > chunks[0].height {
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(Some("↑"))
+            .end_symbol(Some("↓"));
+        let mut scrollbar_state =
+            ScrollbarState::new(total_lines as usize).position(scroll_offset as usize);
+        frame.render_stateful_widget(
+            scrollbar,
+            chunks[0].inner(ratatui::layout::Margin {
+                vertical: 1,
+                horizontal: 0,
+            }),
+            &mut scrollbar_state,
+        );
+    }
+
+    // Help text - different based on action
+    let help = match action {
+        ValidationAction::ProceedWithImport { .. } => Line::from(vec![
+            Span::styled("[Enter]", Style::default().fg(Color::Green).bold()),
+            Span::raw(" Proceed anyway  "),
+            Span::styled("[↑/↓]", Style::default().fg(Color::Cyan).bold()),
+            Span::raw(" Scroll  "),
+            Span::styled("[Esc]", Style::default().fg(Color::Red).bold()),
+            Span::raw(" Cancel"),
+        ]),
+        ValidationAction::EditorInfo => Line::from(vec![
+            Span::styled("[↑/↓]", Style::default().fg(Color::Cyan).bold()),
+            Span::raw(" Scroll  "),
+            Span::styled("[Esc]", Style::default().fg(Color::Red).bold()),
+            Span::raw(" Close"),
+        ]),
+    };
+
+    let help_paragraph = Paragraph::new(help).alignment(Alignment::Center);
+    frame.render_widget(help_paragraph, chunks[1]);
 }
