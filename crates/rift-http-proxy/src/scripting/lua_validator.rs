@@ -1,13 +1,18 @@
+use super::validator::{ScriptValidationError, ScriptValidator};
 use mlua::Lua;
 use std::error::Error;
 use std::fmt;
 
+/// Lua script validation error.
 #[derive(Debug, Clone)]
-
 pub enum LuaValidationError {
+    /// Script contains syntax errors
     SyntaxError(String),
+    /// Script is missing a return statement
     MissingReturnStatement(String),
+    /// Script failed to compile
     CompilationError(String),
+    /// Script failed to load
     LoadError(String),
 }
 
@@ -26,24 +31,58 @@ impl fmt::Display for LuaValidationError {
 
 impl Error for LuaValidationError {}
 
+impl From<LuaValidationError> for ScriptValidationError {
+    fn from(err: LuaValidationError) -> Self {
+        match err {
+            LuaValidationError::SyntaxError(msg) => ScriptValidationError::SyntaxError {
+                engine: "lua".to_string(),
+                message: msg,
+            },
+            LuaValidationError::MissingReturnStatement(msg) => ScriptValidationError::SyntaxError {
+                engine: "lua".to_string(),
+                message: format!("Missing return statement: {msg}"),
+            },
+            LuaValidationError::CompilationError(msg) => ScriptValidationError::CompilationError {
+                engine: "lua".to_string(),
+                message: msg,
+            },
+            LuaValidationError::LoadError(msg) => ScriptValidationError::LoadError {
+                engine: "lua".to_string(),
+                message: msg,
+            },
+        }
+    }
+}
+
+/// Validator for Lua scripts.
 pub struct LuaValidator {
     lua: Lua,
 }
 
 impl LuaValidator {
+    /// Creates a new Lua validator.
     pub fn new() -> Self {
         Self { lua: Lua::new() }
     }
+}
 
-    /// Validates a Lua script for use with Rift proxy
+impl Default for LuaValidator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ScriptValidator for LuaValidator {
+    type Error = LuaValidationError;
+
+    /// Validates a Lua script for use with Rift proxy.
     ///
-    /// Checks:
+    /// # Checks performed
     /// 1. Script compiles without syntax errors
     /// 2. Script can be loaded as a chunk
-    /// 3. Script contains a return statement (expected structure)
     ///
-    /// Note: This validates syntax only - runtime behavior depends on request/flow_store context
-    pub fn validate(&self, script: &str) -> Result<(), LuaValidationError> {
+    /// Note: This validates syntax only - runtime behavior depends on request/flow_store context.
+    fn validate(&self, script: &str) -> Result<(), Self::Error> {
         // Try to compile (load and parse) - this catches syntax errors
         match self.lua.load(script).eval::<mlua::Value>() {
             Ok(_) => {
@@ -66,23 +105,6 @@ impl LuaValidator {
             }
         }
     }
-
-    /// Validate multiple scripts and return all errors
-    pub fn validate_batch<'a>(
-        &self,
-        scripts: &[(&'a str, &str)],
-    ) -> Vec<(&'a str, Result<(), LuaValidationError>)> {
-        scripts
-            .iter()
-            .map(|(id, script)| (*id, self.validate(script)))
-            .collect()
-    }
-}
-
-impl Default for LuaValidator {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 #[cfg(test)]
@@ -97,7 +119,7 @@ mod tests {
             if flow_id == nil then
                 return { inject = false }
             end
-            
+
             local count = flow_store:increment(flow_id, "count")
             if count > 5 then
                 return {
@@ -107,7 +129,7 @@ mod tests {
                     body = "Too many requests"
                 }
             end
-            
+
             return { inject = false }
         "#;
 
@@ -126,11 +148,7 @@ mod tests {
 
         let result = validator.validate(script);
         assert!(result.is_err());
-        if let Err(LuaValidationError::SyntaxError(_)) = result {
-            // Expected
-        } else {
-            panic!("Expected SyntaxError, got: {result:?}");
-        }
+        assert!(matches!(result, Err(LuaValidationError::SyntaxError(_))));
     }
 
     #[test]
@@ -142,10 +160,10 @@ mod tests {
             if flow_id == nil then
                 return { inject = false }
             end
-            
+
             local failures = flow_store:increment(flow_id, "failures")
             flow_store:set_ttl(flow_id, 300)
-            
+
             if failures > 3 then
                 return {
                     inject = true,
@@ -154,7 +172,7 @@ mod tests {
                     body = "Circuit breaker open"
                 }
             end
-            
+
             return { inject = false }
         "#;
 
@@ -198,5 +216,16 @@ mod tests {
 
         let result = validator.validate(script);
         assert!(result.is_ok(), "Latency fault script should be valid");
+    }
+
+    #[test]
+    fn test_error_conversion() {
+        let lua_err = LuaValidationError::SyntaxError("unexpected token".to_string());
+        let unified_err: ScriptValidationError = lua_err.into();
+
+        assert!(matches!(
+            unified_err,
+            ScriptValidationError::SyntaxError { engine, .. } if engine == "lua"
+        ));
     }
 }

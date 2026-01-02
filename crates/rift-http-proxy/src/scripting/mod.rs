@@ -33,11 +33,17 @@ pub use js_engine::{
 #[expect(unused_imports, reason = "public API for library consumers")]
 pub use js_engine::{execute_js_bytecode, MountebankDecorateResponse, MountebankInjectResponse};
 
+// Validator trait and unified error types
+mod validator;
+#[expect(unused_imports, reason = "public API for library consumers")]
+pub use validator::ScriptValidationError;
+pub use validator::ScriptValidator;
+
 // Validator modules - used by config validation and stub_validator
 mod rhai_validator;
-pub use rhai_validator::RhaiValidator;
 #[expect(unused_imports, reason = "public API for library consumers")]
-pub use rhai_validator::ValidationError;
+pub use rhai_validator::RhaiValidationError;
+pub use rhai_validator::RhaiValidator;
 
 #[cfg(feature = "lua")]
 mod lua_validator;

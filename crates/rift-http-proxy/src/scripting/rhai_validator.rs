@@ -1,83 +1,112 @@
+use super::validator::{ScriptValidationError, ScriptValidator};
 use rhai::{Engine, AST};
 use std::error::Error;
 use std::fmt;
 
+/// Rhai script validation error.
 #[derive(Debug, Clone)]
-
-pub enum ValidationError {
+pub enum RhaiValidationError {
+    /// Script contains syntax errors
     SyntaxError(String),
+    /// Required function is missing from the script
     MissingFunction(String),
+    /// Function signature is invalid
     InvalidSignature(String),
+    /// Script failed to compile
     CompilationError(String),
 }
 
-impl fmt::Display for ValidationError {
+impl fmt::Display for RhaiValidationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ValidationError::SyntaxError(msg) => write!(f, "Syntax error: {msg}"),
-            ValidationError::MissingFunction(func) => {
+            RhaiValidationError::SyntaxError(msg) => write!(f, "Syntax error: {msg}"),
+            RhaiValidationError::MissingFunction(func) => {
                 write!(f, "Missing required function: {func}")
             }
-            ValidationError::InvalidSignature(msg) => {
+            RhaiValidationError::InvalidSignature(msg) => {
                 write!(f, "Invalid function signature: {msg}")
             }
-            ValidationError::CompilationError(msg) => write!(f, "Compilation error: {msg}"),
+            RhaiValidationError::CompilationError(msg) => write!(f, "Compilation error: {msg}"),
         }
     }
 }
 
-impl Error for ValidationError {}
+impl Error for RhaiValidationError {}
 
+impl From<RhaiValidationError> for ScriptValidationError {
+    fn from(err: RhaiValidationError) -> Self {
+        match err {
+            RhaiValidationError::SyntaxError(msg) => ScriptValidationError::SyntaxError {
+                engine: "rhai".to_string(),
+                message: msg,
+            },
+            RhaiValidationError::MissingFunction(func) => ScriptValidationError::MissingFunction {
+                engine: "rhai".to_string(),
+                function: func,
+            },
+            RhaiValidationError::InvalidSignature(msg) => ScriptValidationError::CompilationError {
+                engine: "rhai".to_string(),
+                message: msg,
+            },
+            RhaiValidationError::CompilationError(msg) => ScriptValidationError::CompilationError {
+                engine: "rhai".to_string(),
+                message: msg,
+            },
+        }
+    }
+}
+
+/// Validator for Rhai scripts.
 pub struct RhaiValidator {
     engine: Engine,
 }
 
 impl RhaiValidator {
+    /// Creates a new Rhai validator.
     pub fn new() -> Self {
         let engine = Engine::new();
         Self { engine }
     }
 
-    /// Validates a Rhai script for use with Rift proxy
+    /// Validates a Rhai script and returns the compiled AST on success.
     ///
-    /// Checks:
+    /// This method is useful when you need both validation and the AST
+    /// for subsequent operations.
+    ///
+    /// # Checks performed
     /// 1. Script compiles without syntax errors
-    /// 2. Basic structural validity (contains function definition)
+    /// 2. Script contains the required `should_inject` function
     ///
-    /// Note: This does NOT validate runtime behavior - only syntax.
-    /// The actual should_inject function must be verified at runtime.
-    pub fn validate(&self, script: &str) -> Result<AST, ValidationError> {
+    /// Note: This does NOT validate runtime behavior - only syntax and structure.
+    pub fn validate_with_ast(&self, script: &str) -> Result<AST, RhaiValidationError> {
         // Compile the script - this catches syntax errors
         let ast = self
             .engine
             .compile(script)
-            .map_err(|e| ValidationError::SyntaxError(e.to_string()))?;
+            .map_err(|e| RhaiValidationError::SyntaxError(e.to_string()))?;
 
         // Basic check: script should contain "should_inject"
         if !script.contains("should_inject") {
-            return Err(ValidationError::MissingFunction(
+            return Err(RhaiValidationError::MissingFunction(
                 "should_inject function not found in script".to_string(),
             ));
         }
 
         Ok(ast)
     }
-
-    /// Validate multiple scripts and return all errors
-    pub fn validate_batch<'a>(
-        &self,
-        scripts: &[(&'a str, &str)],
-    ) -> Vec<(&'a str, Result<AST, ValidationError>)> {
-        scripts
-            .iter()
-            .map(|(id, script)| (*id, self.validate(script)))
-            .collect()
-    }
 }
 
 impl Default for RhaiValidator {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl ScriptValidator for RhaiValidator {
+    type Error = RhaiValidationError;
+
+    fn validate(&self, script: &str) -> Result<(), Self::Error> {
+        self.validate_with_ast(script).map(|_| ())
     }
 }
 
@@ -109,11 +138,7 @@ mod tests {
 
         let result = validator.validate(script);
         assert!(result.is_err());
-        if let Err(ValidationError::SyntaxError(_)) = result {
-            // Expected
-        } else {
-            panic!("Expected SyntaxError");
-        }
+        assert!(matches!(result, Err(RhaiValidationError::SyntaxError(_))));
     }
 
     #[test]
@@ -127,11 +152,10 @@ mod tests {
 
         let result = validator.validate(script);
         assert!(result.is_err());
-        if let Err(ValidationError::MissingFunction(_)) = result {
-            // Expected - error message will contain "should_inject"
-        } else {
-            panic!("Expected MissingFunction error");
-        }
+        assert!(matches!(
+            result,
+            Err(RhaiValidationError::MissingFunction(_))
+        ));
     }
 
     #[test]
@@ -143,7 +167,7 @@ mod tests {
                 if path.contains("/api/") {
                     let flow_id = request.headers["x-flow-id"];
                     let attempts = flow_store.increment(flow_id, "attempts");
-                    
+
                     if attempts <= 2 {
                         return #{ inject: true, fault: "error", status: 503 };
                     }
@@ -177,5 +201,30 @@ mod tests {
         assert!(results[0].1.is_ok(), "script1 should be valid");
         assert!(results[1].1.is_err(), "script2 should be invalid");
         assert!(results[2].1.is_ok(), "script3 should be valid");
+    }
+
+    #[test]
+    fn test_validate_with_ast() {
+        let validator = RhaiValidator::new();
+        let script = r#"
+            fn should_inject(request, flow_store) {
+                return #{ inject: false };
+            }
+        "#;
+
+        let result = validator.validate_with_ast(script);
+        assert!(result.is_ok(), "Should return AST for valid script");
+        assert!(result.unwrap().source().is_none()); // AST exists but has no source name
+    }
+
+    #[test]
+    fn test_error_conversion() {
+        let rhai_err = RhaiValidationError::SyntaxError("test error".to_string());
+        let unified_err: ScriptValidationError = rhai_err.into();
+
+        assert!(matches!(
+            unified_err,
+            ScriptValidationError::SyntaxError { engine, .. } if engine == "rhai"
+        ));
     }
 }

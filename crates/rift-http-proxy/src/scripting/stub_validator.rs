@@ -4,6 +4,7 @@
 //! ensuring syntax errors and missing functions are caught at configuration time
 //! rather than at request time.
 
+use super::validator::ScriptValidator;
 use crate::imposter::{Stub, StubResponse};
 use std::fmt;
 
@@ -140,7 +141,7 @@ fn validate_response(
     }
 }
 
-/// Validates a Rift script (_rift.script)
+/// Validates a Rift script (_rift.script) using the appropriate validator
 fn validate_rift_script(
     engine: &str,
     code: &str,
@@ -148,9 +149,21 @@ fn validate_rift_script(
     response_index: usize,
 ) -> Option<StubValidationError> {
     match engine {
-        "rhai" => validate_rhai_script(code, stub_id, response_index),
+        "rhai" => validate_with_validator(
+            &super::RhaiValidator::new(),
+            code,
+            "rhai",
+            stub_id,
+            response_index,
+        ),
         #[cfg(feature = "lua")]
-        "lua" => validate_lua_script(code, stub_id, response_index),
+        "lua" => validate_with_validator(
+            &super::LuaValidator::new(),
+            code,
+            "lua",
+            stub_id,
+            response_index,
+        ),
         #[cfg(not(feature = "lua"))]
         "lua" => Some(StubValidationError {
             stub_id: stub_id.to_string(),
@@ -159,7 +172,13 @@ fn validate_rift_script(
             message: "Lua engine is not enabled (requires 'lua' feature)".to_string(),
         }),
         #[cfg(feature = "javascript")]
-        "javascript" | "js" => validate_js_rift_script(code, stub_id, response_index),
+        "javascript" | "js" => validate_with_validator(
+            &super::JsValidator::new(),
+            code,
+            "javascript",
+            stub_id,
+            response_index,
+        ),
         #[cfg(not(feature = "javascript"))]
         "javascript" | "js" => Some(StubValidationError {
             stub_id: stub_id.to_string(),
@@ -176,60 +195,20 @@ fn validate_rift_script(
     }
 }
 
-/// Validates a Rhai script
-fn validate_rhai_script(
+/// Generic validation using the ScriptValidator trait
+fn validate_with_validator<V: ScriptValidator>(
+    validator: &V,
     code: &str,
+    engine: &str,
     stub_id: &str,
     response_index: usize,
 ) -> Option<StubValidationError> {
-    use super::RhaiValidator;
-
-    match RhaiValidator::new().validate(code) {
-        Ok(_) => None,
+    match validator.validate(code) {
+        Ok(()) => None,
         Err(e) => Some(StubValidationError {
             stub_id: stub_id.to_string(),
             response_index,
-            engine: "rhai".to_string(),
-            message: e.to_string(),
-        }),
-    }
-}
-
-/// Validates a Lua script
-#[cfg(feature = "lua")]
-fn validate_lua_script(
-    code: &str,
-    stub_id: &str,
-    response_index: usize,
-) -> Option<StubValidationError> {
-    use super::LuaValidator;
-
-    match LuaValidator::new().validate(code) {
-        Ok(_) => None,
-        Err(e) => Some(StubValidationError {
-            stub_id: stub_id.to_string(),
-            response_index,
-            engine: "lua".to_string(),
-            message: e.to_string(),
-        }),
-    }
-}
-
-/// Validates a JavaScript Rift script (should_inject function)
-#[cfg(feature = "javascript")]
-fn validate_js_rift_script(
-    code: &str,
-    stub_id: &str,
-    response_index: usize,
-) -> Option<StubValidationError> {
-    use super::JsValidator;
-
-    match JsValidator::validate(code) {
-        Ok(_) => None,
-        Err(e) => Some(StubValidationError {
-            stub_id: stub_id.to_string(),
-            response_index,
-            engine: "javascript".to_string(),
+            engine: engine.to_string(),
             message: e.to_string(),
         }),
     }

@@ -158,7 +158,7 @@ impl Config {
         for script_rule in &self.script_rules {
             match engine_type {
                 "rhai" => {
-                    use crate::scripting::RhaiValidator;
+                    use crate::scripting::{RhaiValidator, ScriptValidator};
                     RhaiValidator::new()
                         .validate(&script_rule.script)
                         .map_err(|e| {
@@ -171,7 +171,7 @@ impl Config {
                 }
                 #[cfg(feature = "lua")]
                 "lua" => {
-                    use crate::scripting::LuaValidator;
+                    use crate::scripting::{LuaValidator, ScriptValidator};
                     LuaValidator::new()
                         .validate(&script_rule.script)
                         .map_err(|e| {
@@ -188,14 +188,16 @@ impl Config {
                 }
                 #[cfg(feature = "javascript")]
                 "javascript" | "js" => {
-                    use crate::scripting::JsValidator;
-                    JsValidator::validate(&script_rule.script).map_err(|e| {
-                        anyhow::anyhow!(
-                            "Invalid JavaScript script in rule '{}': {}",
-                            script_rule.id,
-                            e
-                        )
-                    })?;
+                    use crate::scripting::{JsValidator, ScriptValidator};
+                    JsValidator::new()
+                        .validate(&script_rule.script)
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "Invalid JavaScript script in rule '{}': {}",
+                                script_rule.id,
+                                e
+                            )
+                        })?;
                 }
                 #[cfg(not(feature = "javascript"))]
                 "javascript" | "js" => {
