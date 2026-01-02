@@ -341,6 +341,130 @@ Request to `/users/1` returns `{ "name": "Alice", "email": "alice@example.com" }
 
 ---
 
+## repeat
+
+Control how many times a response is returned before cycling to the next response.
+
+### Basic Repeat
+
+```json
+{
+  "responses": [
+    {
+      "is": { "statusCode": 200, "body": "First response" },
+      "_behaviors": { "repeat": 3 }
+    },
+    {
+      "is": { "statusCode": 200, "body": "Second response" }
+    }
+  ]
+}
+```
+
+The first response is returned 3 times before advancing to the second:
+- Requests 1-3 → "First response"
+- Request 4 → "Second response"
+- Requests 5-7 → "First response" (cycles back)
+- Request 8 → "Second response"
+
+### Per-Response Repeat
+
+Each response can have its own repeat count:
+
+```json
+{
+  "responses": [
+    {
+      "is": { "statusCode": 200, "body": "Success" },
+      "_behaviors": { "repeat": 5 }
+    },
+    {
+      "is": { "statusCode": 500, "body": "Error" },
+      "_behaviors": { "repeat": 2 }
+    }
+  ]
+}
+```
+
+Returns "Success" 5 times, then "Error" 2 times, then cycles.
+
+### Use Cases
+
+**Simulating rate limiting:**
+```json
+{
+  "responses": [
+    {
+      "is": { "statusCode": 200, "body": "OK" },
+      "_behaviors": { "repeat": 10 }
+    },
+    {
+      "is": {
+        "statusCode": 429,
+        "headers": { "Retry-After": "60" },
+        "body": "Rate limited"
+      }
+    }
+  ]
+}
+```
+
+Allows 10 requests, then returns 429, then cycles.
+
+**Simulating quota exhaustion:**
+```json
+{
+  "responses": [
+    {
+      "is": { "body": { "remaining": 100 } },
+      "_behaviors": { "repeat": 50 }
+    },
+    {
+      "is": { "body": { "remaining": 50 } },
+      "_behaviors": { "repeat": 50 }
+    },
+    {
+      "is": { "statusCode": 403, "body": "Quota exceeded" }
+    }
+  ]
+}
+```
+
+**Testing retry logic with eventual success:**
+```json
+{
+  "responses": [
+    {
+      "is": { "statusCode": 503, "body": "Service unavailable" },
+      "_behaviors": { "repeat": 2 }
+    },
+    {
+      "is": { "statusCode": 200, "body": "Success after retries" }
+    }
+  ]
+}
+```
+
+Fails twice, then succeeds - perfect for testing retry mechanisms.
+
+### Without Repeat
+
+Responses without `repeat` default to 1 - they are returned once before advancing:
+
+```json
+{
+  "responses": [
+    { "is": { "body": "First" } },
+    { "is": { "body": "Second" } },
+    { "is": { "body": "Third" } }
+  ]
+}
+```
+
+Each response is returned once in sequence (standard cycling).
+
+---
+
 ## Behavior Order
 
 When multiple behaviors are defined, they execute in this order:
