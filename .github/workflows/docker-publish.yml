@@ -5,6 +5,12 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      tag:
+        description: 'Tag to use for Docker images (e.g., v0.1.0)'
+        required: true
+        type: string
 
 env:
   REGISTRY_DOCKERHUB: docker.io
@@ -54,17 +60,21 @@ jobs:
           images: |
             ${{ env.REGISTRY_DOCKERHUB }}/${{ secrets.DOCKERHUB_USERNAME }}/rift-proxy
             ${{ env.REGISTRY_GHCR }}/${{ github.repository_owner }}/rift-proxy
+          # Override ref when called via workflow_call to enable semver tag extraction
           tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
+            type=semver,pattern={{version}},value=${{ inputs.tag }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ inputs.tag }}
+            type=semver,pattern={{major}},value=${{ inputs.tag }}
             type=raw,value=latest
 
       - name: Determine version and build date
         id: vars
         shell: bash
         run: |
-          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+          if [[ -n "${{ inputs.tag }}" ]]; then
+            # Called via workflow_call with explicit tag
+            echo "VERSION=${{ inputs.tag }}" >> $GITHUB_OUTPUT
+          elif [[ "${GITHUB_REF}" == refs/tags/* ]]; then
             echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
           else
             echo "VERSION=edge" >> $GITHUB_OUTPUT
@@ -140,17 +150,21 @@ jobs:
           images: |
             ${{ env.REGISTRY_DOCKERHUB }}/${{ secrets.DOCKERHUB_USERNAME }}/rift-lint
             ${{ env.REGISTRY_GHCR }}/${{ github.repository_owner }}/rift-lint
+          # Override ref when called via workflow_call to enable semver tag extraction
           tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
+            type=semver,pattern={{version}},value=${{ inputs.tag }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ inputs.tag }}
+            type=semver,pattern={{major}},value=${{ inputs.tag }}
             type=raw,value=latest
 
       - name: Determine version and build date
         id: vars
         shell: bash
         run: |
-          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+          if [[ -n "${{ inputs.tag }}" ]]; then
+            # Called via workflow_call with explicit tag
+            echo "VERSION=${{ inputs.tag }}" >> $GITHUB_OUTPUT
+          elif [[ "${GITHUB_REF}" == refs/tags/* ]]; then
             echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
           else
             echo "VERSION=edge" >> $GITHUB_OUTPUT
