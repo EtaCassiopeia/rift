@@ -16,12 +16,14 @@
 //! - `client` - HTTP client creation and configuration
 //! - `tls` - TLS utilities and certificate handling
 //! - `network` - Network listener utilities (SO_REUSEPORT)
+//! - `response_ext` - Response extension traits for body transformations
 
 mod client;
 mod forwarding;
 mod handler;
 mod headers;
 mod network;
+mod response_ext;
 mod server;
 mod tls;
 
