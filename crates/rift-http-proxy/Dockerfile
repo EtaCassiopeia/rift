@@ -64,9 +64,6 @@ RUN apt-get update && \
 # Copy binary from builder
 COPY --from=builder /build/target/release/rift-http-proxy /usr/local/bin/rift
 
-# Create symlink for 'mb' compatibility
-RUN ln -s /usr/local/bin/rift /usr/local/bin/mb
-
 # OCI labels and metadata
 ARG VERSION=dev
 ARG VCS_REF=unknown

@@ -190,11 +190,6 @@ jobs:
           cp rift-http-proxy "$ARCHIVE_NAME/bin/${{ env.BINARY_NAME }}"
           chmod +x "$ARCHIVE_NAME/bin/${{ env.BINARY_NAME }}"
 
-          # Create mb symlink for Mountebank compatibility
-          cd "$ARCHIVE_NAME/bin"
-          ln -s ${{ env.BINARY_NAME }} mb
-          cd ../..
-
           # Copy additional binaries
           cp rift-lint "$ARCHIVE_NAME/bin/rift-lint"
           chmod +x "$ARCHIVE_NAME/bin/rift-lint"
@@ -228,9 +223,6 @@ jobs:
 
           # Copy main binary (rift-http-proxy as 'rift.exe')
           Copy-Item "rift-http-proxy.exe" "$ARCHIVE_NAME/bin/${{ env.BINARY_NAME }}.exe"
-
-          # Copy as mb.exe for Mountebank compatibility
-          Copy-Item "rift-http-proxy.exe" "$ARCHIVE_NAME/bin/mb.exe"
 
           # Copy additional binaries
           Copy-Item "rift-lint.exe" "$ARCHIVE_NAME/bin/rift-lint.exe"
@@ -392,7 +384,7 @@ jobs:
           ### Included Binaries
 
           Each release archive includes all Rift tools:
-          - `rift` / `mb` - HTTP proxy server (Mountebank-compatible)
+          - `rift` - HTTP proxy server (Mountebank-compatible)
           - `rift-lint` - Imposter configuration validator
           - `rift-tui` - Terminal UI for managing imposters
 
@@ -434,13 +426,9 @@ jobs:
 
           ### Mountebank Compatibility
 
-          Rift includes an `mb` symlink/executable for drop-in Mountebank compatibility:
+          Rift is API-compatible with Mountebank:
           ```bash
-          # Use rift directly
           rift --port 2525
-
-          # Or use the mb alias
-          mb --port 2525
           ```
 
           ### Documentation

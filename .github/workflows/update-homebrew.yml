@@ -121,7 +121,6 @@ jobs:
 
             def install
               bin.install "bin/rift"
-              bin.install "bin/mb"
               bin.install "bin/rift-lint"
               bin.install "bin/rift-tui"
             end
@@ -130,7 +129,6 @@ jobs:
               <<~EOS
                 Rift has been installed with the following binaries:
                   - rift: Main HTTP proxy server (Mountebank-compatible)
-                  - mb: Alias for rift (Mountebank compatibility)
                   - rift-lint: Imposter configuration validator
                   - rift-tui: Terminal UI for managing imposters
 
