@@ -4,12 +4,14 @@
 //! Also supports requestFrom, ip, and form fields.
 
 use crate::behaviors::{extract_jsonpath, extract_xpath};
+use crate::imposter::types::{Predicate, PredicateOperation, PredicateSelector};
 use std::collections::HashMap;
+use tracing::warn;
 
 /// Check if a stub matches a request based on its predicates
 #[allow(clippy::too_many_arguments)]
 pub fn stub_matches(
-    predicates: &[serde_json::Value],
+    predicates: &[Predicate],
     method: &str,
     path: &str,
     query: Option<&str>,
@@ -61,7 +63,7 @@ pub fn parse_query(query: Option<&str>) -> HashMap<String, String> {
 /// Also supports requestFrom, ip, and form fields
 #[allow(clippy::too_many_arguments)]
 pub fn predicate_matches(
-    predicate: &serde_json::Value,
+    predicate: &Predicate,
     method: &str,
     path: &str,
     query: Option<&str>,
@@ -71,24 +73,16 @@ pub fn predicate_matches(
     client_ip: Option<&str>,
     form: Option<&HashMap<String, String>>,
 ) -> bool {
-    let obj = match predicate.as_object() {
-        Some(o) => o,
-        None => return true,
-    };
-
     // Get predicate options
-    let case_sensitive = obj
-        .get("caseSensitive")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+    let case_sensitive = predicate.parameters.case_sensitive.unwrap_or(false);
 
     // Get keyCaseSensitive option (defaults to caseSensitive value if not specified)
-    let key_case_sensitive = obj
-        .get("keyCaseSensitive")
-        .and_then(|v| v.as_bool())
+    let key_case_sensitive = predicate
+        .parameters
+        .key_case_sensitive
         .unwrap_or(case_sensitive);
 
-    let except_pattern = obj.get("except").and_then(|v| v.as_str());
+    let except_pattern = Some(predicate.parameters.except.as_str()).filter(|s| !s.is_empty());
 
     // Helper to apply except pattern
     let apply_except = |value: &str| -> String {
@@ -139,120 +133,61 @@ pub fn predicate_matches(
 
     // Handle jsonpath parameter - extract value from JSON body
     let extracted_body: String;
-    let effective_body = if let Some(jsonpath) = obj.get("jsonpath") {
-        if let Some(selector) = jsonpath.get("selector").and_then(|s| s.as_str()) {
+    let effective_body = match &predicate.parameters.selector {
+        Some(PredicateSelector::JsonPath { selector }) => {
             extracted_body = extract_jsonpath(body_str, selector).unwrap_or_default();
             &extracted_body
-        } else {
-            body_str
         }
-    // Handle xpath parameter - extract value from XML body
-    } else if let Some(xpath) = obj.get("xpath") {
-        if let Some(selector) = xpath.get("selector").and_then(|s| s.as_str()) {
+        Some(PredicateSelector::XPath {
+            selector,
+            namespaces,
+        }) => {
             extracted_body = extract_xpath(body_str, selector).unwrap_or_default();
+            if namespaces.is_some() {
+                warn!("XPath namespaces are not supported yet");
+            }
             &extracted_body
-        } else {
-            body_str
         }
-    } else {
-        body_str
+        None => body_str,
     };
 
-    // Handle logical "not" operator
-    if let Some(not_pred) = obj.get("not") {
-        return !predicate_matches(
-            not_pred,
-            method,
-            path,
-            query,
-            headers,
-            body,
-            request_from,
-            client_ip,
-            form,
-        );
-    }
-
-    // Handle logical "or" operator
-    if let Some(or_preds) = obj.get("or").and_then(|v| v.as_array()) {
-        return or_preds.iter().any(|p| {
-            predicate_matches(
-                p,
+    match &predicate.operation {
+        PredicateOperation::Equals(fields) => {
+            check_predicate_fields(
+                fields,
                 method,
                 path,
-                query,
+                &query_map,
                 headers,
-                body,
+                effective_body,
+                &apply_except,
+                str_equals,
+                false, // not deep equals
                 request_from,
                 client_ip,
                 form,
+                key_case_sensitive,
             )
-        });
-    }
-
-    // Handle logical "and" operator
-    if let Some(and_preds) = obj.get("and").and_then(|v| v.as_array()) {
-        return and_preds.iter().all(|p| {
-            predicate_matches(
-                p,
+        }
+        PredicateOperation::DeepEquals(fields) => {
+            check_predicate_fields(
+                fields,
                 method,
                 path,
-                query,
+                &query_map,
                 headers,
-                body,
+                effective_body,
+                &apply_except,
+                str_equals,
+                true, // deep equals
                 request_from,
                 client_ip,
                 form,
+                key_case_sensitive,
             )
-        });
-    }
-
-    // Handle "equals" predicate (subset matching for objects)
-    if let Some(equals) = obj.get("equals") {
-        if !check_predicate_fields(
-            equals,
-            method,
-            path,
-            &query_map,
-            headers,
-            effective_body,
-            &apply_except,
-            str_equals,
-            false, // not deep equals
-            request_from,
-            client_ip,
-            form,
-            key_case_sensitive,
-        ) {
-            return false;
         }
-    }
-
-    // Handle "deepEquals" predicate (exact matching)
-    if let Some(deep_equals) = obj.get("deepEquals") {
-        if !check_predicate_fields(
-            deep_equals,
-            method,
-            path,
-            &query_map,
-            headers,
-            effective_body,
-            &apply_except,
-            str_equals,
-            true, // deep equals
-            request_from,
-            client_ip,
-            form,
-            key_case_sensitive,
-        ) {
-            return false;
-        }
-    }
-
-    // Handle "contains" predicate
-    if let Some(contains) = obj.get("contains") {
-        if !check_predicate_fields(
-            contains,
+        PredicateOperation::Contains(fields) => check_predicate_fields(
+            fields,
             method,
             path,
             &query_map,
@@ -265,15 +200,9 @@ pub fn predicate_matches(
             client_ip,
             form,
             key_case_sensitive,
-        ) {
-            return false;
-        }
-    }
-
-    // Handle "startsWith" predicate
-    if let Some(starts_with) = obj.get("startsWith") {
-        if !check_predicate_fields(
-            starts_with,
+        ),
+        PredicateOperation::StartsWith(fields) => check_predicate_fields(
+            fields,
             method,
             path,
             &query_map,
@@ -286,15 +215,9 @@ pub fn predicate_matches(
             client_ip,
             form,
             key_case_sensitive,
-        ) {
-            return false;
-        }
-    }
-
-    // Handle "endsWith" predicate
-    if let Some(ends_with) = obj.get("endsWith") {
-        if !check_predicate_fields(
-            ends_with,
+        ),
+        PredicateOperation::EndsWith(fields) => check_predicate_fields(
+            fields,
             method,
             path,
             &query_map,
@@ -307,15 +230,9 @@ pub fn predicate_matches(
             client_ip,
             form,
             key_case_sensitive,
-        ) {
-            return false;
-        }
-    }
-
-    // Handle "matches" predicate (regex)
-    if let Some(matches) = obj.get("matches") {
-        if !check_predicate_fields_regex(
-            matches,
+        ),
+        PredicateOperation::Matches(fields) => check_predicate_fields_regex(
+            fields,
             method,
             path,
             &query_map,
@@ -327,26 +244,55 @@ pub fn predicate_matches(
             client_ip,
             form,
             key_case_sensitive,
-        ) {
-            return false;
+        ),
+        PredicateOperation::Exists(fields) => {
+            check_exists_predicate(fields, &query_map, headers, effective_body, form)
         }
+        PredicateOperation::Not(inner) => !predicate_matches(
+            inner,
+            method,
+            path,
+            query,
+            headers,
+            body,
+            request_from,
+            client_ip,
+            form,
+        ),
+        PredicateOperation::Or(children) => children.iter().any(|p| {
+            predicate_matches(
+                p,
+                method,
+                path,
+                query,
+                headers,
+                body,
+                request_from,
+                client_ip,
+                form,
+            )
+        }),
+        PredicateOperation::And(children) => children.iter().all(|p| {
+            predicate_matches(
+                p,
+                method,
+                path,
+                query,
+                headers,
+                body,
+                request_from,
+                client_ip,
+                form,
+            )
+        }),
     }
-
-    // Handle "exists" predicate
-    if let Some(exists) = obj.get("exists") {
-        if !check_exists_predicate(exists, &query_map, headers, effective_body, form) {
-            return false;
-        }
-    }
-
-    true
 }
 
 /// Check predicate fields against request values
 /// Supports: method, path, body, query, headers, requestFrom, ip, form
 #[allow(clippy::too_many_arguments)]
 fn check_predicate_fields<F>(
-    predicate_value: &serde_json::Value,
+    obj: &HashMap<String, serde_json::Value>,
     method: &str,
     path: &str,
     query: &HashMap<String, String>,
@@ -363,11 +309,6 @@ fn check_predicate_fields<F>(
 where
     F: Fn(&str, &str) -> bool,
 {
-    let obj = match predicate_value.as_object() {
-        Some(o) => o,
-        None => return true,
-    };
-
     // Helper for key comparison based on keyCaseSensitive
     let key_matches = |expected_key: &str, actual_key: &str| -> bool {
         if key_case_sensitive {
@@ -527,7 +468,7 @@ where
 /// Supports: method, path, body, query, headers, requestFrom, ip, form
 #[allow(clippy::too_many_arguments)]
 fn check_predicate_fields_regex(
-    predicate_value: &serde_json::Value,
+    obj: &HashMap<String, serde_json::Value>,
     method: &str,
     path: &str,
     query: &HashMap<String, String>,
@@ -540,11 +481,6 @@ fn check_predicate_fields_regex(
     form: Option<&HashMap<String, String>>,
     key_case_sensitive: bool,
 ) -> bool {
-    let obj = match predicate_value.as_object() {
-        Some(o) => o,
-        None => return true,
-    };
-
     let build_regex = |pattern: &str| -> Option<regex::Regex> {
         if case_sensitive {
             regex::Regex::new(pattern).ok()
@@ -699,17 +635,12 @@ fn check_predicate_fields_regex(
 /// Check exists predicate - verifies field presence or absence
 /// Supports: body, query, headers, form
 fn check_exists_predicate(
-    predicate_value: &serde_json::Value,
+    obj: &HashMap<String, serde_json::Value>,
     query: &HashMap<String, String>,
     headers: &HashMap<String, String>,
     body: &str,
     form: Option<&HashMap<String, String>>,
 ) -> bool {
-    let obj = match predicate_value.as_object() {
-        Some(o) => o,
-        None => return true,
-    };
-
     // Check body exists
     if let Some(should_exist) = obj.get("body").and_then(|v| v.as_bool()) {
         let exists = !body.is_empty();

@@ -72,7 +72,7 @@ pub struct DebugMatchResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stub_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub predicates: Option<Vec<serde_json::Value>>,
+    pub predicates: Option<Vec<Predicate>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response_preview: Option<DebugResponsePreview>,
     /// All stubs for inspection when no match found
@@ -104,7 +104,7 @@ pub struct DebugStubInfo {
     pub index: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
-    pub predicates: Vec<serde_json::Value>,
+    pub predicates: Vec<Predicate>,
     pub response_count: usize,
 }
 
@@ -126,8 +126,59 @@ pub struct Stub {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     #[serde(default)]
-    pub predicates: Vec<serde_json::Value>,
+    pub predicates: Vec<Predicate>,
     pub responses: Vec<StubResponse>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Predicate {
+    #[serde(flatten)]
+    pub parameters: PredicateParameters,
+    #[serde(flatten)]
+    pub operation: PredicateOperation,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PredicateOperation {
+    Equals(HashMap<String, serde_json::Value>),
+    DeepEquals(HashMap<String, serde_json::Value>),
+    Contains(HashMap<String, serde_json::Value>),
+    StartsWith(HashMap<String, serde_json::Value>),
+    EndsWith(HashMap<String, serde_json::Value>),
+    Matches(HashMap<String, serde_json::Value>),
+    Exists(HashMap<String, serde_json::Value>),
+    Not(Box<Predicate>),
+    Or(Vec<Predicate>),
+    And(Vec<Predicate>),
+    // TODO: "inject" predicate operation is missing
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PredicateParameters {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub case_sensitive: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_case_sensitive: Option<bool>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub except: String,
+    #[serde(flatten)]
+    pub selector: Option<PredicateSelector>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PredicateSelector {
+    XPath {
+        selector: String,
+        #[serde(rename = "ns", default, skip_serializing_if = "Option::is_none")]
+        namespaces: Option<HashMap<String, String>>,
+    },
+    JsonPath {
+        selector: String,
+    },
 }
 
 /// Response within a stub - wrapper type that handles various formats

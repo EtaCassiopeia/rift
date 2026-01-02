@@ -205,15 +205,29 @@ pub fn validate_predicate(
         }
     };
 
-    let modifier_keys: HashSet<&str> = ["jsonpath", "xpath", "caseSensitive", "except"]
-        .into_iter()
-        .collect();
-    let operator_keys: Vec<&String> = pred_obj
+    let modifier_keys: HashSet<&str> =
+        HashSet::from(["jsonpath", "xpath", "caseSensitive", "except"]);
+    let operator_names: Vec<&str> = pred_obj
         .keys()
-        .filter(|k| !modifier_keys.contains(k.as_str()))
+        .map(|k| k.as_str())
+        .filter(|&k| !modifier_keys.contains(k))
+        .filter(|&k| {
+            let is_valid_op = valid_operators.contains(&k);
+            if !is_valid_op {
+                result.add_issue(
+                    LintIssue::error(
+                        "E009",
+                        format!("Unknown predicate operator: {k}"),
+                        file.to_path_buf(),
+                    )
+                    .with_location(location)
+                    .with_suggestion(format!("Use one of: {}", valid_operators.join(", "))),
+                );
+            }
+            is_valid_op
+        })
         .collect();
-
-    if operator_keys.is_empty() {
+    if operator_names.is_empty() {
         result.add_issue(
             LintIssue::error("E008", "Predicate has no operator", file.to_path_buf())
                 .with_location(location)
@@ -221,19 +235,20 @@ pub fn validate_predicate(
         );
         return;
     }
-
-    for operator in &operator_keys {
-        if !valid_operators.contains(&operator.as_str()) {
-            result.add_issue(
-                LintIssue::error(
-                    "E009",
-                    format!("Unknown predicate operator: {operator}"),
-                    file.to_path_buf(),
-                )
+    if operator_names.len() > 1 {
+        let sub_predicates = operator_names
+            .iter()
+            .map(|&k| serde_json::json!({k: "..."}))
+            .collect::<Vec<_>>();
+        let sub_predicates = serde_json::json!(sub_predicates);
+        let and_predicate = serde_json::json!({"and": sub_predicates});
+        let suggestion =
+            format!("Split into separate predicates, combined with and, like: {and_predicate} (or just {sub_predicates} if at the top level)");
+        result.add_issue(
+            LintIssue::error("E034", "Only one predicate operation", file.to_path_buf())
                 .with_location(location)
-                .with_suggestion(format!("Use one of: {}", valid_operators.join(", "))),
-            );
-        }
+                .with_suggestion(suggestion),
+        );
     }
 
     if let Some(jsonpath) = predicate.get("jsonpath") {

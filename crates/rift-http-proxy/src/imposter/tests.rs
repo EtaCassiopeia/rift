@@ -10,6 +10,13 @@ use super::*;
 use crate::imposter::core::StubState;
 use std::collections::HashMap;
 
+fn predicates_from_jsons(predicates: Vec<serde_json::Value>) -> Vec<Predicate> {
+    predicates
+        .into_iter()
+        .map(|v| serde_json::from_value(v).unwrap())
+        .collect()
+}
+
 #[test]
 fn test_imposter_config_default() {
     let json = r#"{"port": 8080}"#;
@@ -33,12 +40,12 @@ fn test_imposter_config_no_port() {
 fn test_predicate_matching() {
     let stub = Stub {
         id: None,
-        predicates: vec![serde_json::json!({
+        predicates: predicates_from_jsons(vec![serde_json::json!({
             "equals": {
                 "method": "GET",
                 "path": "/test"
             }
-        })],
+        })]),
         responses: vec![StubResponse::Is {
             is: IsResponse {
                 status_code: 200,
@@ -382,6 +389,7 @@ fn test_predicate_ends_with() {
     let predicates = vec![serde_json::json!({
         "endsWith": {"path": "-details"}
     })];
+    let predicates = predicates_from_jsons(predicates);
 
     let empty_headers = HashMap::new();
 
@@ -439,6 +447,7 @@ fn test_predicate_deep_equals_method() {
     let predicates = vec![serde_json::json!({
         "deepEquals": {"method": "GET"}
     })];
+    let predicates = predicates_from_jsons(predicates);
 
     let empty_headers = HashMap::new();
 
@@ -482,6 +491,7 @@ fn test_predicate_deep_equals_body() {
     let predicates = vec![serde_json::json!({
         "deepEquals": {"body": ""}
     })];
+    let predicates = predicates_from_jsons(predicates);
 
     let empty_headers = HashMap::new();
 
@@ -528,6 +538,7 @@ fn test_predicate_contains_query() {
     let predicates = vec![serde_json::json!({
         "contains": {"query": {"lenderIds": "CofTest"}}
     })];
+    let predicates = predicates_from_jsons(predicates);
 
     let empty_headers = HashMap::new();
 
@@ -596,6 +607,7 @@ fn test_predicate_equals_headers() {
     let predicates = vec![serde_json::json!({
         "equals": {"headers": {"Content-Type": "application/json"}}
     })];
+    let predicates = predicates_from_jsons(predicates);
 
     let mut headers = HashMap::new();
     headers.insert("Content-Type".to_string(), "application/json".to_string());
@@ -666,6 +678,7 @@ fn test_predicate_exists() {
             "body": true
         }
     })];
+    let predicates = predicates_from_jsons(predicates);
 
     let mut headers = HashMap::new();
     headers.insert("Authorization".to_string(), "Bearer xyz".to_string());
@@ -729,6 +742,7 @@ fn test_predicate_logical_not() {
     let predicates = vec![serde_json::json!({
         "not": {"equals": {"method": "DELETE"}}
     })];
+    let predicates = predicates_from_jsons(predicates);
 
     let empty_headers = HashMap::new();
 
@@ -776,6 +790,7 @@ fn test_predicate_logical_or() {
             {"equals": {"method": "HEAD"}}
         ]
     })];
+    let predicates = predicates_from_jsons(predicates);
 
     let empty_headers = HashMap::new();
 
@@ -822,6 +837,7 @@ fn test_predicate_logical_and() {
             {"startsWith": {"path": "/api"}}
         ]
     })];
+    let predicates = predicates_from_jsons(predicates);
 
     let empty_headers = HashMap::new();
 
@@ -868,6 +884,7 @@ fn test_predicate_matches_regex_all_fields() {
             "method": "^(GET|POST)$"
         }
     })];
+    let predicates = predicates_from_jsons(predicates);
 
     let empty_headers = HashMap::new();
 
@@ -922,6 +939,7 @@ fn test_predicate_matches_body_regex() {
     let predicates = vec![serde_json::json!({
         "matches": {"body": "\"userId\":\\s*\"[a-f0-9-]+\""}
     })];
+    let predicates = predicates_from_jsons(predicates);
 
     let empty_headers = HashMap::new();
 

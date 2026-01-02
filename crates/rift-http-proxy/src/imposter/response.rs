@@ -3,13 +3,13 @@
 //! This module handles creating responses from stubs, applying behaviors,
 //! and managing the response cycle.
 
-use crate::behaviors::{apply_decorate, HasRepeatBehavior, RequestContext};
-use std::collections::HashMap;
-
 use super::types::{
     DebugResponsePreview, IsResponse, ResponseMode, RiftResponseExtension, RiftScriptConfig,
     StubResponse,
 };
+use crate::behaviors::{apply_decorate, HasRepeatBehavior, RequestContext};
+use crate::imposter::Predicate;
+use std::collections::HashMap;
 
 /// Truncate a string with ellipsis if it exceeds the maximum byte length.
 ///
@@ -281,6 +281,10 @@ pub fn create_stub_from_proxy_response(
         None
     };
 
+    let predicates: Vec<Predicate> = predicates
+        .into_iter()
+        .map(|value| serde_json::from_value(value).expect("expected to generate a valid predicate"))
+        .collect();
     super::types::Stub {
         id: None,
         predicates,

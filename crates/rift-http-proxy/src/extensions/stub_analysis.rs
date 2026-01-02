@@ -12,6 +12,7 @@
 //! These features are Rift extensions for improved developer experience.
 
 use crate::imposter::Stub;
+use crate::imposter::{Predicate, PredicateOperation};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
@@ -279,21 +280,26 @@ pub fn analyze_new_stub(
 }
 
 /// Check if two predicate arrays are exactly equal
-fn predicates_equal(a: &[serde_json::Value], b: &[serde_json::Value]) -> bool {
+fn predicates_equal(a: &[Predicate], b: &[Predicate]) -> bool {
     if a.len() != b.len() {
         return false;
     }
+    let canonicalize = |pred: &Predicate| {
+        let mut value = serde_json::to_value(pred).expect("predicate can be serialized to json");
+        value.sort_all_objects();
+        value.to_string()
+    };
     // Convert to sets for order-independent comparison
     // (predicates are AND'd, so order doesn't matter for matching)
-    let a_set: HashSet<String> = a.iter().map(|v| v.to_string()).collect();
-    let b_set: HashSet<String> = b.iter().map(|v| v.to_string()).collect();
+    let a_set: HashSet<String> = a.iter().map(canonicalize).collect();
+    let b_set: HashSet<String> = b.iter().map(canonicalize).collect();
     a_set == b_set
 }
 
 /// Check if `a` predicates are a subset of `b` predicates.
 /// This is a heuristic - if all predicates in `b` are also in `a`,
 /// then any request matching `a` would also match `b`.
-fn is_subset_predicates(a: &[serde_json::Value], b: &[serde_json::Value]) -> bool {
+fn is_subset_predicates(a: &[Predicate], b: &[Predicate]) -> bool {
     if b.is_empty() || a.is_empty() {
         return false;
     }
@@ -321,31 +327,33 @@ fn is_subset_predicates(a: &[serde_json::Value], b: &[serde_json::Value]) -> boo
 }
 
 /// Extract field paths from predicates for comparison
-fn extract_predicate_fields(
-    predicates: &[serde_json::Value],
-) -> HashMap<String, PredicateConstraint> {
+fn extract_predicate_fields(predicates: &[Predicate]) -> HashMap<String, PredicateConstraint> {
     let mut fields = HashMap::new();
 
     for pred in predicates {
-        if let Some(obj) = pred.as_object() {
-            // Handle equals predicate
-            if let Some(equals) = obj.get("equals").and_then(|v| v.as_object()) {
-                for (key, value) in equals {
-                    fields.insert(key.clone(), PredicateConstraint::Equals(value.clone()));
-                }
+        match &pred.operation {
+            PredicateOperation::Equals(equals) => {
+                fields.extend(
+                    equals
+                        .iter()
+                        .map(|(k, v)| (k.clone(), PredicateConstraint::Equals(v.clone()))),
+                );
             }
-            // Handle startsWith predicate
-            if let Some(starts_with) = obj.get("startsWith").and_then(|v| v.as_object()) {
-                for (key, value) in starts_with {
-                    fields.insert(key.clone(), PredicateConstraint::StartsWith(value.clone()));
-                }
+            PredicateOperation::Contains(contains) => {
+                fields.extend(
+                    contains
+                        .iter()
+                        .map(|(k, v)| (k.clone(), PredicateConstraint::Contains(v.clone()))),
+                );
             }
-            // Handle contains predicate
-            if let Some(contains) = obj.get("contains").and_then(|v| v.as_object()) {
-                for (key, value) in contains {
-                    fields.insert(key.clone(), PredicateConstraint::Contains(value.clone()));
-                }
+            PredicateOperation::StartsWith(starts_with) => {
+                fields.extend(
+                    starts_with
+                        .iter()
+                        .map(|(k, v)| (k.clone(), PredicateConstraint::StartsWith(v.clone()))),
+                );
             }
+            _ => {}
         }
     }
 
@@ -395,7 +403,15 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn predicates_from_jsons(predicates: Vec<serde_json::Value>) -> Vec<Predicate> {
+        predicates
+            .into_iter()
+            .map(|v| serde_json::from_value(v).unwrap())
+            .collect()
+    }
+
     fn stub_with_predicates(predicates: Vec<serde_json::Value>) -> Stub {
+        let predicates = predicates_from_jsons(predicates);
         Stub {
             id: None,
             predicates,
@@ -405,6 +421,7 @@ mod tests {
     }
 
     fn stub_with_id_and_predicates(id: &str, predicates: Vec<serde_json::Value>) -> Stub {
+        let predicates = predicates_from_jsons(predicates);
         Stub {
             id: Some(id.to_string()),
             predicates,
@@ -547,6 +564,8 @@ mod tests {
             json!({"equals": {"method": "GET"}}),
             json!({"equals": {"path": "/test"}}),
         ];
+        let a = predicates_from_jsons(a);
+        let b = predicates_from_jsons(b);
         assert!(predicates_equal(&a, &b));
     }
 
@@ -554,6 +573,8 @@ mod tests {
     fn test_predicates_not_equal() {
         let a = vec![json!({"equals": {"path": "/test"}})];
         let b = vec![json!({"equals": {"path": "/other"}})];
+        let a = predicates_from_jsons(a);
+        let b = predicates_from_jsons(b);
         assert!(!predicates_equal(&a, &b));
     }
 }

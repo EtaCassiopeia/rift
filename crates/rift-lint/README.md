@@ -97,6 +97,7 @@ let result = lint_value(&value, "inline", &LintOptions::default());
 | E004 | Invalid protocol |
 | E005 | Port out of range |
 | E006-E033 | Various structural errors |
+| E034 | Multiple predicate operations in one predicate |
 
 ### Warnings
 
