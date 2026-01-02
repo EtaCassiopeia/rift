@@ -44,17 +44,88 @@ Enable stateful testing scenarios with flow state:
 
 ### Flow State Backends
 
-- **inmemory**: Default, in-process storage (suitable for single instances)
-- **redis**: Distributed storage (requires Redis server, enabled with `--features redis-backend`)
+| Backend | Description | Use Case |
+|:--------|:------------|:---------|
+| `inmemory` | In-process storage (default) | Single instance, testing |
+| `redis` | Redis-backed distributed storage | Multi-instance, production |
+
+### Configuration Options
+
+| Option | Type | Default | Description |
+|:-------|:-----|:--------|:------------|
+| `backend` | string | `"inmemory"` | Storage backend: inmemory or redis |
+| `ttlSeconds` | integer | `300` | Time-to-live for state entries (5 minutes) |
+| `redis` | object | - | Redis-specific configuration (required for redis backend) |
+
+### Redis Configuration
+
+When using `redis` backend:
 
 ```json
 "_rift": {
   "flowState": {
     "backend": "redis",
-    "redisUrl": "redis://localhost:6379",
-    "ttlSeconds": 600
+    "ttlSeconds": 600,
+    "redis": {
+      "url": "redis://localhost:6379",
+      "poolSize": 10,
+      "keyPrefix": "rift:"
+    }
   }
 }
+```
+
+| Option | Type | Default | Description |
+|:-------|:-----|:--------|:------------|
+| `url` | string | required | Redis connection URL |
+| `poolSize` | integer | `10` | Connection pool size |
+| `keyPrefix` | string | `"rift:"` | Prefix for all keys (namespace isolation) |
+
+**Connection URL formats:**
+
+```bash
+# Basic
+redis://localhost:6379
+
+# With password
+redis://:password@localhost:6379
+
+# With database selection
+redis://localhost:6379/0
+
+# TLS connection
+rediss://localhost:6379
+
+# Sentinel
+redis+sentinel://localhost:26379/mymaster
+```
+
+**Key isolation example:**
+
+```json
+{
+  "flowState": {
+    "backend": "redis",
+    "redis": {
+      "url": "redis://localhost:6379",
+      "keyPrefix": "rift:staging:"
+    }
+  }
+}
+```
+
+This prefixes all keys with `rift:staging:` to isolate test environments.
+
+### Enabling Redis Backend
+
+Redis support requires building with the `redis-backend` feature:
+
+```bash
+# Build with Redis support
+cargo build --release --features redis-backend
+
+# Run with Redis backend
+rift-http-proxy --configfile imposters.json
 ```
 
 ---

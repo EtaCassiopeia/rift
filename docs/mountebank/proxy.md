@@ -284,6 +284,67 @@ Add headers to proxied requests:
 
 ---
 
+## Path Rewriting
+
+Modify the request path before forwarding to the backend:
+
+```json
+{
+  "proxy": {
+    "to": "https://api.example.com",
+    "pathRewrite": {
+      "from": "/api/v2",
+      "to": "/api/v1"
+    }
+  }
+}
+```
+
+### Use Cases
+
+**Version Migration:**
+
+Route v2 API calls to v1 backend during migration:
+
+```json
+{
+  "port": 4545,
+  "protocol": "http",
+  "stubs": [{
+    "predicates": [{ "startsWith": { "path": "/api/v2" } }],
+    "responses": [{
+      "proxy": {
+        "to": "https://legacy-api.example.com",
+        "pathRewrite": {
+          "from": "/api/v2",
+          "to": "/api/v1"
+        }
+      }
+    }]
+  }]
+}
+```
+
+**Strip Prefix:**
+
+Remove a prefix from paths:
+
+```json
+{
+  "proxy": {
+    "to": "https://backend.internal",
+    "pathRewrite": {
+      "from": "/gateway/service",
+      "to": ""
+    }
+  }
+}
+```
+
+Request to `/gateway/service/users` → forwards to `/users`
+
+---
+
 ## Combining Proxy with Stubs
 
 Mix static stubs with proxy fallback:
