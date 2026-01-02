@@ -530,3 +530,15 @@ jobs:
           echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
           echo "npm install @rift-vs/rift" >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+
+  # =============================================================================
+  # Publish Docker images
+  # =============================================================================
+  publish-docker:
+    name: Publish Docker Images
+    needs: release
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && !inputs.dry_run)
+    uses: ./.github/workflows/docker-publish.yml
+    with:
+      tag: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+    secrets: inherit
