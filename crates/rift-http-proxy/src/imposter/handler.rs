@@ -136,8 +136,7 @@ pub async fn handle_imposter_request(
     // Get client address info for requestFrom, ip predicates
     let request_from = client_addr.to_string();
     let client_ip = client_addr.ip().to_string();
-
-    if let Some((stub, stub_index)) = imposter.find_matching_stub_with_client(
+    if let Some((stub_state, stub_index)) = imposter.find_matching_stub_with_client(
         method_str,
         path_str,
         &headers_for_context,
@@ -147,7 +146,7 @@ pub async fn handle_imposter_request(
         Some(&client_ip),
     ) {
         // Check if this is a proxy response
-        if let Some(proxy_config) = imposter.get_proxy_response(&stub, stub_index) {
+        if let Some(proxy_config) = imposter.get_proxy_response(&stub_state) {
             debug!("Handling proxy request to {}", proxy_config.to);
             match imposter
                 .handle_proxy_request(
@@ -162,7 +161,7 @@ pub async fn handle_imposter_request(
             {
                 Ok((status, response_headers, body, latency)) => {
                     // Advance the cycler for this proxy response
-                    imposter.advance_cycler_for_proxy(&stub, stub_index);
+                    imposter.advance_cycler_for_proxy(&stub_state);
 
                     let mut response = Response::builder().status(status);
 
@@ -206,7 +205,7 @@ pub async fn handle_imposter_request(
 
         // Check if this is an inject response (JavaScript function)
         #[cfg(feature = "javascript")]
-        if let Some(inject_fn) = imposter.get_inject_response(&stub, stub_index) {
+        if let Some(inject_fn) = imposter.get_inject_response(&stub_state) {
             debug!("Handling inject response");
 
             // Build request for inject function
@@ -225,7 +224,7 @@ pub async fn handle_imposter_request(
             ) {
                 Ok(inject_response) => {
                     // Advance the cycler for this inject response
-                    imposter.advance_cycler_for_inject(&stub, stub_index);
+                    imposter.advance_cycler_for_inject(&stub_state);
 
                     let mut response = Response::builder().status(inject_response.status_code);
 
@@ -257,7 +256,7 @@ pub async fn handle_imposter_request(
         }
 
         // Check if this is a RiftScript response (_rift.script)
-        if let Some(script_config) = imposter.get_rift_script_response(&stub, stub_index) {
+        if let Some(script_config) = imposter.get_rift_script_response(&stub_state) {
             debug!(
                 "Handling Rift script response (engine: {})",
                 script_config.engine
@@ -291,7 +290,7 @@ pub async fn handle_imposter_request(
                             headers,
                             ..
                         }) => {
-                            imposter.advance_cycler_for_rift_script(&stub, stub_index);
+                            imposter.advance_cycler_for_rift_script(&stub_state);
 
                             let mut response = Response::builder().status(status);
                             for (k, v) in &headers {
@@ -312,7 +311,7 @@ pub async fn handle_imposter_request(
                         Ok(FaultDecision::Latency { duration_ms, .. }) => {
                             // Apply latency then return 200 OK
                             tokio::time::sleep(Duration::from_millis(duration_ms)).await;
-                            imposter.advance_cycler_for_rift_script(&stub, stub_index);
+                            imposter.advance_cycler_for_rift_script(&stub_state);
 
                             return Ok(build_response_with_headers(
                                 StatusCode::OK,
@@ -326,7 +325,7 @@ pub async fn handle_imposter_request(
                         }
                         Ok(FaultDecision::None) => {
                             // Script says no fault - return 200 OK
-                            imposter.advance_cycler_for_rift_script(&stub, stub_index);
+                            imposter.advance_cycler_for_rift_script(&stub_state);
 
                             return Ok(build_response_with_headers(
                                 StatusCode::OK,
@@ -366,7 +365,7 @@ pub async fn handle_imposter_request(
             rift_ext,
             response_mode,
             is_fault,
-        )) = imposter.execute_stub_with_rift(&stub, stub_index)
+        )) = imposter.execute_stub_with_rift(&stub_state)
         {
             // Handle faults - simulate connection errors
             if is_fault {
@@ -554,22 +553,23 @@ fn handle_debug_request(
         Some(query_str)
     };
 
-    let match_result = if let Some((stub, stub_index)) = imposter.find_matching_stub_with_client(
-        method,
-        path,
-        headers_for_context,
-        query_opt,
-        body_string.as_deref(),
-        Some(&request_from),
-        Some(&client_ip),
-    ) {
+    let match_result = if let Some((stub_state, stub_index)) = imposter
+        .find_matching_stub_with_client(
+            method,
+            path,
+            headers_for_context,
+            query_opt,
+            body_string.as_deref(),
+            Some(&request_from),
+            Some(&client_ip),
+        ) {
         // Match found
-        let response_preview = imposter.get_response_preview(&stub, stub_index);
+        let response_preview = imposter.get_response_preview(&stub_state);
         DebugMatchResult {
             matched: true,
             stub_index: Some(stub_index),
-            stub_id: stub.id.clone(),
-            predicates: Some(stub.predicates.clone()),
+            stub_id: stub_state.stub.id.clone(),
+            predicates: Some(stub_state.stub.predicates.clone()),
             response_preview: Some(response_preview),
             all_stubs: None,
             reason: None,

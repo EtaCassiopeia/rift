@@ -13,7 +13,7 @@ use super::types::{
     RecordedRequest, ResponseMode, RiftResponseExtension, RiftScriptConfig, Stub, StubResponse,
 };
 use crate::backends::InMemoryFlowStore;
-use crate::behaviors::ResponseCycler;
+use crate::behaviors::{HasRepeatBehavior, RuleCycler};
 use crate::extensions::flow_state::{FlowStore, NoOpFlowStore};
 use crate::recording::{ProxyMode, RecordedResponse, RecordingStore, RequestSignature};
 use anyhow::Context;
@@ -38,13 +38,48 @@ fn get_http_client() -> &'static reqwest::Client {
     })
 }
 
+#[derive(Debug, Clone)]
+pub struct StubState {
+    pub(crate) stub: Stub,
+    cycler: Arc<RuleCycler>,
+}
+
+impl StubState {
+    #[must_use]
+    pub fn new(stub: Stub) -> Self {
+        Self {
+            stub,
+            cycler: Arc::new(RuleCycler::new()),
+        }
+    }
+
+    #[must_use]
+    pub fn get_next_response(&self) -> Option<&StubResponse> {
+        let responses = &self.stub.responses;
+        if responses.is_empty() {
+            return None;
+        }
+
+        let repeat_for_response = |idx| responses.get(idx as usize).and_then(|r| r.get_repeat());
+        let response_idx = self
+            .cycler
+            .get_response_index_advance(responses.len() as u32, repeat_for_response);
+        responses.get(response_idx as usize)
+    }
+
+    #[must_use]
+    pub fn peek_response(&self) -> Option<&StubResponse> {
+        let responses = &self.stub.responses;
+        let response_idx = self.cycler.peek_response_index(responses.len() as u32);
+        self.stub.responses.get(response_idx as usize)
+    }
+}
+
 /// Runtime state of an imposter
 pub struct Imposter {
     pub config: ImposterConfig,
     /// Mutable stubs (can be modified at runtime)
-    pub stubs: RwLock<Vec<Stub>>,
-    /// Response cycling state (for future use with response arrays)
-    pub response_cycler: ResponseCycler,
+    pub stubs: RwLock<Vec<StubState>>,
     /// Recording store for proxy responses (for future proxy mode support)
     pub recording_store: Arc<RecordingStore>,
     /// Recorded requests (if record_requests is true)
@@ -64,10 +99,14 @@ pub struct Imposter {
 impl Imposter {
     /// Create a new imposter from config
     pub fn new(config: ImposterConfig) -> Self {
-        let stubs = config.stubs.clone();
+        let stubs: Vec<StubState> = config
+            .stubs
+            .iter()
+            .map(|stub| StubState::new(stub.clone()))
+            .collect();
 
         // Extract proxy mode from stubs (use first proxy response's mode)
-        let proxy_mode = Self::extract_proxy_mode(&stubs);
+        let proxy_mode = Self::extract_proxy_mode(&config.stubs);
 
         // Initialize flow store based on _rift.flowState configuration
         let flow_store = Self::create_flow_store(&config);
@@ -75,7 +114,6 @@ impl Imposter {
         Self {
             config,
             stubs: RwLock::new(stubs),
-            response_cycler: ResponseCycler::new(),
             recording_store: Arc::new(RecordingStore::new(proxy_mode)),
             recorded_requests: RwLock::new(Vec::new()),
             request_count: AtomicU64::new(0),
@@ -84,6 +122,13 @@ impl Imposter {
             shutdown_tx: None,
             flow_store,
         }
+    }
+
+    /// Replace all stubs
+    pub fn replace_stubs(&self, new_stubs: Vec<Stub>) {
+        let mut stubs = self.stubs.write();
+        stubs.clear();
+        stubs.extend(new_stubs.into_iter().map(StubState::new));
     }
 
     /// Create flow store based on _rift.flowState configuration
@@ -180,7 +225,7 @@ impl Imposter {
         headers: &hyper::HeaderMap,
         query: Option<&str>,
         body: Option<&str>,
-    ) -> Option<(Stub, usize)> {
+    ) -> Option<(StubState, usize)> {
         // Call the extended version with no client info (backward compatible)
         self.find_matching_stub_with_client(method, path, headers, query, body, None, None)
     }
@@ -196,13 +241,14 @@ impl Imposter {
         body: Option<&str>,
         request_from: Option<&str>,
         client_ip: Option<&str>,
-    ) -> Option<(Stub, usize)> {
+    ) -> Option<(StubState, usize)> {
         let stubs = self.stubs.read();
         let headers_map = Self::header_map_to_hashmap(headers);
         // Parse form data if Content-Type is application/x-www-form-urlencoded
         let form = Self::parse_form_data(headers, body);
 
-        for (index, stub) in stubs.iter().enumerate() {
+        for (index, stub_state) in stubs.iter().enumerate() {
+            let stub = &stub_state.stub;
             if stub_matches(
                 &stub.predicates,
                 method,
@@ -214,7 +260,8 @@ impl Imposter {
                 client_ip,
                 form.as_ref(),
             ) {
-                return Some((stub.clone(), index));
+                // TODO(perf): It's unfortunate that we end up deep cloning the whole stub here
+                return Some((stub_state.clone(), index));
             }
         }
         None
@@ -260,6 +307,7 @@ impl Imposter {
         let stubs = self.stubs.read();
         stubs
             .iter()
+            .map(|stub_state| &stub_state.stub)
             .enumerate()
             .map(|(index, stub)| DebugStubInfo {
                 index,
@@ -282,8 +330,8 @@ impl Imposter {
     }
 
     /// Create response preview from a stub (Rift extension)
-    pub fn get_response_preview(&self, stub: &Stub, stub_index: usize) -> DebugResponsePreview {
-        if stub.responses.is_empty() {
+    pub fn get_response_preview(&self, stub_state: &StubState) -> DebugResponsePreview {
+        if stub_state.stub.responses.is_empty() {
             return DebugResponsePreview {
                 response_type: "unknown".to_string(),
                 status_code: None,
@@ -293,17 +341,7 @@ impl Imposter {
         }
 
         // Get the current response from the cycler
-        let rule_id = format!("stub_{stub_index}");
-        let response_index = self
-            .response_cycler
-            .peek_response_index(&rule_id, stub.responses.len());
-
-        if let Some(response) = stub.responses.get(response_index) {
-            return create_response_preview(response);
-        }
-
-        // Fallback to first response
-        if let Some(response) = stub.responses.first() {
+        if let Some(response) = stub_state.peek_response() {
             return create_response_preview(response);
         }
 
@@ -328,8 +366,7 @@ impl Imposter {
     #[allow(clippy::type_complexity)]
     pub fn execute_stub(
         &self,
-        stub: &Stub,
-        stub_index: usize,
+        stub_state: &StubState,
     ) -> Option<(
         u16,
         HashMap<String, String>,
@@ -337,17 +374,7 @@ impl Imposter {
         Option<serde_json::Value>,
         bool,
     )> {
-        if stub.responses.is_empty() {
-            return None;
-        }
-
-        // Use response cycler with per-response repeat values
-        let rule_id = format!("stub_{stub_index}");
-        let response_index = self
-            .response_cycler
-            .get_response_index_with_per_response_repeat(&rule_id, &stub.responses);
-
-        let response = stub.responses.get(response_index)?;
+        let response = stub_state.get_next_response()?;
         execute_stub_response(response)
     }
 
@@ -356,8 +383,7 @@ impl Imposter {
     #[allow(clippy::type_complexity)]
     pub fn execute_stub_with_rift(
         &self,
-        stub: &Stub,
-        stub_index: usize,
+        stub_state: &StubState,
     ) -> Option<(
         u16,
         HashMap<String, String>,
@@ -367,58 +393,26 @@ impl Imposter {
         ResponseMode,
         bool,
     )> {
-        if stub.responses.is_empty() {
-            return None;
-        }
-
-        let rule_id = format!("stub_{stub_index}");
-        let response_index = self
-            .response_cycler
-            .get_response_index_with_per_response_repeat(&rule_id, &stub.responses);
-
-        let response = stub.responses.get(response_index)?;
+        let response = stub_state.get_next_response()?;
         execute_stub_response_with_rift(response)
     }
 
     /// Get RiftScript response if present
-    pub fn get_rift_script_response(
-        &self,
-        stub: &Stub,
-        stub_index: usize,
-    ) -> Option<RiftScriptConfig> {
-        if stub.responses.is_empty() {
-            return None;
-        }
-
-        let rule_id = format!("stub_{stub_index}");
-        let response_index = self
-            .response_cycler
-            .peek_response_index(&rule_id, stub.responses.len());
-
-        let response = stub.responses.get(response_index)?;
+    pub fn get_rift_script_response(&self, stub_state: &StubState) -> Option<RiftScriptConfig> {
+        let response = stub_state.get_next_response()?;
         get_rift_script_config(response)
     }
 
     /// Advance cycler for RiftScript response
-    pub fn advance_cycler_for_rift_script(&self, stub: &Stub, stub_index: usize) {
-        let rule_id = format!("stub_{stub_index}");
-        self.response_cycler
-            .get_response_index_with_per_response_repeat(&rule_id, &stub.responses);
+    pub fn advance_cycler_for_rift_script(&self, stub_state: &StubState) {
+        // Just cycling as a side effect
+        _ = stub_state.get_next_response();
     }
 
     /// Check if a stub response is a proxy and return the proxy config
     /// Note: This peeks at the current response without advancing the cycler
-    pub fn get_proxy_response(&self, stub: &Stub, stub_index: usize) -> Option<ProxyResponse> {
-        if stub.responses.is_empty() {
-            return None;
-        }
-
-        let rule_id = format!("stub_{stub_index}");
-        let response_index = self
-            .response_cycler
-            .peek_response_index(&rule_id, stub.responses.len());
-
-        let response = stub.responses.get(response_index)?;
+    pub fn get_proxy_response(&self, stub: &StubState) -> Option<ProxyResponse> {
+        let response = stub.peek_response()?;
 
         match response {
             StubResponse::Proxy { proxy } => Some(proxy.clone()),
@@ -428,27 +422,16 @@ impl Imposter {
 
     /// Advance the response cycler for a proxy response
     /// This should be called after successfully handling a proxy response
-    pub fn advance_cycler_for_proxy(&self, stub: &Stub, stub_index: usize) {
-        let rule_id = format!("stub_{stub_index}");
-        self.response_cycler
-            .advance_for_proxy(&rule_id, stub.responses.len());
+    pub fn advance_cycler_for_proxy(&self, stub_state: &StubState) {
+        // Assume proxies won't have a repeat count anyway, so a normal advance works.
+        _ = stub_state.get_next_response();
     }
 
     /// Check if a stub response is an inject and return the inject function
     /// Note: This peeks at the current response without advancing the cycler
     // Used with javascript feature
-    pub fn get_inject_response(&self, stub: &Stub, stub_index: usize) -> Option<String> {
-        if stub.responses.is_empty() {
-            return None;
-        }
-
-        let rule_id = format!("stub_{stub_index}");
-        let response_index = self
-            .response_cycler
-            .peek_response_index(&rule_id, stub.responses.len());
-
-        let response = stub.responses.get(response_index)?;
-
+    pub fn get_inject_response(&self, stub_state: &StubState) -> Option<String> {
+        let response = stub_state.peek_response()?;
         match response {
             StubResponse::Inject { inject } => Some(inject.clone()),
             _ => None,
@@ -458,10 +441,8 @@ impl Imposter {
     /// Advance the response cycler for an inject response
     /// This should be called after successfully handling an inject response
     // Used with javascript feature
-    pub fn advance_cycler_for_inject(&self, stub: &Stub, stub_index: usize) {
-        let rule_id = format!("stub_{stub_index}");
-        self.response_cycler
-            .advance_for_proxy(&rule_id, stub.responses.len());
+    pub fn advance_cycler_for_inject(&self, stub_state: &StubState) {
+        _ = stub_state.get_next_response();
     }
 
     /// Generate predicates from request based on predicateGenerators config
@@ -592,9 +573,10 @@ impl Imposter {
 
     /// Insert a generated stub at the specified index
     pub fn insert_generated_stub(&self, stub: Stub, before_index: usize) {
+        let new_stub_state = StubState::new(stub);
         let mut stubs = self.stubs.write();
         let index = before_index.min(stubs.len());
-        stubs.insert(index, stub);
+        stubs.insert(index, new_stub_state);
         debug!("Inserted generated stub at index {}", index);
     }
 
@@ -616,6 +598,7 @@ impl Imposter {
             // Try to find existing stub with matching predicates (after the proxy stub)
             let matching_stub_idx = stubs
                 .iter()
+                .map(|stub_state| &stub_state.stub)
                 .enumerate()
                 .skip(proxy_stub_index + 1) // Only look after the proxy stub
                 .find(|(_, existing)| {
@@ -629,20 +612,18 @@ impl Imposter {
 
             if let Some(idx) = matching_stub_idx {
                 // Append responses to existing stub
-                for response in stub.responses {
-                    stubs[idx].responses.push(response);
-                }
+                stubs[idx].stub.responses.extend(stub.responses);
                 debug!(
                     "Appended response to existing stub at index {} (proxyAlways mode, {} total responses)",
                     idx,
-                    stubs[idx].responses.len()
+                    stubs[idx].stub.responses.len()
                 );
                 return;
             }
 
             // No matching stub found: insert new stub AFTER the proxy stub
             let insert_index = (proxy_stub_index + 1).min(stubs.len());
-            stubs.insert(insert_index, stub);
+            stubs.insert(insert_index, StubState::new(stub));
             debug!(
                 "Inserted generated stub at index {} after proxy (proxyAlways mode)",
                 insert_index
@@ -651,7 +632,7 @@ impl Imposter {
             // For proxyOnce: insert new stub BEFORE the proxy stub
             // This ensures the recorded stub matches first on subsequent requests
             let index = proxy_stub_index.min(stubs.len());
-            stubs.insert(index, stub);
+            stubs.insert(index, StubState::new(stub));
             debug!(
                 "Inserted generated stub at index {} before proxy (proxyOnce mode)",
                 index
@@ -885,7 +866,7 @@ impl Imposter {
         let mut stubs = self.stubs.write();
         let idx = index.unwrap_or(stubs.len());
         let idx = idx.min(stubs.len());
-        stubs.insert(idx, stub);
+        stubs.insert(idx, StubState::new(stub));
     }
 
     /// Replace a stub at a specific index
@@ -894,7 +875,7 @@ impl Imposter {
         if index >= stubs.len() {
             return Err(format!("Stub index {index} out of bounds"));
         }
-        stubs[index] = stub;
+        stubs[index].stub = stub;
         Ok(())
     }
 
@@ -910,13 +891,17 @@ impl Imposter {
 
     /// Get all stubs
     pub fn get_stubs(&self) -> Vec<Stub> {
-        self.stubs.read().clone()
+        self.stubs
+            .read()
+            .iter()
+            .map(|stub_state| stub_state.stub.clone())
+            .collect()
     }
 
     /// Get a specific stub by index
     pub fn get_stub(&self, index: usize) -> Option<Stub> {
         let stubs = self.stubs.read();
-        stubs.get(index).cloned()
+        stubs.get(index).map(|stub_state| stub_state.stub.clone())
     }
 
     /// Set enabled state

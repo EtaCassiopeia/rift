@@ -1,21 +1,97 @@
 //! Response cycling state management.
 
-use parking_lot::RwLock;
+use parking_lot::{RwLock, RwLockWriteGuard};
 use std::collections::HashMap;
+use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-/// State for a single rule's cycling behavior
-#[derive(Default, Clone)]
-struct RuleState {
-    /// Current response index
-    index: usize,
-    /// Repeat counter (how many times current response has been used)
-    repeat_count: usize,
+/// A lock-free atomic cycler that packs response index and repeat index into a single AtomicU64
+#[derive(Default)]
+pub struct RuleCycler(AtomicU64);
+
+fn split(v: u64) -> (u32, u32) {
+    ((v >> 32) as u32, v as u32)
+}
+
+fn join(resp_idx: u32, repeat_idx: u32) -> u64 {
+    (u64::from(resp_idx) << 32) | u64::from(repeat_idx)
+}
+
+fn advance(
+    (mut resp_idx, mut repeat_idx): (u32, u32),
+    response_count: u32,
+    repeat_count: u32,
+) -> (u32, u32) {
+    repeat_idx = repeat_idx.saturating_add(1);
+    if repeat_idx >= repeat_count {
+        repeat_idx = 0;
+        resp_idx += 1;
+        if resp_idx >= response_count {
+            resp_idx = 0;
+        }
+    }
+    (resp_idx, repeat_idx)
+}
+
+impl RuleCycler {
+    #[must_use]
+    pub const fn new() -> Self {
+        Self(AtomicU64::new(0))
+    }
+
+    #[must_use]
+    pub fn peek_response_index(&self, response_count: u32) -> u32 {
+        let value = self.0.load(Ordering::Relaxed);
+        let (resp_idx, _repeat_idx) = split(value);
+        resp_idx.min(response_count.saturating_sub(1))
+    }
+
+    pub fn reset(&self) {
+        self.0.store(0, Ordering::Relaxed);
+    }
+
+    /// Get current response index for a rule, handling repeat behavior
+    /// Returns the index to use for this request
+    #[must_use]
+    pub fn get_response_index_advance(
+        &self,
+        response_count: u32,
+        mut repeat_for_response: impl FnMut(u32) -> Option<u32>,
+    ) -> u32 {
+        let old_value = self
+            .0
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                let (mut resp_idx, repeat_idx) = split(v);
+                if resp_idx >= response_count {
+                    resp_idx = response_count.saturating_sub(1);
+                }
+                let repeat_count = repeat_for_response(resp_idx).unwrap_or(1).max(1);
+                let (resp_idx, repeat_idx) =
+                    advance((resp_idx, repeat_idx), response_count, repeat_count);
+                Some(join(resp_idx, repeat_idx))
+            })
+            .unwrap_or_else(|e| {
+                debug_assert!(false, "we never return None from fetch_update");
+                e
+            });
+        split(old_value).0
+    }
+}
+
+impl fmt::Debug for RuleCycler {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let (response_idx, repeat_idx) = split(self.0.load(Ordering::Relaxed));
+        f.debug_struct("RuleCycler")
+            .field("response_idx", &response_idx)
+            .field("repeat_idx", &repeat_idx)
+            .finish()
+    }
 }
 
 /// Combined state for all rules - protected by a single lock to prevent deadlocks
 #[derive(Default)]
 struct CyclerState {
-    rules: HashMap<String, RuleState>,
+    rules: HashMap<String, RuleCycler>,
 }
 
 /// Tracks response cycling state per rule
@@ -51,32 +127,29 @@ impl ResponseCycler {
             return 0;
         }
 
-        let repeat_count = repeat.unwrap_or(1).max(1) as usize;
-
-        let mut state = self.state.write();
-        let rule_state = state.rules.entry(rule_id.to_string()).or_default();
-
-        let current_index = rule_state.index % response_count;
-
-        // Increment repeat counter
-        rule_state.repeat_count += 1;
-
-        // Check if we need to advance to next response
-        if rule_state.repeat_count >= repeat_count {
-            // Reset repeat counter and advance to next response
-            rule_state.repeat_count = 0;
-            rule_state.index = (current_index + 1) % response_count;
-        }
-
-        current_index
+        let mut state = self.state.read();
+        // Opportunistically attempt to use just a read lock. If the rule doesn't exist yet,
+        // lock for writing, then downgrade
+        let rule_state = if let Some(rule) = state.rules.get(rule_id) {
+            rule
+        } else {
+            drop(state);
+            let mut write = self.state.write();
+            write.rules.entry(rule_id.to_string()).or_default();
+            state = RwLockWriteGuard::downgrade(write);
+            state
+                .rules
+                .get(rule_id)
+                .expect("We atomically downgraded the lock, the rule we just inserted must exist")
+        };
+        rule_state.get_response_index_advance(response_count as u32, |_| repeat) as usize
     }
 
     /// Reset cycling state for a rule
     pub fn reset(&self, rule_id: &str) {
-        let mut state = self.state.write();
-        if let Some(rule_state) = state.rules.get_mut(rule_id) {
-            rule_state.index = 0;
-            rule_state.repeat_count = 0;
+        let state = self.state.read();
+        if let Some(rule_state) = state.rules.get(rule_id) {
+            rule_state.reset();
         }
     }
 
@@ -96,8 +169,7 @@ impl ResponseCycler {
         state
             .rules
             .get(rule_id)
-            .map(|r| r.index % response_count)
-            .unwrap_or(0)
+            .map_or(0, |r| r.peek_response_index(response_count as u32) as usize)
     }
 
     /// Advance the cycler for a proxy response (which has no repeat behavior)
@@ -107,13 +179,20 @@ impl ResponseCycler {
             return;
         }
 
-        let mut state = self.state.write();
-        let rule_state = state.rules.entry(rule_id.to_string()).or_default();
-
-        let current_index = rule_state.index % response_count;
-        rule_state.index = (current_index + 1) % response_count;
-        // Reset repeat counter when advancing via proxy
-        rule_state.repeat_count = 0;
+        let mut state = self.state.read();
+        let rule_state = if let Some(rule) = state.rules.get(rule_id) {
+            rule
+        } else {
+            drop(state);
+            let mut write = self.state.write();
+            write.rules.entry(rule_id.to_string()).or_default();
+            state = RwLockWriteGuard::downgrade(write);
+            state
+                .rules
+                .get(rule_id)
+                .expect("We atomically downgraded the lock, the rule we just inserted must exist")
+        };
+        _ = rule_state.get_response_index_advance(response_count as u32, |_| None);
     }
 
     /// Get response index with per-response repeat values
@@ -127,25 +206,22 @@ impl ResponseCycler {
             return 0;
         }
 
-        let mut state = self.state.write();
-        let rule_state = state.rules.entry(rule_id.to_string()).or_default();
-
-        let current_index = rule_state.index % responses.len();
-
-        // Get repeat value for current response
-        let repeat_count = responses[current_index].get_repeat().unwrap_or(1).max(1) as usize;
-
-        // Increment repeat counter
-        rule_state.repeat_count += 1;
-
-        // Check if we should advance to next response
-        if rule_state.repeat_count >= repeat_count {
-            // Reset repeat counter and advance to next response
-            rule_state.repeat_count = 0;
-            rule_state.index = (current_index + 1) % responses.len();
-        }
-
-        current_index
+        let mut state = self.state.read();
+        let rule_state = if let Some(rule) = state.rules.get(rule_id) {
+            rule
+        } else {
+            drop(state);
+            let mut write = self.state.write();
+            write.rules.entry(rule_id.to_string()).or_default();
+            state = RwLockWriteGuard::downgrade(write);
+            state
+                .rules
+                .get(rule_id)
+                .expect("We atomically downgraded the lock, the rule we just inserted must exist")
+        };
+        rule_state.get_response_index_advance(responses.len() as u32, |i| {
+            responses.get(i as usize).and_then(|resp| resp.get_repeat())
+        }) as usize
     }
 }
 
