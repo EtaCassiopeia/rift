@@ -7,6 +7,7 @@ use super::client::HttpClient;
 use super::headers::{
     RiftHeadersExt, VALUE_TRUE, X_RIFT_PROXIED, X_RIFT_RECORDED, X_RIFT_REPLAYED,
 };
+use super::response_ext::ResponseExt;
 use crate::recording::{ProxyMode, RecordedResponse, RecordingStore, RequestSignature};
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full};
@@ -255,7 +256,7 @@ pub async fn forward_with_recording(
     let mut response = Response::from_parts(parts, Full::new(response_body_bytes));
     response.set_header(&X_RIFT_RECORDED, &VALUE_TRUE);
 
-    response.map(|b| BoxBody::new(b.map_err(|never: Infallible| match never {})))
+    response.into_boxed()
 }
 
 #[cfg(test)]

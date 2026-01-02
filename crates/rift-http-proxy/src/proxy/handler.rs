@@ -12,6 +12,7 @@ use super::headers::{
     X_RIFT_BEHAVIOR_DECORATE, X_RIFT_BEHAVIOR_LOOKUP, X_RIFT_BEHAVIOR_SHELL, X_RIFT_BEHAVIOR_WAIT,
     X_RIFT_FAULT, X_RIFT_LATENCY_MS, X_RIFT_RULE_ID, X_RIFT_SCRIPT, X_RIFT_TCP_FAULT,
 };
+use super::response_ext::ResponseExt;
 use crate::behaviors::{
     apply_copy_behaviors, apply_decorate, apply_lookup_behaviors, apply_shell_transform, CsvCache,
     RequestContext,
@@ -211,8 +212,7 @@ async fn handle_script_rules(
         Err(e) => {
             error!("Failed to collect request body: {}", e);
             return RuleHandlingResult::Response(
-                error_response(500, "Failed to read request body")
-                    .map(|b| BoxBody::new(b.map_err(|never| match never {}))),
+                error_response(500, "Failed to read request body").into_boxed(),
             );
         }
     };
@@ -367,7 +367,7 @@ async fn handle_script_result(
             response.set_header(&X_RIFT_FAULT, &VALUE_ERROR);
             response.set_header_value(&X_RIFT_RULE_ID, &rule_id);
             response.set_header(&X_RIFT_SCRIPT, &VALUE_TRUE);
-            response.map(|b| BoxBody::new(b.map_err(|never| match never {})))
+            response.into_boxed()
         }
         Ok(ScriptFaultDecision::Latency {
             duration_ms,
@@ -405,7 +405,7 @@ async fn handle_script_result(
             response.set_header_value(&X_RIFT_RULE_ID, &rule_id);
             response.set_header(&X_RIFT_SCRIPT, &VALUE_TRUE);
             response.set_header_value(&X_RIFT_LATENCY_MS, &duration_ms.to_string());
-            response.map(|b| BoxBody::new(b.map_err(|never| match never {})))
+            response.into_boxed()
         }
         Ok(ScriptFaultDecision::None) => {
             debug!(
@@ -429,7 +429,7 @@ async fn handle_script_result(
             let duration_ms = start_time.elapsed().as_secs_f64() * 1000.0;
             metrics::record_proxy_duration(method.as_str(), duration_ms, "none");
             metrics::record_request(method.as_str(), status);
-            response.map(|b| BoxBody::new(b.map_err(|never| match never {})))
+            response.into_boxed()
         }
         Err(e) => {
             error!(
@@ -454,7 +454,7 @@ async fn handle_script_result(
             let duration_ms = start_time.elapsed().as_secs_f64() * 1000.0;
             metrics::record_proxy_duration(method.as_str(), duration_ms, "none");
             metrics::record_request(method.as_str(), status);
-            response.map(|b| BoxBody::new(b.map_err(|never| match never {})))
+            response.into_boxed()
         }
     }
 }
@@ -501,9 +501,7 @@ async fn handle_yaml_rule(
             response.set_header(&X_RIFT_FAULT, &VALUE_TCP);
             response.set_header_value(&X_RIFT_RULE_ID, &rule_id);
             response.set_header_value(&X_RIFT_TCP_FAULT, &format!("{fault_type:?}").to_lowercase());
-            RuleHandlingResult::Response(
-                response.map(|b| BoxBody::new(b.map_err(|never| match never {}))),
-            )
+            RuleHandlingResult::Response(response.into_boxed())
         }
         FaultDecision::Error {
             status,
@@ -639,9 +637,7 @@ async fn handle_yaml_rule(
                 }
             }
 
-            RuleHandlingResult::Response(
-                response.map(|b| BoxBody::new(b.map_err(|never| match never {}))),
-            )
+            RuleHandlingResult::Response(response.into_boxed())
         }
         FaultDecision::Latency {
             duration_ms,
@@ -665,9 +661,7 @@ async fn handle_yaml_rule(
                     let mut response = error_response(500, "Failed to read request body");
                     response.set_header(&X_RIFT_FAULT, &VALUE_LATENCY);
                     response.set_header_value(&X_RIFT_RULE_ID, &rule_id);
-                    return RuleHandlingResult::Response(
-                        response.map(|b| BoxBody::new(b.map_err(|never| match never {}))),
-                    );
+                    return RuleHandlingResult::Response(response.into_boxed());
                 }
             };
 
@@ -690,9 +684,7 @@ async fn handle_yaml_rule(
             response.set_header(&X_RIFT_FAULT, &VALUE_LATENCY);
             response.set_header_value(&X_RIFT_RULE_ID, &rule_id);
             response.set_header_value(&X_RIFT_LATENCY_MS, &duration_ms.to_string());
-            RuleHandlingResult::Response(
-                response.map(|b| BoxBody::new(b.map_err(|never| match never {}))),
-            )
+            RuleHandlingResult::Response(response.into_boxed())
         }
         FaultDecision::None => {
             debug!("No fault injected for matched rule: {}", rule.id);
