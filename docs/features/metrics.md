@@ -28,7 +28,7 @@ curl http://localhost:9090/metrics
 RIFT_METRICS_PORT=8090 rift-http-proxy
 
 # Docker
-docker run -e RIFT_METRICS_PORT=8090 -p 8090:8090 zainalpour/rift-proxy:latest
+docker run -e RIFT_METRICS_PORT=8090 -p 8090:8090 ghcr.io/etacassiopeia/rift-proxy:latest
 ```
 
 ### Disable Metrics

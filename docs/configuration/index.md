@@ -37,7 +37,7 @@ Load at startup:
 
 ```bash
 docker run -v $(pwd)/imposters.json:/imposters.json \
-  zainalpour/rift-proxy:latest --configfile /imposters.json
+  ghcr.io/etacassiopeia/rift-proxy:latest --configfile /imposters.json
 ```
 
 Or create dynamically via API:
@@ -111,7 +111,7 @@ Configure Rift behavior via environment variables:
 
 ```bash
 docker run -e MB_PORT=2525 -e MB_ALLOW_INJECTION=true \
-  -e RUST_LOG=debug zainalpour/rift-proxy:latest
+  -e RUST_LOG=debug ghcr.io/etacassiopeia/rift-proxy:latest
 ```
 
 ---

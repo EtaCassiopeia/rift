@@ -16,7 +16,7 @@ This tutorial walks you through creating various types of imposters with Rift.
 Ensure Rift is running:
 
 ```bash
-docker run -p 2525:2525 zainalpour/rift-proxy:latest
+docker run -p 2525:2525 ghcr.io/etacassiopeia/rift-proxy:latest
 ```
 
 ---

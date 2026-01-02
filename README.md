@@ -4,7 +4,7 @@
 
 [![Status](https://img.shields.io/badge/status-beta-blue)](https://github.com/EtaCassiopeia/rift)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.70%2B-orange)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/rust-nightly-orange)](https://www.rust-lang.org/)
 
 Rift is a high-performance, [Mountebank](http://www.mbtest.org/)-compatible mock server that delivers **2-250x better performance**. Use your existing Mountebank configurations and enjoy faster test execution.
 
@@ -44,9 +44,12 @@ Rift is a high-performance, [Mountebank](http://www.mbtest.org/)-compatible mock
 ### Run with Docker
 
 ```bash
-# Pull and run
-docker pull zainalpour/rift-proxy:latest
-docker run -p 2525:2525 zainalpour/rift-proxy:latest
+# Pull and run (from GitHub Container Registry)
+docker pull ghcr.io/etacassiopeia/rift-proxy:latest
+docker run -p 2525:2525 ghcr.io/etacassiopeia/rift-proxy:latest
+
+# Or from Docker Hub
+docker pull etacassiopeia/rift-proxy:latest
 
 # Create your first imposter
 curl -X POST http://localhost:2525/imposters \
@@ -69,7 +72,7 @@ curl http://localhost:4545/hello
 ```bash
 # Load your existing imposters.json
 docker run -p 2525:2525 -v $(pwd)/imposters.json:/imposters.json \
-  zainalpour/rift-proxy:latest --configfile /imposters.json
+  ghcr.io/etacassiopeia/rift-proxy:latest --configfile /imposters.json
 ```
 
 ---
@@ -79,24 +82,41 @@ docker run -p 2525:2525 -v $(pwd)/imposters.json:/imposters.json \
 ### Docker (Recommended)
 
 ```bash
-docker pull zainalpour/rift-proxy:latest
+# GitHub Container Registry (recommended)
+docker pull ghcr.io/etacassiopeia/rift-proxy:latest
+
+# Or Docker Hub
+docker pull etacassiopeia/rift-proxy:latest
+```
+
+### Homebrew (macOS/Linux)
+
+```bash
+brew tap etacassiopeia/rift
+brew install rift
+```
+
+### Cargo (crates.io)
+
+```bash
+cargo install rift-http-proxy
 ```
 
 ### Download Binary
 
+Download pre-built binaries from [GitHub Releases](https://github.com/EtaCassiopeia/rift/releases):
+
 ```bash
-# Linux
-curl -L https://github.com/EtaCassiopeia/rift/releases/latest/download/rift-http-proxy-linux-x86_64 -o rift
-
-# macOS (Apple Silicon)
-curl -L https://github.com/EtaCassiopeia/rift/releases/latest/download/rift-http-proxy-darwin-aarch64 -o rift
-
-# macOS (Intel)
-curl -L https://github.com/EtaCassiopeia/rift/releases/latest/download/rift-http-proxy-darwin-x86_64 -o rift
-
-chmod +x rift
-./rift
+# Example for Linux x86_64
+curl -LO https://github.com/EtaCassiopeia/rift/releases/latest/download/rift-vX.X.X-x86_64-unknown-linux-gnu.tar.gz
+tar -xzf rift-vX.X.X-x86_64-unknown-linux-gnu.tar.gz
+sudo mv rift-vX.X.X-x86_64-unknown-linux-gnu/bin/* /usr/local/bin/
 ```
+
+Available platforms:
+- Linux: `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`
+- macOS: `x86_64-apple-darwin`, `aarch64-apple-darwin`
+- Windows: `x86_64-pc-windows-msvc`
 
 ### Build from Source
 
@@ -213,19 +233,18 @@ Metrics include request counts, latency histograms, fault injection stats, and m
 
 ## CLI Tools
 
-Rift includes additional command-line tools:
+Rift includes additional command-line tools. All tools are included when you install via Homebrew or download release binaries.
 
 ### rift-tui - Interactive Terminal UI
 
 Manage imposters and stubs through an interactive terminal interface:
 
 ```bash
-# Build and run
-cargo build --release --bin rift-tui
-./target/release/rift-tui
+# If installed via Homebrew or release binary
+rift-tui
 
 # Connect to a different admin URL
-./target/release/rift-tui --admin-url http://localhost:2525
+rift-tui --admin-url http://localhost:2525
 ```
 
 Features:
@@ -241,8 +260,7 @@ Features:
 Automatically test your imposters by generating requests from predicates:
 
 ```bash
-cargo build --release --bin rift-verify
-./target/release/rift-verify --show-curl
+rift-verify --show-curl
 ```
 
 ### rift-lint - Configuration Linter
@@ -250,8 +268,15 @@ cargo build --release --bin rift-verify
 Validate imposter configuration files before loading:
 
 ```bash
-cargo build --release --bin rift-lint
-./target/release/rift-lint ./imposters/
+# If installed via Homebrew or release binary
+rift-lint ./imposters/
+
+# Via Docker (for CI/CD)
+docker run --rm -v $(pwd):/imposters ghcr.io/etacassiopeia/rift-lint .
+
+# Via cargo
+cargo install rift-lint
+rift-lint ./imposters/
 ```
 
 ---

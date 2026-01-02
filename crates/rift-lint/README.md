@@ -13,6 +13,27 @@ Configuration linter for Rift HTTP Proxy - validates imposter configuration file
 
 ## Installation
 
+### Via crates.io
+
+```bash
+cargo install rift-lint
+```
+
+### Via Homebrew (macOS/Linux)
+
+```bash
+brew tap etacassiopeia/rift
+brew install rift
+# rift-lint is included
+```
+
+### Via Docker (for CI/CD)
+
+```bash
+docker pull ghcr.io/etacassiopeia/rift-lint:latest
+docker run --rm -v $(pwd):/imposters ghcr.io/etacassiopeia/rift-lint .
+```
+
 ### Build from source
 
 ```bash

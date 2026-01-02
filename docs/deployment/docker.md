@@ -14,11 +14,14 @@ Deploy Rift using Docker for quick setup and consistent environments.
 ## Quick Start
 
 ```bash
-# Pull the image
-docker pull zainalpour/rift-proxy:latest
+# Pull the image (from GitHub Container Registry)
+docker pull ghcr.io/etacassiopeia/rift-proxy:latest
+
+# Or from Docker Hub
+docker pull etacassiopeia/rift-proxy:latest
 
 # Run with default settings
-docker run -p 2525:2525 zainalpour/rift-proxy:latest
+docker run -p 2525:2525 ghcr.io/etacassiopeia/rift-proxy:latest
 ```
 
 ---
@@ -35,7 +38,7 @@ docker run -d \
   -e MB_PORT=2525 \
   -e MB_ALLOW_INJECTION=true \
   -e RUST_LOG=info \
-  zainalpour/rift-proxy:latest
+  ghcr.io/etacassiopeia/rift-proxy:latest
 ```
 
 ### With Configuration File
@@ -46,7 +49,7 @@ docker run -d \
   -p 2525:2525 \
   -p 4545:4545 \
   -v $(pwd)/imposters.json:/imposters.json:ro \
-  zainalpour/rift-proxy:latest \
+  ghcr.io/etacassiopeia/rift-proxy:latest \
   --configfile /imposters.json
 ```
 
@@ -62,7 +65,7 @@ version: '3.8'
 
 services:
   rift:
-    image: zainalpour/rift-proxy:latest
+    image: ghcr.io/etacassiopeia/rift-proxy:latest
     container_name: rift
     ports:
       - "2525:2525"    # Admin API
@@ -87,7 +90,7 @@ services:
 ```yaml
 services:
   rift:
-    image: zainalpour/rift-proxy:latest
+    image: ghcr.io/etacassiopeia/rift-proxy:latest
     ports:
       - "2525:2525"    # Admin
       - "4545:4545"    # User Service
@@ -104,7 +107,7 @@ services:
 ```yaml
 services:
   rift:
-    image: zainalpour/rift-proxy:latest
+    image: ghcr.io/etacassiopeia/rift-proxy:latest
     ports:
       - "2525:2525"
       - "4545:4545"
@@ -136,7 +139,7 @@ services:
 
   # Mock server
   rift:
-    image: zainalpour/rift-proxy:latest
+    image: ghcr.io/etacassiopeia/rift-proxy:latest
     ports:
       - "2525:2525"
     volumes:
@@ -154,7 +157,7 @@ services:
 ```yaml
 services:
   rift:
-    image: zainalpour/rift-proxy:latest
+    image: ghcr.io/etacassiopeia/rift-proxy:latest
     ports:
       - "2525:2525"
       - "4545:4545"
@@ -186,7 +189,7 @@ services:
 ```yaml
 services:
   rift:
-    image: zainalpour/rift-proxy:latest
+    image: ghcr.io/etacassiopeia/rift-proxy:latest
     deploy:
       resources:
         limits:
@@ -202,7 +205,7 @@ services:
 ```yaml
 services:
   rift:
-    image: zainalpour/rift-proxy:latest
+    image: ghcr.io/etacassiopeia/rift-proxy:latest
     logging:
       driver: json-file
       options:
@@ -217,7 +220,7 @@ services:
 ```yaml
 services:
   rift:
-    image: zainalpour/rift-proxy:latest
+    image: ghcr.io/etacassiopeia/rift-proxy:latest
     restart: unless-stopped
 ```
 
@@ -228,7 +231,7 @@ services:
 ### Dockerfile
 
 ```dockerfile
-FROM zainalpour/rift-proxy:latest
+FROM ghcr.io/etacassiopeia/rift-proxy:latest
 
 # Copy configuration
 COPY imposters.json /config/imposters.json
@@ -297,7 +300,7 @@ docker logs rift
 
 # Verify config
 docker run --rm -v $(pwd)/imposters.json:/imposters.json \
-  zainalpour/rift-proxy:latest --validate /imposters.json
+  ghcr.io/etacassiopeia/rift-proxy:latest --validate /imposters.json
 ```
 
 ### Port Already in Use
@@ -307,7 +310,7 @@ docker run --rm -v $(pwd)/imposters.json:/imposters.json \
 lsof -i :2525
 
 # Use different host port
-docker run -p 3525:2525 zainalpour/rift-proxy:latest
+docker run -p 3525:2525 ghcr.io/etacassiopeia/rift-proxy:latest
 ```
 
 ### Permission Denied

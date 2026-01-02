@@ -19,8 +19,8 @@ Rift can be deployed in various environments, from local development to producti
 Quick setup for development and testing:
 
 ```bash
-docker pull zainalpour/rift-proxy:latest
-docker run -p 2525:2525 zainalpour/rift-proxy:latest
+docker pull ghcr.io/etacassiopeia/rift-proxy:latest
+docker run -p 2525:2525 ghcr.io/etacassiopeia/rift-proxy:latest
 ```
 
 [Full Docker Guide]({{ site.baseurl }}/deployment/docker/)
@@ -40,7 +40,7 @@ spec:
     spec:
       containers:
         - name: rift
-          image: zainalpour/rift-proxy:latest
+          image: ghcr.io/etacassiopeia/rift-proxy:latest
           ports:
             - containerPort: 2525
             - containerPort: 9090

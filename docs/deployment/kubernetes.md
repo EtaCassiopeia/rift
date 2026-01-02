@@ -34,7 +34,7 @@ spec:
     spec:
       containers:
         - name: rift
-          image: zainalpour/rift-proxy:latest
+          image: ghcr.io/etacassiopeia/rift-proxy:latest
           ports:
             - name: admin
               containerPort: 2525
@@ -133,7 +133,7 @@ spec:
     spec:
       containers:
         - name: rift
-          image: zainalpour/rift-proxy:latest
+          image: ghcr.io/etacassiopeia/rift-proxy:latest
           args: ["--configfile", "/config/imposters.json"]
           ports:
             - name: admin
@@ -234,7 +234,7 @@ spec:
 
         # Rift sidecar
         - name: rift
-          image: zainalpour/rift-proxy:latest
+          image: ghcr.io/etacassiopeia/rift-proxy:latest
           args: ["--configfile", "/config/imposters.json"]
           ports:
             - containerPort: 4545
@@ -274,7 +274,7 @@ spec:
                 topologyKey: kubernetes.io/hostname
       containers:
         - name: rift
-          image: zainalpour/rift-proxy:latest
+          image: ghcr.io/etacassiopeia/rift-proxy:latest
 ```
 
 ### Horizontal Pod Autoscaler
@@ -392,7 +392,7 @@ spec:
 replicaCount: 1
 
 image:
-  repository: zainalpour/rift-proxy
+  repository: ghcr.io/etacassiopeia/rift-proxy
   tag: latest
   pullPolicy: IfNotPresent
 

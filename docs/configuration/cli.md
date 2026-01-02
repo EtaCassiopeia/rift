@@ -98,7 +98,7 @@ docker run \
   -e RUST_LOG=debug \
   -p 2525:2525 \
   -p 9090:9090 \
-  zainalpour/rift-proxy:latest
+  ghcr.io/etacassiopeia/rift-proxy:latest
 ```
 
 ### Docker Compose Example
@@ -107,7 +107,7 @@ docker run \
 version: '3.8'
 services:
   rift:
-    image: zainalpour/rift-proxy:latest
+    image: ghcr.io/etacassiopeia/rift-proxy:latest
     ports:
       - "2525:2525"
       - "4545:4545"

@@ -282,7 +282,7 @@ Load on startup:
 
 ```bash
 docker run -v $(pwd)/imposters.json:/imposters.json \
-  zainalpour/rift-proxy:latest --configfile /imposters.json
+  ghcr.io/etacassiopeia/rift-proxy:latest --configfile /imposters.json
 ```
 
 ### EJS Templates

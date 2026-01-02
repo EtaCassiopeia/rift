@@ -50,7 +50,7 @@ services:
 # After (Rift)
 services:
   rift:
-    image: zainalpour/rift-proxy:latest
+    image: ghcr.io/etacassiopeia/rift-proxy:latest
     ports:
       - "2525:2525"
     environment:
@@ -67,7 +67,7 @@ mb start --configfile imposters.json
 
 # Rift
 docker run -v $(pwd)/imposters.json:/imposters.json \
-  zainalpour/rift-proxy:latest --configfile /imposters.json
+  ghcr.io/etacassiopeia/rift-proxy:latest --configfile /imposters.json
 ```
 
 ### Step 3: Update Environment Variables
@@ -141,7 +141,7 @@ docker run \
   -e MB_ALLOW_INJECTION=true \
   -e RUST_LOG=warn \
   -v $(pwd)/imposters.json:/imposters.json \
-  zainalpour/rift-proxy:latest \
+  ghcr.io/etacassiopeia/rift-proxy:latest \
   --configfile /imposters.json
 ```
 
@@ -152,7 +152,7 @@ version: '3.8'
 
 services:
   rift:
-    image: zainalpour/rift-proxy:latest
+    image: ghcr.io/etacassiopeia/rift-proxy:latest
     ports:
       - "2525:2525"      # Admin API
       - "4545:4545"      # Imposter port
@@ -175,7 +175,7 @@ services:
 Enable injection via environment variable:
 
 ```bash
-docker run -e MB_ALLOW_INJECTION=true zainalpour/rift-proxy:latest
+docker run -e MB_ALLOW_INJECTION=true ghcr.io/etacassiopeia/rift-proxy:latest
 ```
 
 ### Different Response Format

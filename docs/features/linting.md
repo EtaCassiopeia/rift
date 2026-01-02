@@ -11,17 +11,32 @@ Rift includes a powerful configuration linter (`rift-lint`) that validates impos
 
 ---
 
+## Installation
+
+```bash
+# Via Homebrew (macOS/Linux)
+brew tap etacassiopeia/rift
+brew install rift
+# rift-lint is included
+
+# Via crates.io
+cargo install rift-lint
+
+# Via Docker (for CI/CD)
+docker pull ghcr.io/etacassiopeia/rift-lint:latest
+```
+
 ## Quick Start
 
 ```bash
-# Build the linter
-cargo build --release --bin rift-lint
-
 # Lint a directory of imposters
-./target/release/rift-lint ./imposters/
+rift-lint ./imposters/
 
 # Lint with strict mode (warnings become errors)
-./target/release/rift-lint ./imposters/ --strict
+rift-lint ./imposters/ --strict
+
+# Using Docker
+docker run --rm -v $(pwd):/imposters ghcr.io/etacassiopeia/rift-lint .
 ```
 
 ---
@@ -118,16 +133,27 @@ rift-lint ./imposters/ --fix
 
 ```yaml
 - name: Lint Imposters
+  uses: docker://ghcr.io/etacassiopeia/rift-lint:latest
+  with:
+    args: ./imposters/ --strict
+```
+
+Or with a direct command:
+
+```yaml
+- name: Lint Imposters
   run: |
-    ./target/release/rift-lint ./imposters/ --strict
+    docker run --rm -v ${{ github.workspace }}:/imposters \
+      ghcr.io/etacassiopeia/rift-lint:latest . --strict
 ```
 
 ### GitLab CI
 
 ```yaml
 lint:
+  image: ghcr.io/etacassiopeia/rift-lint:latest
   script:
-    - ./target/release/rift-lint ./imposters/ --output json > lint-results.json
+    - rift-lint ./imposters/ --output json > lint-results.json
   artifacts:
     reports:
       codequality: lint-results.json

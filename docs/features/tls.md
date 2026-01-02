@@ -181,7 +181,7 @@ openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key \
 version: '3.8'
 services:
   rift:
-    image: zainalpour/rift-proxy:latest
+    image: ghcr.io/etacassiopeia/rift-proxy:latest
     ports:
       - "2525:2525"
       - "4545:4545"
@@ -232,7 +232,7 @@ metadata:
 spec:
   containers:
     - name: rift
-      image: zainalpour/rift-proxy:latest
+      image: ghcr.io/etacassiopeia/rift-proxy:latest
       volumeMounts:
         - name: tls
           mountPath: /certs

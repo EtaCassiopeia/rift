@@ -352,7 +352,7 @@ Each predicate object can contain:
 ```bash
 # Docker
 docker run -v $(pwd)/imposters.json:/imposters.json \
-  zainalpour/rift-proxy:latest --configfile /imposters.json
+  ghcr.io/etacassiopeia/rift-proxy:latest --configfile /imposters.json
 
 # Binary
 ./rift-http-proxy --configfile imposters.json
