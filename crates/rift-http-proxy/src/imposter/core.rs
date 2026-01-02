@@ -398,8 +398,9 @@ impl Imposter {
     }
 
     /// Get RiftScript response if present
+    /// Note: This peeks at the current response without advancing the cycler
     pub fn get_rift_script_response(&self, stub_state: &StubState) -> Option<RiftScriptConfig> {
-        let response = stub_state.get_next_response()?;
+        let response = stub_state.peek_response()?;
         get_rift_script_config(response)
     }
 
