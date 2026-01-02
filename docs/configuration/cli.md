@@ -200,6 +200,61 @@ kill -9 $(pidof rift-http-proxy)
 
 ---
 
+## Subcommands
+
+Rift supports several subcommands for server management:
+
+### start
+
+Start the Rift server (default behavior when no subcommand is specified):
+
+```bash
+rift-http-proxy start
+rift-http-proxy start --port 3525 --configfile imposters.json
+```
+
+### stop
+
+Stop a running Rift server using its PID file:
+
+```bash
+# Stop server using default PID file (rift.pid)
+rift-http-proxy stop
+
+# Stop using custom PID file
+rift-http-proxy stop --pidfile /var/run/rift.pid
+```
+
+### restart
+
+Restart a running Rift server:
+
+```bash
+rift-http-proxy restart --pidfile /var/run/rift.pid
+```
+
+### save
+
+Save current imposters to a file for later replay:
+
+```bash
+# Save imposters to file
+rift-http-proxy save --savefile recorded.json
+
+# Save with proxies removed (pure recorded responses)
+rift-http-proxy save --savefile mocks.json --remove-proxies
+```
+
+### replay
+
+Replay saved imposters from a file:
+
+```bash
+rift-http-proxy replay --configfile recorded.json
+```
+
+---
+
 ## Additional CLI Tools
 
 Rift includes additional CLI tools for working with imposters:
@@ -209,11 +264,39 @@ Rift includes additional CLI tools for working with imposters:
 Test imposters by making requests and verifying responses.
 
 ```bash
+rift-verify [OPTIONS]
+
+Options:
+  -a, --admin-url <URL>   Rift admin API URL [default: http://localhost:2525]
+  -p, --port <PORT>       Verify specific imposter port only
+  -c, --show-curl         Show curl commands for each test
+  -v, --verbose           Verbose output with pass/fail details
+  -t, --timeout <SECS>    Request timeout in seconds [default: 10]
+      --dry-run           Show what would be tested without making requests
+      --skip-dynamic      Skip stubs with inject/proxy/script responses
+      --status-only       Only verify status codes (ignore body/headers)
+      --demo              Run demo showing enhanced error output
+  -h, --help              Print help
+  -V, --version           Print version
+```
+
+**Examples:**
+
+```bash
 # Verify all imposters
 rift-verify
 
-# Verify specific imposter
+# Verify specific imposter with curl commands
 rift-verify --port 4545 --show-curl
+
+# Dry run to see test plan
+rift-verify --dry-run --verbose
+
+# Skip dynamic stubs (proxy, inject, script)
+rift-verify --skip-dynamic
+
+# Status-only mode for cycling responses
+rift-verify --status-only
 ```
 
 See [Stub Analysis]({{ site.baseurl }}/features/stub-analysis/) for details.
@@ -223,14 +306,38 @@ See [Stub Analysis]({{ site.baseurl }}/features/stub-analysis/) for details.
 Validate imposter configuration files before loading.
 
 ```bash
+rift-lint <path> [OPTIONS]
+
+Arguments:
+  <path>              Path to imposter file or directory
+
+Options:
+  -f, --fix           Fix issues automatically where possible
+  -o, --output <FMT>  Output format: text (default), json
+  -e, --errors-only   Only show errors (hide warnings)
+  -v, --verbose       Verbose output
+  -s, --strict        Strict mode - treat warnings as errors
+  -h, --help          Print help
+  -V, --version       Print version
+```
+
+**Examples:**
+
+```bash
 # Lint all imposters in directory
 rift-lint ./imposters/
 
-# Strict mode for CI/CD
+# Strict mode for CI/CD (exits 1 on warnings)
 rift-lint ./imposters/ --strict
 
-# JSON output
+# JSON output for tooling integration
 rift-lint ./imposters/ --output json
+
+# Auto-fix header type issues
+rift-lint ./imposters/ --fix
+
+# Only show errors, hide warnings
+rift-lint ./imposters/ --errors-only
 ```
 
 See [Configuration Linting]({{ site.baseurl }}/features/linting/) for details.

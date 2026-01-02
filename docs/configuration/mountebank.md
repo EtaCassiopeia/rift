@@ -46,9 +46,36 @@ The Mountebank JSON format is the recommended way to configure Rift for service 
 | `stubs` | array | Request/response mappings |
 | `defaultResponse` | object | Response when no stub matches |
 | `recordRequests` | boolean | Store requests for verification |
+| `recordMatches` | boolean | Record which stub matched each request |
+| `allowCORS` | boolean | Add CORS headers to responses |
 | `key` | string | PEM private key (HTTPS) |
 | `cert` | string | PEM certificate (HTTPS) |
 | `mutualAuth` | boolean | Require client certificate |
+
+### Rift-Specific Metadata Fields
+
+| Field | Type | Description |
+|:------|:-----|:------------|
+| `serviceName` | string | Service name for documentation (alias: `service_name`) |
+| `serviceInfo` | object | Arbitrary metadata (JSON object) |
+| `_rift` | object | Rift extensions (flow state, faults, scripting) |
+
+**Example with metadata:**
+
+```json
+{
+  "port": 4545,
+  "protocol": "http",
+  "name": "User Service",
+  "serviceName": "user-api",
+  "serviceInfo": {
+    "team": "platform",
+    "version": "1.2.3",
+    "documentation": "https://docs.example.com/user-api"
+  },
+  "stubs": [...]
+}
+```
 
 ---
 
