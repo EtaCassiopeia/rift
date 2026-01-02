@@ -73,10 +73,11 @@ conditionalDescribe('Mountebank API Compatibility', () => {
         const response = await axios.get(`${baseUrl}/`);
 
         expect(response.status).toBe(200);
-        // Rift returns server info with _links instead of inline imposters
-        // This is a minor API difference that doesn't affect functionality
-        expect(response.data).toHaveProperty('name');
-        expect(response.data).toHaveProperty('version');
+        // Rift returns _links structure for API navigation
+        expect(response.data).toHaveProperty('_links');
+        expect(response.data._links).toHaveProperty('imposters');
+        expect(response.data._links).toHaveProperty('config');
+        expect(response.data._links).toHaveProperty('logs');
       });
     });
 

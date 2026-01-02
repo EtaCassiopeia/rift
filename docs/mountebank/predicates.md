@@ -167,44 +167,42 @@ Check field existence:
 
 ## JSONPath Predicates
 
-Match specific values in JSON bodies using JSONPath:
+Match specific values in JSON bodies using JSONPath. The `jsonpath` selector is combined with a predicate operation:
 
 ```json
 {
-  "jsonpath": {
-    "selector": "$.user.name",
-    "equals": "admin"
-  }
+  "jsonpath": { "selector": "$.user.name" },
+  "equals": { "body": "admin" }
 }
 ```
 
 ### JSONPath Operators
 
 ```json
-// Equals
-{ "jsonpath": { "selector": "$.count", "equals": 10 } }
+// Equals - match exact value
+{ "jsonpath": { "selector": "$.count" }, "equals": { "body": 10 } }
 
-// Contains
-{ "jsonpath": { "selector": "$.tags", "contains": "important" } }
+// Contains - partial match
+{ "jsonpath": { "selector": "$.tags" }, "contains": { "body": "important" } }
 
-// Matches (regex)
-{ "jsonpath": { "selector": "$.email", "matches": ".*@example\\.com" } }
+// Matches - regex pattern
+{ "jsonpath": { "selector": "$.email" }, "matches": { "body": ".*@example\\.com" } }
 
-// Exists
-{ "jsonpath": { "selector": "$.optional", "exists": true } }
+// Exists - check field presence
+{ "jsonpath": { "selector": "$.optional" }, "exists": { "body": true } }
 ```
 
 ### JSONPath Examples
 
 ```json
 // Match array element
-{ "jsonpath": { "selector": "$.items[0].name", "equals": "First Item" } }
+{ "jsonpath": { "selector": "$.items[0].name" }, "equals": { "body": "First Item" } }
 
 // Match nested value
-{ "jsonpath": { "selector": "$.user.address.city", "equals": "NYC" } }
+{ "jsonpath": { "selector": "$.user.address.city" }, "equals": { "body": "NYC" } }
 
 // Match with filter
-{ "jsonpath": { "selector": "$.items[?(@.price > 100)]", "exists": true } }
+{ "jsonpath": { "selector": "$.items[?(@.price > 100)]" }, "exists": { "body": true } }
 ```
 
 ---
