@@ -62,11 +62,13 @@ jobs:
             no_default_features: true
             cross: true
 
-          # macOS x86_64 (Intel) - built on ARM64 runner with cross-compilation
+          # macOS x86_64 (Intel) - cross-compiled on ARM64 runner
+          # Note: Lua disabled because LuaJIT can't be cross-compiled via pkg-config
           - target: x86_64-apple-darwin
             os: macos-14
             archive: tar.gz
-            features: lua,javascript,redis-backend
+            features: javascript,redis-backend
+            no_default_features: true
 
           # macOS ARM64 (Apple Silicon)
           - target: aarch64-apple-darwin
