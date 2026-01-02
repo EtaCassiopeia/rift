@@ -61,7 +61,7 @@ curl -X POST http://localhost:2525/imposters \
 | `stubs` | array | No | Request/response mappings |
 | `defaultResponse` | object | No | Response when no stub matches |
 | `recordRequests` | boolean | No | Store requests for verification |
-| `allowCORS` | boolean | No | Enable CORS headers |
+| `allowCORS` | boolean | No | Enable CORS headers and handle preflight requests |
 | `service_name` | string | No | Service identifier for documentation |
 | `service_info` | object | No | Additional service metadata |
 | `key` | string | HTTPS only | PEM-encoded private key |

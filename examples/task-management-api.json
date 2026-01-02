@@ -1,0 +1,154 @@
+{
+  "imposters": [
+    {
+      "port": 4545,
+      "protocol": "http",
+      "name": "Task Management API",
+      "allowCORS": true,
+      "recordRequests": true,
+      "stubs": [
+        {
+          "scenarioName": "TaskAPI-GetTasks-Success",
+          "predicates": [
+            { "endsWith": { "path": "/tasks" } },
+            { "deepEquals": { "method": "GET" } }
+          ],
+          "responses": [{
+            "is": {
+              "statusCode": 200,
+              "headers": { "Content-Type": "application/json" },
+              "body": {
+                "count": 3,
+                "tasks": [
+                  { "taskId": "task-001", "name": "Review PR", "status": "OPEN", "priority": "HIGH" },
+                  { "taskId": "task-002", "name": "Update docs", "status": "IN_PROGRESS", "priority": "MEDIUM" },
+                  { "taskId": "task-003", "name": "Fix bug", "status": "CLOSED", "priority": "LOW" }
+                ]
+              }
+            }
+          }]
+        },
+        {
+          "scenarioName": "TaskAPI-GetTasks-FilterByStatus",
+          "predicates": [
+            { "endsWith": { "path": "/tasks" } },
+            { "equals": { "query": { "status": "OPEN" } } },
+            { "deepEquals": { "method": "GET" } }
+          ],
+          "responses": [{
+            "is": {
+              "statusCode": 200,
+              "headers": { "Content-Type": "application/json" },
+              "body": {
+                "count": 1,
+                "tasks": [
+                  { "taskId": "task-001", "name": "Review PR", "status": "OPEN", "priority": "HIGH" }
+                ]
+              }
+            }
+          }]
+        },
+        {
+          "scenarioName": "TaskAPI-GetTaskById-Success",
+          "predicates": [
+            { "matches": { "path": "/tasks/task-\\d+" } },
+            { "deepEquals": { "method": "GET" } }
+          ],
+          "responses": [{
+            "is": {
+              "statusCode": 200,
+              "headers": { "Content-Type": "application/json" },
+              "body": {
+                "taskId": "task-001",
+                "name": "Review PR",
+                "description": "Review the latest pull request for the API changes",
+                "status": "OPEN",
+                "priority": "HIGH",
+                "assignee": "alice@example.com",
+                "createdAt": "2024-01-15T10:00:00Z",
+                "updatedAt": "2024-01-15T14:30:00Z"
+              }
+            }
+          }]
+        },
+        {
+          "scenarioName": "TaskAPI-GetTaskById-NotFound",
+          "predicates": [
+            { "matches": { "path": "/tasks/task-999" } },
+            { "deepEquals": { "method": "GET" } }
+          ],
+          "responses": [{
+            "is": {
+              "statusCode": 404,
+              "headers": { "Content-Type": "application/json" },
+              "body": { "error": "Task not found", "code": "TASK_NOT_FOUND" }
+            }
+          }]
+        },
+        {
+          "scenarioName": "TaskAPI-CreateTask-Success",
+          "predicates": [
+            { "endsWith": { "path": "/tasks" } },
+            { "deepEquals": { "method": "POST" } },
+            { "jsonpath": { "selector": "$.name", "exists": true } }
+          ],
+          "responses": [{
+            "is": {
+              "statusCode": 201,
+              "headers": { "Content-Type": "application/json" },
+              "body": {
+                "taskId": "task-new-001",
+                "message": "Task created successfully"
+              }
+            }
+          }]
+        },
+        {
+          "scenarioName": "TaskAPI-CreateTask-ValidationError",
+          "predicates": [
+            { "endsWith": { "path": "/tasks" } },
+            { "deepEquals": { "method": "POST" } },
+            { "not": { "jsonpath": { "selector": "$.name", "exists": true } } }
+          ],
+          "responses": [{
+            "is": {
+              "statusCode": 400,
+              "headers": { "Content-Type": "application/json" },
+              "body": {
+                "error": "Validation failed",
+                "code": "VALIDATION_ERROR",
+                "details": [{ "field": "name", "message": "Name is required" }]
+              }
+            }
+          }]
+        },
+        {
+          "scenarioName": "TaskAPI-UpdateTask-Success",
+          "predicates": [
+            { "matches": { "path": "/tasks/task-\\d+" } },
+            { "deepEquals": { "method": "PUT" } }
+          ],
+          "responses": [{
+            "is": {
+              "statusCode": 200,
+              "headers": { "Content-Type": "application/json" },
+              "body": { "message": "Task updated successfully" }
+            }
+          }]
+        },
+        {
+          "scenarioName": "TaskAPI-DeleteTask-Success",
+          "predicates": [
+            { "matches": { "path": "/tasks/task-\\d+" } },
+            { "deepEquals": { "method": "DELETE" } }
+          ],
+          "responses": [{
+            "is": {
+              "statusCode": 204
+            }
+          }]
+        }
+      ]
+    }
+  ]
+}

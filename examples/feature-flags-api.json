@@ -1,0 +1,84 @@
+{
+  "imposters": [
+    {
+      "port": 4546,
+      "protocol": "http",
+      "name": "Feature Flags API",
+      "allowCORS": true,
+      "stubs": [
+        {
+          "scenarioName": "FeatureFlags-DarkMode-Enabled",
+          "predicates": [
+            { "endsWith": { "path": "/features/DARK_MODE" } },
+            { "deepEquals": { "method": "GET" } }
+          ],
+          "responses": [{
+            "is": {
+              "statusCode": 200,
+              "headers": { "Content-Type": "application/json" },
+              "body": {
+                "featureId": "DARK_MODE",
+                "featureName": "Dark Mode",
+                "description": "Enable dark mode UI theme",
+                "isEnabled": true
+              }
+            }
+          }]
+        },
+        {
+          "scenarioName": "FeatureFlags-BetaFeature-Disabled",
+          "predicates": [
+            { "endsWith": { "path": "/features/BETA_FEATURE" } },
+            { "deepEquals": { "method": "GET" } }
+          ],
+          "responses": [{
+            "is": {
+              "statusCode": 200,
+              "headers": { "Content-Type": "application/json" },
+              "body": {
+                "featureId": "BETA_FEATURE",
+                "featureName": "Beta Feature",
+                "description": "New experimental feature",
+                "isEnabled": false
+              }
+            }
+          }]
+        },
+        {
+          "scenarioName": "FeatureFlags-NotFound",
+          "predicates": [
+            { "matches": { "path": "/features/UNKNOWN_.*" } },
+            { "deepEquals": { "method": "GET" } }
+          ],
+          "responses": [{
+            "is": {
+              "statusCode": 404,
+              "headers": { "Content-Type": "application/json" },
+              "body": { "error": "Feature flag not found" }
+            }
+          }]
+        },
+        {
+          "scenarioName": "FeatureFlags-ListAll",
+          "predicates": [
+            { "equals": { "path": "/features" } },
+            { "deepEquals": { "method": "GET" } }
+          ],
+          "responses": [{
+            "is": {
+              "statusCode": 200,
+              "headers": { "Content-Type": "application/json" },
+              "body": {
+                "features": [
+                  { "featureId": "DARK_MODE", "isEnabled": true },
+                  { "featureId": "BETA_FEATURE", "isEnabled": false },
+                  { "featureId": "NEW_DASHBOARD", "isEnabled": true }
+                ]
+              }
+            }
+          }]
+        }
+      ]
+    }
+  ]
+}

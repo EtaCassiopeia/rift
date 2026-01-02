@@ -1,0 +1,127 @@
+{
+  "imposters": [
+    {
+      "port": 4547,
+      "protocol": "http",
+      "name": "Authentication API",
+      "allowCORS": true,
+      "stubs": [
+        {
+          "scenarioName": "Auth-Login-Success",
+          "predicates": [
+            { "equals": { "path": "/auth/login" } },
+            { "deepEquals": { "method": "POST" } },
+            { "equals": { "body": { "username": "admin", "password": "secret123" } } }
+          ],
+          "responses": [{
+            "is": {
+              "statusCode": 200,
+              "headers": { "Content-Type": "application/json" },
+              "body": {
+                "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhZG1pbiIsInJvbGUiOiJhZG1pbiJ9.mock",
+                "expiresIn": 3600,
+                "tokenType": "Bearer",
+                "user": {
+                  "id": "user-001",
+                  "username": "admin",
+                  "role": "admin"
+                }
+              }
+            }
+          }]
+        },
+        {
+          "scenarioName": "Auth-Login-InvalidCredentials",
+          "predicates": [
+            { "equals": { "path": "/auth/login" } },
+            { "deepEquals": { "method": "POST" } },
+            { "contains": { "body": { "username": "admin" } } },
+            { "not": { "equals": { "body": { "password": "secret123" } } } }
+          ],
+          "responses": [{
+            "is": {
+              "statusCode": 401,
+              "headers": { "Content-Type": "application/json" },
+              "body": {
+                "error": "Invalid credentials",
+                "code": "AUTH_INVALID_CREDENTIALS"
+              }
+            }
+          }]
+        },
+        {
+          "scenarioName": "Auth-Login-UserNotFound",
+          "predicates": [
+            { "equals": { "path": "/auth/login" } },
+            { "deepEquals": { "method": "POST" } },
+            { "not": { "contains": { "body": { "username": "admin" } } } }
+          ],
+          "responses": [{
+            "is": {
+              "statusCode": 401,
+              "headers": { "Content-Type": "application/json" },
+              "body": {
+                "error": "User not found",
+                "code": "AUTH_USER_NOT_FOUND"
+              }
+            }
+          }]
+        },
+        {
+          "scenarioName": "Auth-ValidateToken-Success",
+          "predicates": [
+            { "equals": { "path": "/auth/validate" } },
+            { "deepEquals": { "method": "GET" } },
+            { "exists": { "headers": { "Authorization": true } } },
+            { "startsWith": { "headers": { "Authorization": "Bearer " } } }
+          ],
+          "responses": [{
+            "is": {
+              "statusCode": 200,
+              "headers": { "Content-Type": "application/json" },
+              "body": {
+                "valid": true,
+                "user": { "id": "user-001", "username": "admin", "role": "admin" }
+              }
+            }
+          }]
+        },
+        {
+          "scenarioName": "Auth-ValidateToken-Missing",
+          "predicates": [
+            { "equals": { "path": "/auth/validate" } },
+            { "deepEquals": { "method": "GET" } },
+            { "not": { "exists": { "headers": { "Authorization": true } } } }
+          ],
+          "responses": [{
+            "is": {
+              "statusCode": 401,
+              "headers": {
+                "Content-Type": "application/json",
+                "WWW-Authenticate": "Bearer realm=\"api\""
+              },
+              "body": {
+                "error": "Missing authorization header",
+                "code": "AUTH_MISSING_TOKEN"
+              }
+            }
+          }]
+        },
+        {
+          "scenarioName": "Auth-Logout-Success",
+          "predicates": [
+            { "equals": { "path": "/auth/logout" } },
+            { "deepEquals": { "method": "POST" } }
+          ],
+          "responses": [{
+            "is": {
+              "statusCode": 200,
+              "headers": { "Content-Type": "application/json" },
+              "body": { "message": "Logged out successfully" }
+            }
+          }]
+        }
+      ]
+    }
+  ]
+}

@@ -322,6 +322,174 @@ curl -X DELETE http://localhost:2525/imposters
 
 ---
 
+## Query Parameter Filtering
+
+Match requests based on query parameters:
+
+```bash
+curl -X POST http://localhost:2525/imposters \
+  -H "Content-Type: application/json" \
+  -d '{
+    "port": 4551,
+    "protocol": "http",
+    "stubs": [
+      {
+        "predicates": [
+          { "endsWith": { "path": "/tasks" } },
+          { "equals": { "query": { "status": "OPEN" } } },
+          { "deepEquals": { "method": "GET" } }
+        ],
+        "responses": [{
+          "is": {
+            "statusCode": 200,
+            "body": { "count": 3, "tasks": [{"id": 1, "status": "OPEN"}] }
+          }
+        }]
+      },
+      {
+        "predicates": [
+          { "endsWith": { "path": "/tasks" } },
+          { "equals": { "query": { "status": "CLOSED" } } },
+          { "deepEquals": { "method": "GET" } }
+        ],
+        "responses": [{
+          "is": {
+            "statusCode": 200,
+            "body": { "count": 0, "tasks": [] }
+          }
+        }]
+      }
+    ]
+  }'
+```
+
+```bash
+curl "http://localhost:4551/tasks?status=OPEN"
+# {"count":3,"tasks":[{"id":1,"status":"OPEN"}]}
+
+curl "http://localhost:4551/tasks?status=CLOSED"
+# {"count":0,"tasks":[]}
+```
+
+---
+
+## Organizing Stubs with Scenarios
+
+Use `scenarioName` to organize and document your stubs:
+
+```bash
+curl -X POST http://localhost:2525/imposters \
+  -H "Content-Type: application/json" \
+  -d '{
+    "port": 4552,
+    "protocol": "http",
+    "name": "User Service",
+    "allowCORS": true,
+    "stubs": [
+      {
+        "scenarioName": "UserService-GetUser-Success",
+        "predicates": [
+          { "matches": { "path": "/users/\\d+" } },
+          { "deepEquals": { "method": "GET" } }
+        ],
+        "responses": [{
+          "is": {
+            "statusCode": 200,
+            "headers": { "Content-Type": "application/json" },
+            "body": { "id": 1, "name": "Alice", "email": "alice@example.com" }
+          }
+        }]
+      },
+      {
+        "scenarioName": "UserService-GetUser-NotFound",
+        "predicates": [
+          { "equals": { "path": "/users/999" } },
+          { "deepEquals": { "method": "GET" } }
+        ],
+        "responses": [{
+          "is": {
+            "statusCode": 404,
+            "headers": { "Content-Type": "application/json" },
+            "body": { "error": "User not found", "code": "USER_NOT_FOUND" }
+          }
+        }]
+      }
+    ]
+  }'
+```
+
+The `scenarioName` field helps identify which test scenario each stub supports.
+
+---
+
+## CORS Support
+
+Enable CORS for browser-based testing with `allowCORS`:
+
+```json
+{
+  "port": 4545,
+  "protocol": "http",
+  "allowCORS": true,
+  "stubs": [...]
+}
+```
+
+This automatically adds CORS headers to responses and handles preflight OPTIONS requests.
+
+---
+
+## Example Files
+
+Complete working examples are available in the [`examples/`](https://github.com/EtaCassiopeia/rift/tree/master/examples) directory:
+
+| File | Description |
+|:-----|:------------|
+| `basic-api.json` | Simple REST API with CRUD operations |
+| `error-testing.json` | Various HTTP error responses |
+| `latency-testing.json` | Latency simulation for timeout testing |
+| `task-management-api.json` | Complete task API with scenarios |
+| `feature-flags-api.json` | Feature toggle service mock |
+| `authentication-api.json` | Login/logout with token validation |
+
+Load an example:
+
+```bash
+curl -X POST http://localhost:2525/imposters \
+  -H "Content-Type: application/json" \
+  -d @examples/task-management-api.json
+```
+
+---
+
+## Managing Imposters
+
+### List All Imposters
+
+```bash
+curl http://localhost:2525/imposters
+```
+
+### Get Imposter Details
+
+```bash
+curl http://localhost:2525/imposters/4545
+```
+
+### Delete an Imposter
+
+```bash
+curl -X DELETE http://localhost:2525/imposters/4545
+```
+
+### Delete All Imposters
+
+```bash
+curl -X DELETE http://localhost:2525/imposters
+```
+
+---
+
 ## Next Steps
 
 - [Predicates Reference]({{ site.baseurl }}/mountebank/predicates/) - All predicate types
