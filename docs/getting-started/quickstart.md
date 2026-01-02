@@ -192,10 +192,8 @@ curl -X POST http://localhost:2525/imposters \
     "protocol": "http",
     "stubs": [{
       "predicates": [{
-        "jsonpath": {
-          "selector": "$.order.total",
-          "equals": 100
-        }
+        "jsonpath": { "selector": "$.order.total" },
+        "equals": { "body": 100 }
       }],
       "responses": [{
         "is": {

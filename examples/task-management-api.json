@@ -90,7 +90,7 @@
           "predicates": [
             { "endsWith": { "path": "/tasks" } },
             { "deepEquals": { "method": "POST" } },
-            { "jsonpath": { "selector": "$.name", "exists": true } }
+            { "jsonpath": { "selector": "$.name" }, "exists": { "body": true } }
           ],
           "responses": [{
             "is": {
@@ -108,7 +108,7 @@
           "predicates": [
             { "endsWith": { "path": "/tasks" } },
             { "deepEquals": { "method": "POST" } },
-            { "not": { "jsonpath": { "selector": "$.name", "exists": true } } }
+            { "not": { "jsonpath": { "selector": "$.name" }, "exists": { "body": true } } }
           ],
           "responses": [{
             "is": {
