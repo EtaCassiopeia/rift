@@ -155,10 +155,10 @@ jobs:
           key: ${{ runner.os }}-${{ matrix.target }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
 
       # Build
-      - name: Build release binary
+      - name: Build release binaries
         shell: bash
         run: |
-          # Build feature flags
+          # Build feature flags for rift-http-proxy
           FEATURE_FLAGS="--features ${{ matrix.features }}"
           if [ "${{ matrix.no_default_features }}" = "true" ]; then
             FEATURE_FLAGS="--no-default-features $FEATURE_FLAGS"
@@ -167,8 +167,12 @@ jobs:
           if [[ "${{ matrix.target }}" == *"musl"* ]]; then
             # Use cross for musl targets (provides proper toolchain in Docker)
             cross build --release --package rift-http-proxy --target ${{ matrix.target }} $FEATURE_FLAGS
+            cross build --release --package rift-lint --target ${{ matrix.target }}
+            cross build --release --package rift-tui --target ${{ matrix.target }}
           else
             cargo build --release --package rift-http-proxy --target ${{ matrix.target }} $FEATURE_FLAGS
+            cargo build --release --package rift-lint --target ${{ matrix.target }}
+            cargo build --release --package rift-tui --target ${{ matrix.target }}
           fi
 
       # Package
@@ -180,16 +184,22 @@ jobs:
 
           # Create archive directory
           ARCHIVE_NAME="${{ env.BINARY_NAME }}-${{ steps.version.outputs.VERSION }}-${{ matrix.target }}"
-          mkdir -p "$ARCHIVE_NAME"
+          mkdir -p "$ARCHIVE_NAME/bin"
 
-          # Copy binary
-          cp rift-http-proxy "$ARCHIVE_NAME/${{ env.BINARY_NAME }}"
-          chmod +x "$ARCHIVE_NAME/${{ env.BINARY_NAME }}"
+          # Copy main binary (rift-http-proxy as 'rift')
+          cp rift-http-proxy "$ARCHIVE_NAME/bin/${{ env.BINARY_NAME }}"
+          chmod +x "$ARCHIVE_NAME/bin/${{ env.BINARY_NAME }}"
 
           # Create mb symlink for Mountebank compatibility
-          cd "$ARCHIVE_NAME"
+          cd "$ARCHIVE_NAME/bin"
           ln -s ${{ env.BINARY_NAME }} mb
-          cd ..
+          cd ../..
+
+          # Copy additional binaries
+          cp rift-lint "$ARCHIVE_NAME/bin/rift-lint"
+          chmod +x "$ARCHIVE_NAME/bin/rift-lint"
+          cp rift-tui "$ARCHIVE_NAME/bin/rift-tui"
+          chmod +x "$ARCHIVE_NAME/bin/rift-tui"
 
           # Copy docs
           cp ../../../README.md "$ARCHIVE_NAME/" 2>/dev/null || true
@@ -214,13 +224,17 @@ jobs:
           cd target/${{ matrix.target }}/release
 
           $ARCHIVE_NAME = "${{ env.BINARY_NAME }}-${{ steps.version.outputs.VERSION }}-${{ matrix.target }}"
-          New-Item -ItemType Directory -Force -Path $ARCHIVE_NAME
+          New-Item -ItemType Directory -Force -Path "$ARCHIVE_NAME/bin"
 
-          # Copy binary
-          Copy-Item "rift-http-proxy.exe" "$ARCHIVE_NAME/${{ env.BINARY_NAME }}.exe"
+          # Copy main binary (rift-http-proxy as 'rift.exe')
+          Copy-Item "rift-http-proxy.exe" "$ARCHIVE_NAME/bin/${{ env.BINARY_NAME }}.exe"
 
           # Copy as mb.exe for Mountebank compatibility
-          Copy-Item "rift-http-proxy.exe" "$ARCHIVE_NAME/mb.exe"
+          Copy-Item "rift-http-proxy.exe" "$ARCHIVE_NAME/bin/mb.exe"
+
+          # Copy additional binaries
+          Copy-Item "rift-lint.exe" "$ARCHIVE_NAME/bin/rift-lint.exe"
+          Copy-Item "rift-tui.exe" "$ARCHIVE_NAME/bin/rift-tui.exe"
 
           # Copy docs
           if (Test-Path "../../../README.md") { Copy-Item "../../../README.md" "$ARCHIVE_NAME/" }
@@ -324,21 +338,38 @@ jobs:
           # Download and extract (replace TARGET with your platform)
           curl -LO https://github.com/EtaCassiopeia/rift/releases/download/${{ steps.version.outputs.VERSION }}/rift-${{ steps.version.outputs.VERSION }}-x86_64-unknown-linux-gnu.tar.gz
           tar -xzf rift-${{ steps.version.outputs.VERSION }}-x86_64-unknown-linux-gnu.tar.gz
-          sudo mv rift-${{ steps.version.outputs.VERSION }}-x86_64-unknown-linux-gnu/rift /usr/local/bin/
+          sudo mv rift-${{ steps.version.outputs.VERSION }}-x86_64-unknown-linux-gnu/bin/* /usr/local/bin/
           ```
 
           #### Using Docker
           ```bash
+          # From Docker Hub
           docker pull etacassiopeia/rift-proxy:${{ steps.version.outputs.VERSION }}
           docker run -p 2525:2525 -p 9090:9090 etacassiopeia/rift-proxy:${{ steps.version.outputs.VERSION }}
+
+          # From GitHub Container Registry
+          docker pull ghcr.io/etacassiopeia/rift-proxy:${{ steps.version.outputs.VERSION }}
+          docker run -p 2525:2525 -p 9090:9090 ghcr.io/etacassiopeia/rift-proxy:${{ steps.version.outputs.VERSION }}
+
+          # Linter image for CI/CD
+          docker pull ghcr.io/etacassiopeia/rift-lint:${{ steps.version.outputs.VERSION }}
+          docker run --rm -v $(pwd):/imposters ghcr.io/etacassiopeia/rift-lint:${{ steps.version.outputs.VERSION }} .
           ```
 
           #### Using Cargo
           ```bash
           cargo install rift-http-proxy
+          cargo install rift-lint
           ```
 
-          ### Available Binaries
+          ### Included Binaries
+
+          Each release archive includes all Rift tools:
+          - `rift` / `mb` - HTTP proxy server (Mountebank-compatible)
+          - `rift-lint` - Imposter configuration validator
+          - `rift-tui` - Terminal UI for managing imposters
+
+          ### Available Platforms
 
           | Platform | Architecture | Download |
           |----------|--------------|----------|
@@ -349,6 +380,13 @@ jobs:
           | macOS | Intel (x86_64) | `rift-${{ steps.version.outputs.VERSION }}-x86_64-apple-darwin.tar.gz` |
           | macOS | Apple Silicon (ARM64) | `rift-${{ steps.version.outputs.VERSION }}-aarch64-apple-darwin.tar.gz` |
           | Windows | x86_64 | `rift-${{ steps.version.outputs.VERSION }}-x86_64-pc-windows-msvc.zip` |
+
+          ### Docker Images
+
+          | Image | Description |
+          |-------|-------------|
+          | `ghcr.io/etacassiopeia/rift-proxy` | Main HTTP proxy server |
+          | `ghcr.io/etacassiopeia/rift-lint` | Imposter validator for CI/CD |
 
           ### Features
 
