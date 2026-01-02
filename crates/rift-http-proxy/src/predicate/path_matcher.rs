@@ -3,6 +3,7 @@
 //! Supports Mountebank-style path predicates with backward compatibility
 //! for existing Rift config format.
 
+use super::matcher::CachedValue;
 use super::options::PredicateOptions;
 use super::string_matcher::StringMatcher;
 use regex::Regex;
@@ -51,10 +52,10 @@ pub enum PathMatcher {
 #[derive(Debug, Clone)]
 pub enum CompiledPathMatcher {
     Any,
-    Exact { value: String, lower: String },
-    Prefix { value: String, lower: String },
-    Contains { value: String, lower: String },
-    EndsWith { value: String, lower: String },
+    Exact(CachedValue),
+    Prefix(CachedValue),
+    Contains(CachedValue),
+    EndsWith(CachedValue),
     Regex(Arc<Regex>),
 }
 
@@ -75,18 +76,12 @@ impl CompiledPathMatch {
             }),
 
             PathMatcher::Exact { exact } => Ok(CompiledPathMatch {
-                matcher: CompiledPathMatcher::Exact {
-                    value: exact.clone(),
-                    lower: exact.to_lowercase(),
-                },
+                matcher: CompiledPathMatcher::Exact(CachedValue::new(exact)),
                 case_sensitive: true,
             }),
 
             PathMatcher::Prefix { prefix } => Ok(CompiledPathMatch {
-                matcher: CompiledPathMatcher::Prefix {
-                    value: prefix.clone(),
-                    lower: prefix.to_lowercase(),
-                },
+                matcher: CompiledPathMatcher::Prefix(CachedValue::new(prefix)),
                 case_sensitive: true,
             }),
 
@@ -96,39 +91,27 @@ impl CompiledPathMatch {
             }),
 
             PathMatcher::Contains { contains } => Ok(CompiledPathMatch {
-                matcher: CompiledPathMatcher::Contains {
-                    value: contains.clone(),
-                    lower: contains.to_lowercase(),
-                },
+                matcher: CompiledPathMatcher::Contains(CachedValue::new(contains)),
                 case_sensitive: true,
             }),
 
             PathMatcher::EndsWith { ends_with } => Ok(CompiledPathMatch {
-                matcher: CompiledPathMatcher::EndsWith {
-                    value: ends_with.clone(),
-                    lower: ends_with.to_lowercase(),
-                },
+                matcher: CompiledPathMatcher::EndsWith(CachedValue::new(ends_with)),
                 case_sensitive: true,
             }),
 
             PathMatcher::Full { matcher, options } => {
                 let compiled = match matcher {
-                    StringMatcher::Equals(v) => CompiledPathMatcher::Exact {
-                        value: v.clone(),
-                        lower: v.to_lowercase(),
-                    },
-                    StringMatcher::Contains(v) => CompiledPathMatcher::Contains {
-                        value: v.clone(),
-                        lower: v.to_lowercase(),
-                    },
-                    StringMatcher::StartsWith(v) => CompiledPathMatcher::Prefix {
-                        value: v.clone(),
-                        lower: v.to_lowercase(),
-                    },
-                    StringMatcher::EndsWith(v) => CompiledPathMatcher::EndsWith {
-                        value: v.clone(),
-                        lower: v.to_lowercase(),
-                    },
+                    StringMatcher::Equals(v) => CompiledPathMatcher::Exact(CachedValue::new(v)),
+                    StringMatcher::Contains(v) => {
+                        CompiledPathMatcher::Contains(CachedValue::new(v))
+                    }
+                    StringMatcher::StartsWith(v) => {
+                        CompiledPathMatcher::Prefix(CachedValue::new(v))
+                    }
+                    StringMatcher::EndsWith(v) => {
+                        CompiledPathMatcher::EndsWith(CachedValue::new(v))
+                    }
                     StringMatcher::Matches(pattern) => {
                         CompiledPathMatcher::Regex(Arc::new(Regex::new(pattern)?))
                     }
@@ -147,39 +130,10 @@ impl CompiledPathMatch {
     pub fn matches(&self, path: &str) -> bool {
         match &self.matcher {
             CompiledPathMatcher::Any => true,
-
-            CompiledPathMatcher::Exact { value, lower } => {
-                if self.case_sensitive {
-                    path == value
-                } else {
-                    path.to_lowercase() == *lower
-                }
-            }
-
-            CompiledPathMatcher::Prefix { value, lower } => {
-                if self.case_sensitive {
-                    path.starts_with(value.as_str())
-                } else {
-                    path.to_lowercase().starts_with(lower.as_str())
-                }
-            }
-
-            CompiledPathMatcher::Contains { value, lower } => {
-                if self.case_sensitive {
-                    path.contains(value.as_str())
-                } else {
-                    path.to_lowercase().contains(lower.as_str())
-                }
-            }
-
-            CompiledPathMatcher::EndsWith { value, lower } => {
-                if self.case_sensitive {
-                    path.ends_with(value.as_str())
-                } else {
-                    path.to_lowercase().ends_with(lower.as_str())
-                }
-            }
-
+            CompiledPathMatcher::Exact(cached) => cached.equals(path, self.case_sensitive),
+            CompiledPathMatcher::Prefix(cached) => cached.starts(path, self.case_sensitive),
+            CompiledPathMatcher::Contains(cached) => cached.contained_in(path, self.case_sensitive),
+            CompiledPathMatcher::EndsWith(cached) => cached.ends(path, self.case_sensitive),
             CompiledPathMatcher::Regex(regex) => regex.is_match(path),
         }
     }

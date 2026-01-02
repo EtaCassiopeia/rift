@@ -3,6 +3,7 @@
 //! This module provides a unified FieldMatcher type that can be used for both
 //! HTTP headers and query parameters, eliminating duplicate code.
 
+use super::matcher::CachedValue;
 use super::options::PredicateOptions;
 use super::string_matcher::{CompiledExcept, CompiledStringMatcher, StringMatcher};
 use serde::{Deserialize, Serialize};
@@ -85,10 +86,9 @@ impl CompiledFieldMatcher {
         match config {
             FieldMatcher::Simple { name, value } => Ok(CompiledFieldMatcher {
                 name: normalize_name(name),
-                matcher: CompiledFieldMatcherInner::Single(CompiledStringMatcher::Equals {
-                    value: value.clone(),
-                    lower: value.to_lowercase(),
-                }),
+                matcher: CompiledFieldMatcherInner::Single(CompiledStringMatcher::Equals(
+                    CachedValue::new(value),
+                )),
                 case_sensitive: true,
                 not: false,
                 except: None,

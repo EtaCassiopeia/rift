@@ -13,6 +13,7 @@
 //!
 //! # Module Structure
 //!
+//! - `matcher` - Core matching traits and helpers (CachedValue, StringMatchCore)
 //! - `string_matcher` - Core string matching (equals, contains, startsWith, etc.)
 //! - `options` - Predicate options (caseSensitive, except, not)
 //! - `field_matcher` - Generic field matcher for headers and query parameters
@@ -29,6 +30,7 @@ mod body_matcher;
 mod deep_equals;
 mod field_matcher;
 mod logical;
+mod matcher;
 mod options;
 mod path_matcher;
 mod request;
@@ -47,6 +49,8 @@ pub use field_matcher::{
 };
 #[allow(unused_imports)]
 pub use logical::{CompiledLogicalMatcher, LogicalMatcher};
+#[allow(unused_imports)]
+pub use matcher::{CachedValue, StringMatchCore};
 #[allow(unused_imports)]
 pub use options::PredicateOptions;
 #[allow(unused_imports)]

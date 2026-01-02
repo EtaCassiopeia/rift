@@ -3,6 +3,7 @@
 //! This module provides the core string matching capabilities used throughout
 //! the predicate system. It supports all Mountebank string matching operations.
 
+use super::matcher::CachedValue;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -47,10 +48,10 @@ impl Default for StringMatcher {
 /// Compiled string matcher for efficient runtime evaluation.
 #[derive(Debug, Clone)]
 pub enum CompiledStringMatcher {
-    Equals { value: String, lower: String },
-    Contains { value: String, lower: String },
-    StartsWith { value: String, lower: String },
-    EndsWith { value: String, lower: String },
+    Equals(CachedValue),
+    Contains(CachedValue),
+    StartsWith(CachedValue),
+    EndsWith(CachedValue),
     Matches(Arc<Regex>),
     Exists(bool),
 }
@@ -59,22 +60,12 @@ impl CompiledStringMatcher {
     /// Compile a StringMatcher into an efficient runtime form.
     pub fn compile(matcher: &StringMatcher) -> Result<Self, regex::Error> {
         match matcher {
-            StringMatcher::Equals(v) => Ok(CompiledStringMatcher::Equals {
-                value: v.clone(),
-                lower: v.to_lowercase(),
-            }),
-            StringMatcher::Contains(v) => Ok(CompiledStringMatcher::Contains {
-                value: v.clone(),
-                lower: v.to_lowercase(),
-            }),
-            StringMatcher::StartsWith(v) => Ok(CompiledStringMatcher::StartsWith {
-                value: v.clone(),
-                lower: v.to_lowercase(),
-            }),
-            StringMatcher::EndsWith(v) => Ok(CompiledStringMatcher::EndsWith {
-                value: v.clone(),
-                lower: v.to_lowercase(),
-            }),
+            StringMatcher::Equals(v) => Ok(CompiledStringMatcher::Equals(CachedValue::new(v))),
+            StringMatcher::Contains(v) => Ok(CompiledStringMatcher::Contains(CachedValue::new(v))),
+            StringMatcher::StartsWith(v) => {
+                Ok(CompiledStringMatcher::StartsWith(CachedValue::new(v)))
+            }
+            StringMatcher::EndsWith(v) => Ok(CompiledStringMatcher::EndsWith(CachedValue::new(v))),
             StringMatcher::Matches(pattern) => {
                 let regex = Regex::new(pattern)?;
                 Ok(CompiledStringMatcher::Matches(Arc::new(regex)))
@@ -99,61 +90,17 @@ impl CompiledStringMatcher {
             // For all other matchers, value must exist
             (_, None) => false,
 
-            (
-                CompiledStringMatcher::Equals {
-                    value: pattern,
-                    lower,
-                },
-                Some(v),
-            ) => {
-                if case_sensitive {
-                    v == pattern
-                } else {
-                    v.to_lowercase() == *lower
-                }
+            (CompiledStringMatcher::Equals(cached), Some(v)) => cached.equals(v, case_sensitive),
+
+            (CompiledStringMatcher::Contains(cached), Some(v)) => {
+                cached.contained_in(v, case_sensitive)
             }
 
-            (
-                CompiledStringMatcher::Contains {
-                    value: pattern,
-                    lower,
-                },
-                Some(v),
-            ) => {
-                if case_sensitive {
-                    v.contains(pattern.as_str())
-                } else {
-                    v.to_lowercase().contains(lower.as_str())
-                }
+            (CompiledStringMatcher::StartsWith(cached), Some(v)) => {
+                cached.starts(v, case_sensitive)
             }
 
-            (
-                CompiledStringMatcher::StartsWith {
-                    value: pattern,
-                    lower,
-                },
-                Some(v),
-            ) => {
-                if case_sensitive {
-                    v.starts_with(pattern.as_str())
-                } else {
-                    v.to_lowercase().starts_with(lower.as_str())
-                }
-            }
-
-            (
-                CompiledStringMatcher::EndsWith {
-                    value: pattern,
-                    lower,
-                },
-                Some(v),
-            ) => {
-                if case_sensitive {
-                    v.ends_with(pattern.as_str())
-                } else {
-                    v.to_lowercase().ends_with(lower.as_str())
-                }
-            }
+            (CompiledStringMatcher::EndsWith(cached), Some(v)) => cached.ends(v, case_sensitive),
 
             (CompiledStringMatcher::Matches(regex), Some(v)) => {
                 // Regex matching - case sensitivity should be in the pattern itself

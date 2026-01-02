@@ -2,6 +2,7 @@
 //!
 //! Supports various body matching strategies including JSON and XPath.
 
+use super::matcher::CachedValue;
 use super::string_matcher::{CompiledStringMatcher, StringMatcher};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -46,14 +47,8 @@ pub enum BodyMatcher {
 /// Compiled body matcher for efficient runtime evaluation.
 #[derive(Debug, Clone)]
 pub enum CompiledBodyMatcher {
-    Equals {
-        value: String,
-        lower: String,
-    },
-    Contains {
-        value: String,
-        lower: String,
-    },
+    Equals(CachedValue),
+    Contains(CachedValue),
     Matches(Arc<Regex>),
     JsonEquals(serde_json::Value),
     JsonPath {
@@ -70,14 +65,8 @@ impl CompiledBodyMatcher {
     /// Compile a BodyMatcher configuration.
     pub fn compile(matcher: &BodyMatcher) -> Result<Self, regex::Error> {
         match matcher {
-            BodyMatcher::Equals(v) => Ok(CompiledBodyMatcher::Equals {
-                value: v.clone(),
-                lower: v.to_lowercase(),
-            }),
-            BodyMatcher::Contains(v) => Ok(CompiledBodyMatcher::Contains {
-                value: v.clone(),
-                lower: v.to_lowercase(),
-            }),
+            BodyMatcher::Equals(v) => Ok(CompiledBodyMatcher::Equals(CachedValue::new(v))),
+            BodyMatcher::Contains(v) => Ok(CompiledBodyMatcher::Contains(CachedValue::new(v))),
             BodyMatcher::Matches(pattern) => {
                 Ok(CompiledBodyMatcher::Matches(Arc::new(Regex::new(pattern)?)))
             }
@@ -96,20 +85,8 @@ impl CompiledBodyMatcher {
     /// Check if a body matches this matcher.
     pub fn matches(&self, body: &str, case_sensitive: bool) -> bool {
         match self {
-            CompiledBodyMatcher::Equals { value, lower } => {
-                if case_sensitive {
-                    body == value
-                } else {
-                    body.to_lowercase() == *lower
-                }
-            }
-            CompiledBodyMatcher::Contains { value, lower } => {
-                if case_sensitive {
-                    body.contains(value.as_str())
-                } else {
-                    body.to_lowercase().contains(lower.as_str())
-                }
-            }
+            CompiledBodyMatcher::Equals(cached) => cached.equals(body, case_sensitive),
+            CompiledBodyMatcher::Contains(cached) => cached.contained_in(body, case_sensitive),
             CompiledBodyMatcher::Matches(regex) => regex.is_match(body),
             CompiledBodyMatcher::JsonEquals(expected) => {
                 // Parse body as JSON and compare
