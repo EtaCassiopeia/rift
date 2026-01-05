@@ -1,0 +1,66 @@
+# Dockerfile for using pre-built binaries from release workflow
+# This is much faster than compiling in Docker (~seconds vs ~1 hour)
+#
+# Usage:
+#   docker buildx build --platform linux/amd64 \
+#     --build-arg BINARY_PATH=./rift-http-proxy \
+#     -f Dockerfile.prebuilt .
+
+FROM debian:bookworm-slim
+
+# Build args for metadata
+ARG VERSION=dev
+ARG VCS_REF=unknown
+ARG BUILD_DATE=unknown
+ARG TARGETARCH
+
+# Install CA certificates and curl for health checks
+# Note: LuaJIT is only available on amd64 builds
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates curl && \
+    if [ "$TARGETARCH" = "amd64" ]; then \
+        apt-get install -y --no-install-recommends libluajit-5.1-2; \
+    fi && \
+    rm -rf /var/lib/apt/lists/*
+
+# Copy pre-built binary (provided via build context)
+# The binary should be placed in the build context as 'rift-http-proxy'
+COPY rift-http-proxy /usr/local/bin/rift
+RUN chmod +x /usr/local/bin/rift
+
+# OCI labels and metadata
+LABEL \
+  org.opencontainers.image.title="Rift HTTP Proxy" \
+  org.opencontainers.image.description="Mountebank-compatible HTTP chaos engineering proxy" \
+  org.opencontainers.image.url="https://github.com/EtaCassiopeia/rift" \
+  org.opencontainers.image.source="https://github.com/EtaCassiopeia/rift" \
+  org.opencontainers.image.version="$VERSION" \
+  org.opencontainers.image.revision="$VCS_REF" \
+  org.opencontainers.image.created="$BUILD_DATE" \
+  org.opencontainers.image.licenses="Apache-2.0" \
+  org.opencontainers.image.vendor="Rift"
+
+# Create non-root user
+RUN useradd -m -u 1000 rift
+
+# Create default data and config directories
+RUN mkdir -p /data /config && chown -R rift:rift /data /config
+
+USER rift
+WORKDIR /data
+
+# Expose ports
+EXPOSE 2525 9090 4545-4550 8080-8090
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD curl -fsS http://localhost:${MB_PORT:-2525}/ >/dev/null || exit 1
+
+# Environment variables
+ENV MB_PORT=2525
+ENV MB_HOST=0.0.0.0
+ENV MB_LOGLEVEL=info
+ENV RIFT_METRICS_PORT=9090
+
+ENTRYPOINT ["/usr/local/bin/rift"]
+CMD []

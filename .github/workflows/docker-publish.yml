@@ -5,6 +5,11 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to use for Docker images (e.g., v0.1.0)'
+        required: true
+        type: string
   workflow_call:
     inputs:
       tag:
@@ -18,7 +23,8 @@ env:
 
 jobs:
   # =============================================================================
-  # Build and push rift-proxy (main HTTP proxy server)
+  # Build and push rift-proxy using pre-built binaries from release
+  # This is much faster than compiling in Docker (~2 min vs ~1.5 hours)
   # =============================================================================
   build-rift-proxy:
     name: Build rift-proxy
@@ -33,27 +39,45 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up QEMU (for multi-arch builds)
+      - name: Determine version
+        id: vars
+        shell: bash
+        run: |
+          if [[ -n "${{ inputs.tag }}" ]]; then
+            VERSION="${{ inputs.tag }}"
+          elif [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/}"
+          else
+            VERSION="edge"
+          fi
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          echo "BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")" >> $GITHUB_OUTPUT
+
+      # Download pre-built binaries from GitHub Release
+      - name: Download linux-amd64 binary
+        run: |
+          VERSION="${{ steps.vars.outputs.VERSION }}"
+          mkdir -p binaries/amd64
+          curl -sL "https://github.com/${{ github.repository }}/releases/download/${VERSION}/rift-${VERSION}-x86_64-unknown-linux-gnu.tar.gz" | \
+            tar -xzf - -C binaries/amd64 --strip-components=2 "*/bin/rift"
+          mv binaries/amd64/rift binaries/amd64/rift-http-proxy
+          chmod +x binaries/amd64/rift-http-proxy
+
+      - name: Download linux-arm64 binary
+        run: |
+          VERSION="${{ steps.vars.outputs.VERSION }}"
+          mkdir -p binaries/arm64
+          curl -sL "https://github.com/${{ github.repository }}/releases/download/${VERSION}/rift-${VERSION}-aarch64-unknown-linux-gnu.tar.gz" | \
+            tar -xzf - -C binaries/arm64 --strip-components=2 "*/bin/rift"
+          mv binaries/arm64/rift binaries/arm64/rift-http-proxy
+          chmod +x binaries/arm64/rift-http-proxy
+
+      - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Determine version and build date
-        id: vars
-        shell: bash
-        run: |
-          if [[ -n "${{ inputs.tag }}" ]]; then
-            # Called via workflow_call with explicit tag
-            echo "VERSION=${{ inputs.tag }}" >> $GITHUB_OUTPUT
-          elif [[ "${GITHUB_REF}" == refs/tags/* ]]; then
-            echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
-          else
-            echo "VERSION=edge" >> $GITHUB_OUTPUT
-          fi
-          echo "BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")" >> $GITHUB_OUTPUT
-
-      # --- Docker Hub ---
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:
@@ -61,37 +85,6 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Extract metadata for Docker Hub
-        id: meta-dockerhub
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY_DOCKERHUB }}/${{ secrets.DOCKERHUB_USERNAME }}/rift-proxy
-          tags: |
-            type=semver,pattern={{version}},value=${{ inputs.tag }}
-            type=semver,pattern={{major}}.{{minor}},value=${{ inputs.tag }}
-            type=semver,pattern={{major}},value=${{ inputs.tag }}
-            type=raw,value=latest
-
-      - name: Build and push to Docker Hub
-        id: build-dockerhub
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: ./crates/rift-http-proxy/Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta-dockerhub.outputs.tags }}
-          labels: ${{ steps.meta-dockerhub.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          build-args: |
-            RUST_VERSION=1.84
-            VERSION=${{ steps.vars.outputs.VERSION }}
-            VCS_REF=${{ github.sha }}
-            BUILD_DATE=${{ steps.vars.outputs.BUILD_DATE }}
-            FEATURES=lua,javascript,redis-backend
-
-      # --- GitHub Container Registry (fresh login after long build) ---
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
@@ -99,45 +92,73 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract metadata for GHCR
-        id: meta-ghcr
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY_GHCR }}/${{ github.repository_owner }}/rift-proxy
-          tags: |
-            type=semver,pattern={{version}},value=${{ inputs.tag }}
-            type=semver,pattern={{major}}.{{minor}},value=${{ inputs.tag }}
-            type=semver,pattern={{major}},value=${{ inputs.tag }}
-            type=raw,value=latest
-
-      - name: Build and push to GHCR
-        id: build-ghcr
+      # Build and push amd64 image
+      - name: Build and push amd64
         uses: docker/build-push-action@v5
         with:
-          context: .
-          file: ./crates/rift-http-proxy/Dockerfile
-          platforms: linux/amd64,linux/arm64
+          context: ./binaries/amd64
+          file: ./crates/rift-http-proxy/Dockerfile.prebuilt
+          platforms: linux/amd64
           push: true
-          tags: ${{ steps.meta-ghcr.outputs.tags }}
-          labels: ${{ steps.meta-ghcr.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          tags: |
+            ${{ env.REGISTRY_DOCKERHUB }}/${{ secrets.DOCKERHUB_USERNAME }}/rift-proxy:${{ steps.vars.outputs.VERSION }}-amd64
+            ${{ env.REGISTRY_GHCR }}/${{ github.repository_owner }}/rift-proxy:${{ steps.vars.outputs.VERSION }}-amd64
           build-args: |
-            RUST_VERSION=1.84
             VERSION=${{ steps.vars.outputs.VERSION }}
             VCS_REF=${{ github.sha }}
             BUILD_DATE=${{ steps.vars.outputs.BUILD_DATE }}
-            FEATURES=lua,javascript,redis-backend
+          provenance: false
 
-      - name: Generate artifact attestation (GHCR)
-        uses: actions/attest-build-provenance@v1
+      # Build and push arm64 image
+      - name: Build and push arm64
+        uses: docker/build-push-action@v5
         with:
-          subject-name: ${{ env.REGISTRY_GHCR }}/${{ github.repository_owner }}/rift-proxy
-          subject-digest: ${{ steps.build-ghcr.outputs.digest }}
-          push-to-registry: true
+          context: ./binaries/arm64
+          file: ./crates/rift-http-proxy/Dockerfile.prebuilt
+          platforms: linux/arm64
+          push: true
+          tags: |
+            ${{ env.REGISTRY_DOCKERHUB }}/${{ secrets.DOCKERHUB_USERNAME }}/rift-proxy:${{ steps.vars.outputs.VERSION }}-arm64
+            ${{ env.REGISTRY_GHCR }}/${{ github.repository_owner }}/rift-proxy:${{ steps.vars.outputs.VERSION }}-arm64
+          build-args: |
+            VERSION=${{ steps.vars.outputs.VERSION }}
+            VCS_REF=${{ github.sha }}
+            BUILD_DATE=${{ steps.vars.outputs.BUILD_DATE }}
+          provenance: false
+
+      # Create and push multi-arch manifest
+      - name: Create and push Docker Hub manifest
+        run: |
+          VERSION="${{ steps.vars.outputs.VERSION }}"
+          REPO="${{ secrets.DOCKERHUB_USERNAME }}/rift-proxy"
+
+          # Create manifest for version tag
+          docker buildx imagetools create -t ${{ env.REGISTRY_DOCKERHUB }}/${REPO}:${VERSION} \
+            ${{ env.REGISTRY_DOCKERHUB }}/${REPO}:${VERSION}-amd64 \
+            ${{ env.REGISTRY_DOCKERHUB }}/${REPO}:${VERSION}-arm64
+
+          # Create manifest for latest tag
+          docker buildx imagetools create -t ${{ env.REGISTRY_DOCKERHUB }}/${REPO}:latest \
+            ${{ env.REGISTRY_DOCKERHUB }}/${REPO}:${VERSION}-amd64 \
+            ${{ env.REGISTRY_DOCKERHUB }}/${REPO}:${VERSION}-arm64
+
+      - name: Create and push GHCR manifest
+        run: |
+          VERSION="${{ steps.vars.outputs.VERSION }}"
+          REPO="${{ github.repository_owner }}/rift-proxy"
+
+          # Create manifest for version tag
+          docker buildx imagetools create -t ${{ env.REGISTRY_GHCR }}/${REPO}:${VERSION} \
+            ${{ env.REGISTRY_GHCR }}/${REPO}:${VERSION}-amd64 \
+            ${{ env.REGISTRY_GHCR }}/${REPO}:${VERSION}-arm64
+
+          # Create manifest for latest tag
+          docker buildx imagetools create -t ${{ env.REGISTRY_GHCR }}/${REPO}:latest \
+            ${{ env.REGISTRY_GHCR }}/${REPO}:${VERSION}-amd64 \
+            ${{ env.REGISTRY_GHCR }}/${REPO}:${VERSION}-arm64
 
   # =============================================================================
-  # Build and push rift-lint (standalone linter for CI/CD)
+  # Build and push rift-lint using pre-built binaries from release
   # =============================================================================
   build-rift-lint:
     name: Build rift-lint
@@ -152,27 +173,43 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up QEMU (for multi-arch builds)
+      - name: Determine version
+        id: vars
+        shell: bash
+        run: |
+          if [[ -n "${{ inputs.tag }}" ]]; then
+            VERSION="${{ inputs.tag }}"
+          elif [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/}"
+          else
+            VERSION="edge"
+          fi
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          echo "BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")" >> $GITHUB_OUTPUT
+
+      # Download pre-built binaries from GitHub Release
+      - name: Download linux-amd64 binary
+        run: |
+          VERSION="${{ steps.vars.outputs.VERSION }}"
+          mkdir -p binaries/amd64
+          curl -sL "https://github.com/${{ github.repository }}/releases/download/${VERSION}/rift-${VERSION}-x86_64-unknown-linux-gnu.tar.gz" | \
+            tar -xzf - -C binaries/amd64 --strip-components=2 "*/bin/rift-lint"
+          chmod +x binaries/amd64/rift-lint
+
+      - name: Download linux-arm64 binary
+        run: |
+          VERSION="${{ steps.vars.outputs.VERSION }}"
+          mkdir -p binaries/arm64
+          curl -sL "https://github.com/${{ github.repository }}/releases/download/${VERSION}/rift-${VERSION}-aarch64-unknown-linux-gnu.tar.gz" | \
+            tar -xzf - -C binaries/arm64 --strip-components=2 "*/bin/rift-lint"
+          chmod +x binaries/arm64/rift-lint
+
+      - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Determine version and build date
-        id: vars
-        shell: bash
-        run: |
-          if [[ -n "${{ inputs.tag }}" ]]; then
-            # Called via workflow_call with explicit tag
-            echo "VERSION=${{ inputs.tag }}" >> $GITHUB_OUTPUT
-          elif [[ "${GITHUB_REF}" == refs/tags/* ]]; then
-            echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
-          else
-            echo "VERSION=edge" >> $GITHUB_OUTPUT
-          fi
-          echo "BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")" >> $GITHUB_OUTPUT
-
-      # --- Docker Hub ---
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:
@@ -180,35 +217,6 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Extract metadata for Docker Hub
-        id: meta-dockerhub
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY_DOCKERHUB }}/${{ secrets.DOCKERHUB_USERNAME }}/rift-lint
-          tags: |
-            type=semver,pattern={{version}},value=${{ inputs.tag }}
-            type=semver,pattern={{major}}.{{minor}},value=${{ inputs.tag }}
-            type=semver,pattern={{major}},value=${{ inputs.tag }}
-            type=raw,value=latest
-
-      - name: Build and push to Docker Hub
-        id: build-dockerhub
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: ./crates/rift-lint/Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta-dockerhub.outputs.tags }}
-          labels: ${{ steps.meta-dockerhub.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          build-args: |
-            VERSION=${{ steps.vars.outputs.VERSION }}
-            VCS_REF=${{ github.sha }}
-            BUILD_DATE=${{ steps.vars.outputs.BUILD_DATE }}
-
-      # --- GitHub Container Registry (fresh login after build) ---
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
@@ -216,37 +224,63 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract metadata for GHCR
-        id: meta-ghcr
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY_GHCR }}/${{ github.repository_owner }}/rift-lint
-          tags: |
-            type=semver,pattern={{version}},value=${{ inputs.tag }}
-            type=semver,pattern={{major}}.{{minor}},value=${{ inputs.tag }}
-            type=semver,pattern={{major}},value=${{ inputs.tag }}
-            type=raw,value=latest
-
-      - name: Build and push to GHCR
-        id: build-ghcr
+      # Build and push amd64 image
+      - name: Build and push amd64
         uses: docker/build-push-action@v5
         with:
-          context: .
-          file: ./crates/rift-lint/Dockerfile
-          platforms: linux/amd64,linux/arm64
+          context: ./binaries/amd64
+          file: ./crates/rift-lint/Dockerfile.prebuilt
+          platforms: linux/amd64
           push: true
-          tags: ${{ steps.meta-ghcr.outputs.tags }}
-          labels: ${{ steps.meta-ghcr.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          tags: |
+            ${{ env.REGISTRY_DOCKERHUB }}/${{ secrets.DOCKERHUB_USERNAME }}/rift-lint:${{ steps.vars.outputs.VERSION }}-amd64
+            ${{ env.REGISTRY_GHCR }}/${{ github.repository_owner }}/rift-lint:${{ steps.vars.outputs.VERSION }}-amd64
           build-args: |
             VERSION=${{ steps.vars.outputs.VERSION }}
             VCS_REF=${{ github.sha }}
             BUILD_DATE=${{ steps.vars.outputs.BUILD_DATE }}
+          provenance: false
 
-      - name: Generate artifact attestation (GHCR)
-        uses: actions/attest-build-provenance@v1
+      # Build and push arm64 image
+      - name: Build and push arm64
+        uses: docker/build-push-action@v5
         with:
-          subject-name: ${{ env.REGISTRY_GHCR }}/${{ github.repository_owner }}/rift-lint
-          subject-digest: ${{ steps.build-ghcr.outputs.digest }}
-          push-to-registry: true
+          context: ./binaries/arm64
+          file: ./crates/rift-lint/Dockerfile.prebuilt
+          platforms: linux/arm64
+          push: true
+          tags: |
+            ${{ env.REGISTRY_DOCKERHUB }}/${{ secrets.DOCKERHUB_USERNAME }}/rift-lint:${{ steps.vars.outputs.VERSION }}-arm64
+            ${{ env.REGISTRY_GHCR }}/${{ github.repository_owner }}/rift-lint:${{ steps.vars.outputs.VERSION }}-arm64
+          build-args: |
+            VERSION=${{ steps.vars.outputs.VERSION }}
+            VCS_REF=${{ github.sha }}
+            BUILD_DATE=${{ steps.vars.outputs.BUILD_DATE }}
+          provenance: false
+
+      # Create and push multi-arch manifest
+      - name: Create and push Docker Hub manifest
+        run: |
+          VERSION="${{ steps.vars.outputs.VERSION }}"
+          REPO="${{ secrets.DOCKERHUB_USERNAME }}/rift-lint"
+
+          docker buildx imagetools create -t ${{ env.REGISTRY_DOCKERHUB }}/${REPO}:${VERSION} \
+            ${{ env.REGISTRY_DOCKERHUB }}/${REPO}:${VERSION}-amd64 \
+            ${{ env.REGISTRY_DOCKERHUB }}/${REPO}:${VERSION}-arm64
+
+          docker buildx imagetools create -t ${{ env.REGISTRY_DOCKERHUB }}/${REPO}:latest \
+            ${{ env.REGISTRY_DOCKERHUB }}/${REPO}:${VERSION}-amd64 \
+            ${{ env.REGISTRY_DOCKERHUB }}/${REPO}:${VERSION}-arm64
+
+      - name: Create and push GHCR manifest
+        run: |
+          VERSION="${{ steps.vars.outputs.VERSION }}"
+          REPO="${{ github.repository_owner }}/rift-lint"
+
+          docker buildx imagetools create -t ${{ env.REGISTRY_GHCR }}/${REPO}:${VERSION} \
+            ${{ env.REGISTRY_GHCR }}/${REPO}:${VERSION}-amd64 \
+            ${{ env.REGISTRY_GHCR }}/${REPO}:${VERSION}-arm64
+
+          docker buildx imagetools create -t ${{ env.REGISTRY_GHCR }}/${REPO}:latest \
+            ${{ env.REGISTRY_GHCR }}/${REPO}:${VERSION}-amd64 \
+            ${{ env.REGISTRY_GHCR }}/${REPO}:${VERSION}-arm64

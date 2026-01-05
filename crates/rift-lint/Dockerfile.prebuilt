@@ -1,0 +1,37 @@
+# Dockerfile for using pre-built binaries from release workflow
+# This is much faster than compiling in Docker
+
+FROM debian:bookworm-slim
+
+# Build args for metadata
+ARG VERSION=dev
+ARG VCS_REF=unknown
+ARG BUILD_DATE=unknown
+
+# Install CA certificates
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+# Copy pre-built binary (provided via build context)
+COPY rift-lint /usr/local/bin/rift-lint
+RUN chmod +x /usr/local/bin/rift-lint
+
+# OCI labels
+LABEL \
+  org.opencontainers.image.title="Rift Lint" \
+  org.opencontainers.image.description="Linter for Mountebank/Rift imposter configurations" \
+  org.opencontainers.image.url="https://github.com/EtaCassiopeia/rift" \
+  org.opencontainers.image.source="https://github.com/EtaCassiopeia/rift" \
+  org.opencontainers.image.version="$VERSION" \
+  org.opencontainers.image.revision="$VCS_REF" \
+  org.opencontainers.image.created="$BUILD_DATE" \
+  org.opencontainers.image.licenses="Apache-2.0"
+
+# Create non-root user
+RUN useradd -m -u 1000 rift
+USER rift
+WORKDIR /imposters
+
+ENTRYPOINT ["/usr/local/bin/rift-lint"]
+CMD ["."]
