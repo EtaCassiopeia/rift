@@ -59,7 +59,7 @@ jobs:
           VERSION="${{ steps.vars.outputs.VERSION }}"
           mkdir -p binaries/amd64
           curl -sL "https://github.com/${{ github.repository }}/releases/download/${VERSION}/rift-${VERSION}-x86_64-unknown-linux-gnu.tar.gz" | \
-            tar -xzf - -C binaries/amd64 --strip-components=2 "*/bin/rift"
+            tar --wildcards -xzf - -C binaries/amd64 --strip-components=2 "*/bin/rift"
           mv binaries/amd64/rift binaries/amd64/rift-http-proxy
           chmod +x binaries/amd64/rift-http-proxy
 
@@ -68,7 +68,7 @@ jobs:
           VERSION="${{ steps.vars.outputs.VERSION }}"
           mkdir -p binaries/arm64
           curl -sL "https://github.com/${{ github.repository }}/releases/download/${VERSION}/rift-${VERSION}-aarch64-unknown-linux-gnu.tar.gz" | \
-            tar -xzf - -C binaries/arm64 --strip-components=2 "*/bin/rift"
+            tar --wildcards -xzf - -C binaries/arm64 --strip-components=2 "*/bin/rift"
           mv binaries/arm64/rift binaries/arm64/rift-http-proxy
           chmod +x binaries/arm64/rift-http-proxy
 
@@ -193,7 +193,7 @@ jobs:
           VERSION="${{ steps.vars.outputs.VERSION }}"
           mkdir -p binaries/amd64
           curl -sL "https://github.com/${{ github.repository }}/releases/download/${VERSION}/rift-${VERSION}-x86_64-unknown-linux-gnu.tar.gz" | \
-            tar -xzf - -C binaries/amd64 --strip-components=2 "*/bin/rift-lint"
+            tar --wildcards -xzf - -C binaries/amd64 --strip-components=2 "*/bin/rift-lint"
           chmod +x binaries/amd64/rift-lint
 
       - name: Download linux-arm64 binary
@@ -201,7 +201,7 @@ jobs:
           VERSION="${{ steps.vars.outputs.VERSION }}"
           mkdir -p binaries/arm64
           curl -sL "https://github.com/${{ github.repository }}/releases/download/${VERSION}/rift-${VERSION}-aarch64-unknown-linux-gnu.tar.gz" | \
-            tar -xzf - -C binaries/arm64 --strip-components=2 "*/bin/rift-lint"
+            tar --wildcards -xzf - -C binaries/arm64 --strip-components=2 "*/bin/rift-lint"
           chmod +x binaries/arm64/rift-lint
 
       - name: Set up QEMU
