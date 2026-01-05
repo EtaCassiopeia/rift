@@ -52,6 +52,8 @@ jobs:
           fi
           echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
           echo "BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")" >> $GITHUB_OUTPUT
+          # GHCR requires lowercase repository names
+          echo "OWNER_LC=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
 
       # Download pre-built binaries from GitHub Release
       - name: Download linux-amd64 binary
@@ -102,7 +104,7 @@ jobs:
           push: true
           tags: |
             ${{ env.REGISTRY_DOCKERHUB }}/${{ secrets.DOCKERHUB_USERNAME }}/rift-proxy:${{ steps.vars.outputs.VERSION }}-amd64
-            ${{ env.REGISTRY_GHCR }}/${{ github.repository_owner }}/rift-proxy:${{ steps.vars.outputs.VERSION }}-amd64
+            ${{ env.REGISTRY_GHCR }}/${{ steps.vars.outputs.OWNER_LC }}/rift-proxy:${{ steps.vars.outputs.VERSION }}-amd64
           build-args: |
             VERSION=${{ steps.vars.outputs.VERSION }}
             VCS_REF=${{ github.sha }}
@@ -119,7 +121,7 @@ jobs:
           push: true
           tags: |
             ${{ env.REGISTRY_DOCKERHUB }}/${{ secrets.DOCKERHUB_USERNAME }}/rift-proxy:${{ steps.vars.outputs.VERSION }}-arm64
-            ${{ env.REGISTRY_GHCR }}/${{ github.repository_owner }}/rift-proxy:${{ steps.vars.outputs.VERSION }}-arm64
+            ${{ env.REGISTRY_GHCR }}/${{ steps.vars.outputs.OWNER_LC }}/rift-proxy:${{ steps.vars.outputs.VERSION }}-arm64
           build-args: |
             VERSION=${{ steps.vars.outputs.VERSION }}
             VCS_REF=${{ github.sha }}
@@ -145,7 +147,7 @@ jobs:
       - name: Create and push GHCR manifest
         run: |
           VERSION="${{ steps.vars.outputs.VERSION }}"
-          REPO="${{ github.repository_owner }}/rift-proxy"
+          REPO="${{ steps.vars.outputs.OWNER_LC }}/rift-proxy"
 
           # Create manifest for version tag
           docker buildx imagetools create -t ${{ env.REGISTRY_GHCR }}/${REPO}:${VERSION} \
@@ -186,6 +188,8 @@ jobs:
           fi
           echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
           echo "BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")" >> $GITHUB_OUTPUT
+          # GHCR requires lowercase repository names
+          echo "OWNER_LC=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
 
       # Download pre-built binaries from GitHub Release
       - name: Download linux-amd64 binary
@@ -234,7 +238,7 @@ jobs:
           push: true
           tags: |
             ${{ env.REGISTRY_DOCKERHUB }}/${{ secrets.DOCKERHUB_USERNAME }}/rift-lint:${{ steps.vars.outputs.VERSION }}-amd64
-            ${{ env.REGISTRY_GHCR }}/${{ github.repository_owner }}/rift-lint:${{ steps.vars.outputs.VERSION }}-amd64
+            ${{ env.REGISTRY_GHCR }}/${{ steps.vars.outputs.OWNER_LC }}/rift-lint:${{ steps.vars.outputs.VERSION }}-amd64
           build-args: |
             VERSION=${{ steps.vars.outputs.VERSION }}
             VCS_REF=${{ github.sha }}
@@ -251,7 +255,7 @@ jobs:
           push: true
           tags: |
             ${{ env.REGISTRY_DOCKERHUB }}/${{ secrets.DOCKERHUB_USERNAME }}/rift-lint:${{ steps.vars.outputs.VERSION }}-arm64
-            ${{ env.REGISTRY_GHCR }}/${{ github.repository_owner }}/rift-lint:${{ steps.vars.outputs.VERSION }}-arm64
+            ${{ env.REGISTRY_GHCR }}/${{ steps.vars.outputs.OWNER_LC }}/rift-lint:${{ steps.vars.outputs.VERSION }}-arm64
           build-args: |
             VERSION=${{ steps.vars.outputs.VERSION }}
             VCS_REF=${{ github.sha }}
@@ -275,7 +279,7 @@ jobs:
       - name: Create and push GHCR manifest
         run: |
           VERSION="${{ steps.vars.outputs.VERSION }}"
-          REPO="${{ github.repository_owner }}/rift-lint"
+          REPO="${{ steps.vars.outputs.OWNER_LC }}/rift-lint"
 
           docker buildx imagetools create -t ${{ env.REGISTRY_GHCR }}/${REPO}:${VERSION} \
             ${{ env.REGISTRY_GHCR }}/${REPO}:${VERSION}-amd64 \
