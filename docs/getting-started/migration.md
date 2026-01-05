@@ -121,6 +121,37 @@ Rift includes features not in Mountebank:
 | Metrics | Third-party | Built-in Prometheus |
 | Admin UI | Built-in web UI | API only (UI planned) |
 
+### Known HTTP Behavior Differences
+
+#### Transfer-Encoding Header on 204 Responses
+
+Rift follows HTTP specification more strictly than Mountebank in some cases:
+
+| Scenario | Mountebank | Rift |
+|:---------|:-----------|:-----|
+| 204 No Content with Transfer-Encoding | Includes header | Strips header |
+
+**Why this happens:** HTTP/1.1 specification (RFC 7230) states that responses with no message body (such as 204 No Content) should not include Transfer-Encoding or Content-Length headers. Rift's underlying HTTP library (hyper) enforces this correctly.
+
+**Impact:** If your stubs define a 204 response with `Transfer-Encoding: chunked`, Rift will return the 204 status but without the Transfer-Encoding header. This is correct HTTP behavior and should not affect most applications.
+
+**Example:**
+```json
+{
+  "responses": [{
+    "is": {
+      "statusCode": 204,
+      "headers": {
+        "Transfer-Encoding": "chunked"
+      }
+    }
+  }]
+}
+```
+
+- **Mountebank**: Returns 204 with `Transfer-Encoding: chunked` header
+- **Rift**: Returns 204 without Transfer-Encoding header (per HTTP spec)
+
 ---
 
 ## Configuration Examples
