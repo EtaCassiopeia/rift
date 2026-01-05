@@ -313,6 +313,4 @@ Apache License 2.0 - see [LICENSE](LICENSE) for details.
 
 ## Acknowledgments
 
-- [Mountebank](http://www.mbtest.org/) - The original service virtualization tool that inspired Rift's API
-- [Tokio](https://tokio.rs/) - Async runtime for Rust
-- [Hyper](https://hyper.rs/) - HTTP library for Rust
+- [Mountebank](http://www.mbtest.org/) - The original service virtualization tool that inspired Rift's API and configuration format
