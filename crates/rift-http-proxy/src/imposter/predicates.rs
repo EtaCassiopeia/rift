@@ -45,17 +45,9 @@ pub fn stub_matches(
     true
 }
 
-/// Parse query string into a HashMap
+/// Parse query string for predicate matching, URL-decoding both keys and values
 pub fn parse_query(query: Option<&str>) -> HashMap<String, String> {
-    query
-        .unwrap_or("")
-        .split('&')
-        .filter(|s| !s.is_empty())
-        .filter_map(|pair| {
-            let mut parts = pair.splitn(2, '=');
-            Some((parts.next()?.to_string(), parts.next()?.to_string()))
-        })
-        .collect()
+    query.map_or_else(HashMap::new, parse_query_string)
 }
 
 /// Check if a single predicate matches (Mountebank-compatible)
@@ -687,13 +679,17 @@ fn check_exists_predicate(
 }
 
 /// Parse query string into HashMap (public helper)
+/// URL-decodes both keys and values to properly handle encoded characters
 pub fn parse_query_string(query: &str) -> HashMap<String, String> {
     query
         .split('&')
         .filter(|s| !s.is_empty())
         .filter_map(|pair| {
-            let mut parts = pair.splitn(2, '=');
-            Some((parts.next()?.to_string(), parts.next()?.to_string()))
+            let (key, value) = pair.split_once('=')?;
+            // URL-decode both key and value to handle encoded characters like %2C -> ,
+            let decoded_key = urlencoding::decode(key).unwrap_or_default().into_owned();
+            let decoded_value = urlencoding::decode(value).unwrap_or_default().into_owned();
+            Some((decoded_key, decoded_value))
         })
         .collect()
 }

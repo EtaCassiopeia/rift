@@ -159,6 +159,87 @@ fn test_parse_query_string() {
     assert_eq!(parsed.get("age"), Some(&"30".to_string()));
 }
 
+#[test]
+fn test_parse_query_string_url_encoded() {
+    // Test URL-encoded values - %2C is a comma, %20 is a space
+    let query = "lenderIds=LENDER1%2CLENDER2&name=John%20Doe&path=%2Fapi%2Fusers";
+    let parsed = parse_query_string(query);
+
+    // Comma should be decoded
+    assert_eq!(
+        parsed.get("lenderIds"),
+        Some(&"LENDER1,LENDER2".to_string()),
+        "URL-encoded comma (%2C) should be decoded"
+    );
+
+    // Space should be decoded
+    assert_eq!(
+        parsed.get("name"),
+        Some(&"John Doe".to_string()),
+        "URL-encoded space (%20) should be decoded"
+    );
+
+    // Forward slashes should be decoded
+    assert_eq!(
+        parsed.get("path"),
+        Some(&"/api/users".to_string()),
+        "URL-encoded slashes (%2F) should be decoded"
+    );
+}
+
+#[test]
+fn test_parse_query_string_url_encoded_keys() {
+    // Test URL-encoded keys
+    let query = "user%20name=alice&filter%5Bstatus%5D=active";
+    let parsed = parse_query_string(query);
+
+    assert_eq!(
+        parsed.get("user name"),
+        Some(&"alice".to_string()),
+        "URL-encoded space in key should be decoded"
+    );
+
+    assert_eq!(
+        parsed.get("filter[status]"),
+        Some(&"active".to_string()),
+        "URL-encoded brackets in key should be decoded"
+    );
+}
+
+// Tests for parse_query (used in predicate matching)
+#[test]
+fn test_parse_query_basic() {
+    use crate::imposter::predicates::parse_query;
+
+    let parsed = parse_query(Some("name=alice&age=30"));
+    assert_eq!(parsed.get("name"), Some(&"alice".to_string()));
+    assert_eq!(parsed.get("age"), Some(&"30".to_string()));
+
+    // None returns empty map
+    let empty = parse_query(None);
+    assert!(empty.is_empty());
+}
+
+#[test]
+fn test_parse_query_url_encoded() {
+    use crate::imposter::predicates::parse_query;
+
+    // This is the key test - URL-encoded values should be decoded for predicate matching
+    let parsed = parse_query(Some("lenderIds=LENDER1%2CLENDER2&name=John%20Doe"));
+
+    assert_eq!(
+        parsed.get("lenderIds"),
+        Some(&"LENDER1,LENDER2".to_string()),
+        "URL-encoded comma (%2C) should be decoded for predicate matching"
+    );
+
+    assert_eq!(
+        parsed.get("name"),
+        Some(&"John Doe".to_string()),
+        "URL-encoded space (%20) should be decoded for predicate matching"
+    );
+}
+
 #[tokio::test]
 async fn test_imposter_manager_create_delete() {
     let manager = ImposterManager::new();
