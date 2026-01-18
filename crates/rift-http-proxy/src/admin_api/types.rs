@@ -7,6 +7,7 @@ use http_body_util::Full;
 use hyper::body::Incoming;
 use hyper::{Request, Response, StatusCode};
 use serde::{Deserialize, Serialize};
+use crate::response::builder::ErrorResponseBuilder;
 
 /// HATEOAS link structure for Mountebank compatibility
 #[derive(Debug, Serialize, Clone)]
@@ -212,13 +213,10 @@ pub fn build_response_with_headers(
 
 /// Create an error response
 pub fn error_response(status: StatusCode, message: &str) -> Response<Full<Bytes>> {
-    let error = ErrorResponse {
-        errors: vec![ErrorDetail {
-            code: status.as_str().to_string(),
-            message: message.to_string(),
-        }],
-    };
-    json_response(status, &error)
+    ErrorResponseBuilder::new(status)
+        .body(message)
+        .header("Content-Type", "application/json")
+        .build_full()
 }
 
 /// Convert ImposterError to HTTP Response for cleaner error handling in handlers.

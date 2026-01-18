@@ -30,6 +30,7 @@ mod recording;
 
 // ===== Rift Extensions (features beyond Mountebank) =====
 mod extensions;
+mod response;
 
 // Internal modules
 mod scripting;
