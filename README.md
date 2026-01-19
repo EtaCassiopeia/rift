@@ -46,7 +46,7 @@ Rift is a high-performance, [Mountebank](https://www.mbtest.dev/)-compatible moc
 ```bash
 # Pull and run
 docker pull zainalpour/rift-proxy:latest
-docker run -p 2525:2525 zainalpour/rift-proxy:latest
+docker run -p 2525:2525 -p 4545:4545 zainalpour/rift-proxy:latest
 
 # Create your first imposter
 curl -X POST http://localhost:2525/imposters \
