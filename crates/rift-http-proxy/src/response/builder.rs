@@ -165,7 +165,5 @@ mod tests {
             response.headers().get("key_C"),
             Some(&HeaderValue::from_static("value_C"))
         );
-
-        println!("{:?}", response.headers())
     }
 }
