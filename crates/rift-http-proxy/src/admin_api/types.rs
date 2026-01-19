@@ -221,7 +221,6 @@ pub fn error_response(status: StatusCode, message: &str) -> Response<Full<Bytes>
     };
 
     let json = serde_json::to_string_pretty(&error).unwrap_or_else(|_| "{}".to_string());
-
     ErrorResponseBuilder::new(status)
         .body(json)
         .header("Content-Type", "application/json")
