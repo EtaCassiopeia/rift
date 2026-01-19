@@ -142,9 +142,9 @@ await server.close();
 
 ### Getting Started
 - [Installation](https://etacassiopeia.github.io/rift/getting-started/) - Docker, binary, build from source
-- [Quick Start](https://etacassiopeia.github.io/rift/getting-started/quickstart/) - Create your first imposter
+- [Quick Start](https://etacassiopeia.github.io/rift/getting-started/quickstart) - Create your first imposter
 - [Node.js Integration](https://etacassiopeia.github.io/rift/getting-started/nodejs/) - npm package for Node.js
-- [Migration Guide](https://etacassiopeia.github.io/rift/getting-started/migration/) - Using Rift with Mountebank configs
+- [Migration Guide](https://etacassiopeia.github.io/rift/getting-started/migration) - Using Rift with Mountebank configs
 
 ### Mountebank Compatibility
 - [Imposters](https://etacassiopeia.github.io/rift/mountebank/imposters) - Mock server configuration
