@@ -147,27 +147,27 @@ await server.close();
 - [Migration Guide](https://etacassiopeia.github.io/rift/getting-started/migration/) - Using Rift with Mountebank configs
 
 ### Mountebank Compatibility
-- [Imposters](https://etacassiopeia.github.io/rift/mountebank/imposters/) - Mock server configuration
-- [Predicates](https://etacassiopeia.github.io/rift/mountebank/predicates/) - Request matching
-- [Responses](https://etacassiopeia.github.io/rift/mountebank/responses/) - Response configuration
-- [Behaviors](https://etacassiopeia.github.io/rift/mountebank/behaviors/) - wait, decorate, copy
-- [Proxy Mode](https://etacassiopeia.github.io/rift/mountebank/proxy/) - Record and replay
+- [Imposters](https://etacassiopeia.github.io/rift/mountebank/imposters) - Mock server configuration
+- [Predicates](https://etacassiopeia.github.io/rift/mountebank/predicates) - Request matching
+- [Responses](https://etacassiopeia.github.io/rift/mountebank/responses) - Response configuration
+- [Behaviors](https://etacassiopeia.github.io/rift/mountebank/behaviors) - wait, decorate, copy
+- [Proxy Mode](https://etacassiopeia.github.io/rift/mountebank/proxy) - Record and replay
 
 ### Configuration
-- [Mountebank Format](https://etacassiopeia.github.io/rift/configuration/mountebank/) - JSON configuration
-- [Native Rift Format](https://etacassiopeia.github.io/rift/configuration/native/) - YAML for advanced features
-- [CLI Reference](https://etacassiopeia.github.io/rift/configuration/cli/) - Command-line options
+- [Mountebank Format](https://etacassiopeia.github.io/rift/configuration/mountebank) - JSON configuration
+- [Native Rift Format](https://etacassiopeia.github.io/rift/configuration/native) - YAML for advanced features
+- [CLI Reference](https://etacassiopeia.github.io/rift/configuration/cli) - Command-line options
 
 ### Features
-- [Fault Injection](https://etacassiopeia.github.io/rift/features/fault-injection/) - Chaos engineering
-- [Scripting](https://etacassiopeia.github.io/rift/features/scripting/) - Rhai, Lua, JavaScript
-- [TLS/HTTPS](https://etacassiopeia.github.io/rift/features/tls/) - Secure connections
-- [Metrics](https://etacassiopeia.github.io/rift/features/metrics/) - Prometheus integration
-- [TUI](https://etacassiopeia.github.io/rift/features/tui/) - Interactive terminal interface
+- [Fault Injection](https://etacassiopeia.github.io/rift/features/fault-injection) - Chaos engineering
+- [Scripting](https://etacassiopeia.github.io/rift/features/scripting) - Rhai, Lua, JavaScript
+- [TLS/HTTPS](https://etacassiopeia.github.io/rift/features/tls) - Secure connections
+- [Metrics](https://etacassiopeia.github.io/rift/features/metrics) - Prometheus integration
+- [TUI](https://etacassiopeia.github.io/rift/features/tui) - Interactive terminal interface
 
 ### Deployment
-- [Docker](https://etacassiopeia.github.io/rift/deployment/docker/) - Container deployment
-- [Kubernetes](https://etacassiopeia.github.io/rift/deployment/kubernetes/) - K8s patterns
+- [Docker](https://etacassiopeia.github.io/rift/deployment/docker) - Container deployment
+- [Kubernetes](https://etacassiopeia.github.io/rift/deployment/kubernetes) - K8s patterns
 
 ### Reference
 - [REST API](https://etacassiopeia.github.io/rift/api/) - Admin API reference
