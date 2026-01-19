@@ -53,7 +53,7 @@ impl ErrorResponseBuilder {
     }
 
     pub fn build_full(self) -> Response<Full<Bytes>> {
-        let payload = self.body.map(Bytes::from).unwrap_or_else(Bytes::new);
+        let payload = self.body.map(Bytes::from).unwrap_or_default();
         let body = Full::new(payload);
 
         let mut response = Response::builder()
@@ -66,7 +66,7 @@ impl ErrorResponseBuilder {
     }
 
     pub fn build_boxed(self) -> Response<BoxBody<Bytes, hyper::Error>> {
-        let payload = self.body.map(Bytes::from).unwrap_or_else(Bytes::new);
+        let payload = self.body.map(Bytes::from).unwrap_or_default();
         let body = Full::new(payload).map_err(|never: Infallible| match never {}).boxed();
 
         let mut response = Response::builder()
