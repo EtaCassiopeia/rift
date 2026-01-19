@@ -6,7 +6,7 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-nightly-orange)](https://www.rust-lang.org/)
 
-Rift is a high-performance, [Mountebank](http://www.mbtest.org/)-compatible mock server that delivers **2-250x better performance**. Use your existing Mountebank configurations and enjoy faster test execution.
+Rift is a high-performance, [Mountebank](https://www.mbtest.dev/)-compatible mock server that delivers **2-250x better performance**. Use your existing Mountebank configurations and enjoy faster test execution.
 
 **[Documentation](https://etacassiopeia.github.io/rift/)** | **[Quick Start](#quick-start)** | **[Examples](examples/)**
 
