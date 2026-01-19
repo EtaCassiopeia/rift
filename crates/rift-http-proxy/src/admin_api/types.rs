@@ -2,12 +2,12 @@
 
 use crate::extensions::stub_analysis::StubWarning;
 use crate::imposter::{ImposterError, RecordedRequest, Stub};
+use crate::response::builder::ErrorResponseBuilder;
 use bytes::Bytes;
 use http_body_util::Full;
 use hyper::body::Incoming;
 use hyper::{Request, Response, StatusCode};
 use serde::{Deserialize, Serialize};
-use crate::response::builder::ErrorResponseBuilder;
 
 /// HATEOAS link structure for Mountebank compatibility
 #[derive(Debug, Serialize, Clone)]
@@ -213,8 +213,17 @@ pub fn build_response_with_headers(
 
 /// Create an error response
 pub fn error_response(status: StatusCode, message: &str) -> Response<Full<Bytes>> {
+    let error = ErrorResponse {
+        errors: vec![ErrorDetail {
+            code: status.as_str().to_string(),
+            message: message.to_string(),
+        }],
+    };
+
+    let json = serde_json::to_string_pretty(&error).unwrap_or_else(|_| "{}".to_string());
+
     ErrorResponseBuilder::new(status)
-        .body(message)
+        .body(json)
         .header("Content-Type", "application/json")
         .build_full()
 }
