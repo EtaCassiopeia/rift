@@ -15,7 +15,6 @@ pub mod recording;
 pub mod extensions;
 pub mod response;
 
-
 // Re-export extension modules at top level for backward compatibility
 pub use extensions::fault;
 pub use extensions::flow_state;

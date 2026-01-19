@@ -108,9 +108,13 @@ pub fn create_error_response(
         });
 
     merged.remove(TRANSFER_ENCODING);
-    merged.entry(CONTENT_TYPE)
+    merged
+        .entry(CONTENT_TYPE)
         .or_insert(HeaderValue::from_static("application/json"));
-    merged.insert(CONTENT_LENGTH, HeaderValue::from_str(&content_length.to_string()).unwrap());
+    merged.insert(
+        CONTENT_LENGTH,
+        HeaderValue::from_str(&content_length.to_string()).unwrap(),
+    );
 
     let response = ErrorResponseBuilder::new(status_code)
         .merge_headers(&merged)
@@ -282,7 +286,7 @@ mod tests {
             Some(&fixed_headers),
             Some(&dynamic_headers),
         )
-            .unwrap();
+        .unwrap();
 
         // Verify that the dynamic value overwrote the fixed value
         let header_value = response
@@ -291,15 +295,13 @@ mod tests {
             .expect("Header should exist");
 
         assert_eq!(
-            header_value,
-            "dynamic-value",
+            header_value, "dynamic-value",
             "Dynamic header should override fixed header with the same key"
         );
 
         // Verify the fixed value is NOT present
         assert_ne!(
-            header_value,
-            "fixed-value",
+            header_value, "fixed-value",
             "Fixed header value should have been overwritten"
         );
     }

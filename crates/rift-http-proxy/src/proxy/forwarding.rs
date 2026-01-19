@@ -9,11 +9,11 @@ use super::headers::{
 };
 use super::response_ext::ResponseExt;
 use crate::recording::{ProxyMode, RecordedResponse, RecordingStore, RequestSignature};
+use crate::response::builder::ErrorResponseBuilder;
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
 use hyper::{Request, Response, StatusCode};
-use crate::response::builder::ErrorResponseBuilder;
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::Arc;

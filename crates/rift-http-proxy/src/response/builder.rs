@@ -1,9 +1,9 @@
-use std::convert::Infallible;
 use bytes::Bytes;
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full};
 use hyper::http::{HeaderName, HeaderValue};
 use hyper::{HeaderMap, Response, StatusCode};
+use std::convert::Infallible;
 use std::str::FromStr;
 
 pub struct ErrorResponseBuilder {
@@ -11,7 +11,6 @@ pub struct ErrorResponseBuilder {
     body: Option<String>,
     headers: HeaderMap,
 }
-
 
 impl ErrorResponseBuilder {
     pub fn new(status_code: StatusCode) -> Self {
@@ -44,7 +43,8 @@ impl ErrorResponseBuilder {
         HeaderValue: TryFrom<V>,
     {
         for (key, value) in headers {
-            if let (Ok(name), Ok(value)) = (HeaderName::try_from(key), HeaderValue::try_from(value)) {
+            if let (Ok(name), Ok(value)) = (HeaderName::try_from(key), HeaderValue::try_from(value))
+            {
                 self.headers.insert(name, value);
             }
         }
@@ -55,10 +55,7 @@ impl ErrorResponseBuilder {
         let payload = self.body.map(Bytes::from).unwrap_or_default();
         let body = Full::new(payload);
 
-        let mut response = Response::builder()
-            .status(self.status)
-            .body(body)
-            .unwrap();
+        let mut response = Response::builder().status(self.status).body(body).unwrap();
 
         response.headers_mut().extend(self.headers);
         response
@@ -66,18 +63,16 @@ impl ErrorResponseBuilder {
 
     pub fn build_boxed(self) -> Response<BoxBody<Bytes, hyper::Error>> {
         let payload = self.body.map(Bytes::from).unwrap_or_default();
-        let body = Full::new(payload).map_err(|never: Infallible| match never {}).boxed();
+        let body = Full::new(payload)
+            .map_err(|never: Infallible| match never {})
+            .boxed();
 
-        let mut response = Response::builder()
-            .status(self.status)
-            .body(body)
-            .unwrap();
+        let mut response = Response::builder().status(self.status).body(body).unwrap();
 
         response.headers_mut().extend(self.headers);
         response
     }
 }
-
 
 #[cfg(test)]
 mod tests {
