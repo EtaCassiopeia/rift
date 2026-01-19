@@ -5,7 +5,6 @@ use http_body_util::{BodyExt, Full};
 use hyper::http::{HeaderName, HeaderValue};
 use hyper::{HeaderMap, Response, StatusCode};
 use std::str::FromStr;
-use tower::ServiceExt;
 
 pub struct ErrorResponseBuilder {
     status: StatusCode,

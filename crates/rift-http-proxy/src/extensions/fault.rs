@@ -8,7 +8,6 @@ use hyper::http::HeaderValue;
 use hyper::{HeaderMap, Response, StatusCode};
 use rand::Rng;
 use std::collections::HashMap;
-use std::str::FromStr;
 use std::time::Duration;
 
 #[derive(Debug, Clone)]
