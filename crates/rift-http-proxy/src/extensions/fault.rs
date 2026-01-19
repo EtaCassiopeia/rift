@@ -89,8 +89,7 @@ pub fn create_error_response(
     dynamic_headers: Option<&HashMap<String, String>>,
 ) -> Result<Response<Full<Bytes>>, hyper::Error> {
     let status_code = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-    let body_bytes = Bytes::from(body.clone());
-    let content_length = body_bytes.len();
+    let content_length = body.len();
 
     // Merge headers: fixed first, then dynamic (overriding fixed)
     let mut merged = HeaderMap::new();
