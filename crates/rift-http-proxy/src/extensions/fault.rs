@@ -1,8 +1,11 @@
 use crate::behaviors::ResponseBehaviors;
 use crate::config::{FaultConfig, TcpFault};
+use crate::response::builder::ErrorResponseBuilder;
 use http_body_util::Full;
 use hyper::body::Bytes;
-use hyper::{Response, StatusCode};
+use hyper::header::{HeaderName, CONTENT_LENGTH, CONTENT_TYPE, TRANSFER_ENCODING};
+use hyper::http::HeaderValue;
+use hyper::{HeaderMap, Response, StatusCode};
 use rand::Rng;
 use std::collections::HashMap;
 use std::time::Duration;
@@ -86,56 +89,38 @@ pub fn create_error_response(
     dynamic_headers: Option<&HashMap<String, String>>,
 ) -> Result<Response<Full<Bytes>>, hyper::Error> {
     let status_code = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-    let body_bytes = Bytes::from(body);
-    let content_length = body_bytes.len();
+    let content_length = body.len();
 
     // Merge headers: fixed first, then dynamic (overriding fixed)
-    let mut merged = HashMap::new();
+    let mut merged = HeaderMap::new();
 
-    if let Some(fixed) = fixed_headers {
-        for (k, v) in fixed {
-            merged.insert(k.to_lowercase(), v.clone());
-        }
-    }
+    [fixed_headers, dynamic_headers]
+        .iter()
+        .filter_map(|&opt| opt)
+        .flat_map(|map| map.iter())
+        .for_each(|(key, value)| {
+            if let (Ok(name), Ok(val)) = (
+                HeaderName::try_from(key.as_str()),
+                HeaderValue::from_str(value),
+            ) {
+                merged.insert(name, val);
+            }
+        });
 
-    if let Some(dynamic) = dynamic_headers {
-        for (k, v) in dynamic {
-            merged.insert(k.to_lowercase(), v.clone());
-        }
-    }
+    merged.remove(TRANSFER_ENCODING);
+    merged
+        .entry(CONTENT_TYPE)
+        .or_insert(HeaderValue::from_static("application/json"));
+    merged.insert(
+        CONTENT_LENGTH,
+        HeaderValue::from_str(&content_length.to_string()).unwrap(),
+    );
 
-    // Build response with headers
-    let mut builder = Response::builder().status(status_code);
+    let response = ErrorResponseBuilder::new(status_code)
+        .merge_headers(&merged)
+        .body(body)
+        .build_full();
 
-    // Apply merged headers
-    let mut has_content_type = false;
-    for (key, value) in merged.iter() {
-        // Skip transfer-encoding as we're setting content-length
-        if key == "transfer-encoding" {
-            continue;
-        }
-        if key == "content-type" {
-            has_content_type = true;
-        }
-
-        // Try to parse and insert header
-        if let (Ok(header_name), Ok(header_value)) = (
-            hyper::header::HeaderName::try_from(key.as_str()),
-            hyper::header::HeaderValue::from_str(value),
-        ) {
-            builder = builder.header(header_name, header_value);
-        }
-    }
-
-    // Set default Content-Type if not provided
-    if !has_content_type {
-        builder = builder.header("content-type", "application/json");
-    }
-
-    // Always set Content-Length to actual body length (overrides any user-provided value)
-    builder = builder.header("content-length", content_length.to_string());
-
-    let response = builder.body(Full::new(body_bytes)).unwrap();
     Ok(response)
 }
 
@@ -285,5 +270,39 @@ mod tests {
         assert_eq!(response.headers().get("x-dynamic").unwrap(), "new-header");
         // Content-Length should be set
         assert!(response.headers().get("content-length").is_some());
+    }
+
+    #[test]
+    fn test_dynamic_headers_override_fixed_headers() {
+        let mut fixed_headers = HashMap::new();
+        fixed_headers.insert("X-Override-Me".to_string(), "fixed-value".to_string());
+
+        let mut dynamic_headers = HashMap::new();
+        dynamic_headers.insert("X-Override-Me".to_string(), "dynamic-value".to_string());
+
+        let response = create_error_response(
+            500,
+            "test body".to_string(),
+            Some(&fixed_headers),
+            Some(&dynamic_headers),
+        )
+        .unwrap();
+
+        // Verify that the dynamic value overwrote the fixed value
+        let header_value = response
+            .headers()
+            .get("x-override-me")
+            .expect("Header should exist");
+
+        assert_eq!(
+            header_value, "dynamic-value",
+            "Dynamic header should override fixed header with the same key"
+        );
+
+        // Verify the fixed value is NOT present
+        assert_ne!(
+            header_value, "fixed-value",
+            "Fixed header value should have been overwritten"
+        );
     }
 }

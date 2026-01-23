@@ -13,6 +13,7 @@ pub mod recording;
 
 // ===== Rift Extensions (features beyond Mountebank) =====
 pub mod extensions;
+pub mod response;
 
 // Re-export extension modules at top level for backward compatibility
 pub use extensions::fault;

@@ -2,6 +2,7 @@
 
 use crate::extensions::stub_analysis::StubWarning;
 use crate::imposter::{ImposterError, RecordedRequest, Stub};
+use crate::response::builder::ErrorResponseBuilder;
 use bytes::Bytes;
 use http_body_util::Full;
 use hyper::body::Incoming;
@@ -218,7 +219,12 @@ pub fn error_response(status: StatusCode, message: &str) -> Response<Full<Bytes>
             message: message.to_string(),
         }],
     };
-    json_response(status, &error)
+
+    let json = serde_json::to_string_pretty(&error).unwrap_or_else(|_| "{}".to_string());
+    ErrorResponseBuilder::new(status)
+        .body(json)
+        .header("Content-Type", "application/json")
+        .build_full()
 }
 
 /// Convert ImposterError to HTTP Response for cleaner error handling in handlers.

@@ -6,7 +6,7 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-nightly-orange)](https://www.rust-lang.org/)
 
-Rift is a high-performance, [Mountebank](http://www.mbtest.org/)-compatible mock server that delivers **2-250x better performance**. Use your existing Mountebank configurations and enjoy faster test execution.
+Rift is a high-performance, [Mountebank](https://www.mbtest.dev/)-compatible mock server that delivers **2-250x better performance**. Use your existing Mountebank configurations and enjoy faster test execution.
 
 **[Documentation](https://etacassiopeia.github.io/rift/)** | **[Quick Start](#quick-start)** | **[Examples](examples/)**
 
@@ -46,7 +46,7 @@ Rift is a high-performance, [Mountebank](http://www.mbtest.org/)-compatible mock
 ```bash
 # Pull and run
 docker pull zainalpour/rift-proxy:latest
-docker run -p 2525:2525 zainalpour/rift-proxy:latest
+docker run -p 2525:2525 -p 4545:4545 zainalpour/rift-proxy:latest
 
 # Create your first imposter
 curl -X POST http://localhost:2525/imposters \
@@ -142,32 +142,32 @@ await server.close();
 
 ### Getting Started
 - [Installation](https://etacassiopeia.github.io/rift/getting-started/) - Docker, binary, build from source
-- [Quick Start](https://etacassiopeia.github.io/rift/getting-started/quickstart/) - Create your first imposter
+- [Quick Start](https://etacassiopeia.github.io/rift/getting-started/quickstart) - Create your first imposter
 - [Node.js Integration](https://etacassiopeia.github.io/rift/getting-started/nodejs/) - npm package for Node.js
-- [Migration Guide](https://etacassiopeia.github.io/rift/getting-started/migration/) - Using Rift with Mountebank configs
+- [Migration Guide](https://etacassiopeia.github.io/rift/getting-started/migration) - Using Rift with Mountebank configs
 
 ### Mountebank Compatibility
-- [Imposters](https://etacassiopeia.github.io/rift/mountebank/imposters/) - Mock server configuration
-- [Predicates](https://etacassiopeia.github.io/rift/mountebank/predicates/) - Request matching
-- [Responses](https://etacassiopeia.github.io/rift/mountebank/responses/) - Response configuration
-- [Behaviors](https://etacassiopeia.github.io/rift/mountebank/behaviors/) - wait, decorate, copy
-- [Proxy Mode](https://etacassiopeia.github.io/rift/mountebank/proxy/) - Record and replay
+- [Imposters](https://etacassiopeia.github.io/rift/mountebank/imposters) - Mock server configuration
+- [Predicates](https://etacassiopeia.github.io/rift/mountebank/predicates) - Request matching
+- [Responses](https://etacassiopeia.github.io/rift/mountebank/responses) - Response configuration
+- [Behaviors](https://etacassiopeia.github.io/rift/mountebank/behaviors) - wait, decorate, copy
+- [Proxy Mode](https://etacassiopeia.github.io/rift/mountebank/proxy) - Record and replay
 
 ### Configuration
-- [Mountebank Format](https://etacassiopeia.github.io/rift/configuration/mountebank/) - JSON configuration
-- [Native Rift Format](https://etacassiopeia.github.io/rift/configuration/native/) - YAML for advanced features
-- [CLI Reference](https://etacassiopeia.github.io/rift/configuration/cli/) - Command-line options
+- [Mountebank Format](https://etacassiopeia.github.io/rift/configuration/mountebank) - JSON configuration
+- [Native Rift Format](https://etacassiopeia.github.io/rift/configuration/native) - YAML for advanced features
+- [CLI Reference](https://etacassiopeia.github.io/rift/configuration/cli) - Command-line options
 
 ### Features
-- [Fault Injection](https://etacassiopeia.github.io/rift/features/fault-injection/) - Chaos engineering
-- [Scripting](https://etacassiopeia.github.io/rift/features/scripting/) - Rhai, Lua, JavaScript
-- [TLS/HTTPS](https://etacassiopeia.github.io/rift/features/tls/) - Secure connections
-- [Metrics](https://etacassiopeia.github.io/rift/features/metrics/) - Prometheus integration
-- [TUI](https://etacassiopeia.github.io/rift/features/tui/) - Interactive terminal interface
+- [Fault Injection](https://etacassiopeia.github.io/rift/features/fault-injection) - Chaos engineering
+- [Scripting](https://etacassiopeia.github.io/rift/features/scripting) - Rhai, Lua, JavaScript
+- [TLS/HTTPS](https://etacassiopeia.github.io/rift/features/tls) - Secure connections
+- [Metrics](https://etacassiopeia.github.io/rift/features/metrics) - Prometheus integration
+- [TUI](https://etacassiopeia.github.io/rift/features/tui) - Interactive terminal interface
 
 ### Deployment
-- [Docker](https://etacassiopeia.github.io/rift/deployment/docker/) - Container deployment
-- [Kubernetes](https://etacassiopeia.github.io/rift/deployment/kubernetes/) - K8s patterns
+- [Docker](https://etacassiopeia.github.io/rift/deployment/docker) - Container deployment
+- [Kubernetes](https://etacassiopeia.github.io/rift/deployment/kubernetes) - K8s patterns
 
 ### Reference
 - [REST API](https://etacassiopeia.github.io/rift/api/) - Admin API reference

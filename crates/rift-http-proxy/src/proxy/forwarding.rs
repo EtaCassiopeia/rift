@@ -9,10 +9,11 @@ use super::headers::{
 };
 use super::response_ext::ResponseExt;
 use crate::recording::{ProxyMode, RecordedResponse, RecordingStore, RequestSignature};
+use crate::response::builder::ErrorResponseBuilder;
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
-use hyper::{Request, Response};
+use hyper::{Request, Response, StatusCode};
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -117,14 +118,10 @@ pub async fn forward_request_streaming(
         }
         Err(e) => {
             error!("Failed to forward request to upstream: {}", e);
-            Response::builder()
-                .status(502)
+            ErrorResponseBuilder::new(StatusCode::BAD_GATEWAY)
                 .header("content-type", "application/json")
-                .body(BoxBody::new(
-                    Full::new(Bytes::from(r#"{"error": "Bad Gateway"}"#))
-                        .map_err(|never: Infallible| match never {}),
-                ))
-                .unwrap()
+                .body(r#"{"error": "Bad Gateway"}"#)
+                .build_boxed()
         }
     }
 }
@@ -153,13 +150,10 @@ pub async fn forward_with_recording(
         Ok(collected) => collected.to_bytes(),
         Err(e) => {
             error!("Failed to collect request body for recording: {}", e);
-            return Response::builder()
-                .status(500)
-                .body(BoxBody::new(
-                    Full::new(Bytes::from(r#"{"error": "Failed to read request body"}"#))
-                        .map_err(|never: Infallible| match never {}),
-                ))
-                .unwrap();
+            return ErrorResponseBuilder::new(StatusCode::INTERNAL_SERVER_ERROR)
+                .header("content-type", "application/json")
+                .body(r#"{"error": "Failed to read request body"}"#)
+                .build_boxed();
         }
     };
 
