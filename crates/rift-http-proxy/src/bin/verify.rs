@@ -300,12 +300,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if args.verbose {
                             println!(
                                 "   {}PASS{} Stub #{} - {} {} ({})",
-                                GREEN,
-                                RESET,
-                                stub_index,
-                                test_case.method,
-                                test_case.path,
-                                reason
+                                GREEN, RESET, stub_index, test_case.method, test_case.path, reason
                             );
                         }
                     } else {
