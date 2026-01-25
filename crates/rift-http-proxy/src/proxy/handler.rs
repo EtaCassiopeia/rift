@@ -209,8 +209,11 @@ async fn handle_script_rules(
             .compiled_scripts
             .iter()
             .find(|(_, compiled_rule, rule_upstream)| {
-                compiled_rule.matches(&request_info.method, &request_info.uri, &request_info.headers)
-                    && rule_applies_to_upstream(rule_upstream, upstream.name.as_deref())
+                compiled_rule.matches(
+                    &request_info.method,
+                    &request_info.uri,
+                    &request_info.headers,
+                ) && rule_applies_to_upstream(rule_upstream, upstream.name.as_deref())
             });
 
     let (compiled_script, compiled_rule, _) = match matching_script {
@@ -362,12 +365,14 @@ async fn handle_script_result(
                 .iter()
                 .enumerate()
                 .find(|(idx, rule)| {
-                    rule.matches(&request_info.method, &request_info.uri, &request_info.headers)
-                        && rule_applies_to_upstream(
+                    rule.matches(
+                        &request_info.method,
+                        &request_info.uri,
+                        &request_info.headers,
+                    ) && rule_applies_to_upstream(
                         &ctx.rule_upstreams[*idx],
                         forwarding_ctx.upstream_service.name.as_deref(),
-                        )
-                        && rule.rule.fault.error.is_some()
+                    ) && rule.rule.fault.error.is_some()
                 })
                 .and_then(|(_, rule)| rule.rule.fault.error.as_ref().map(|e| e.headers.clone()));
 
