@@ -117,7 +117,7 @@ pub async fn handle_request(
         ctx.recording_store,
         ctx.recording_signature_headers,
         req,
-        &upstream_url,
+        upstream_url,
     )
     .await;
     let status = response.status().as_u16();
