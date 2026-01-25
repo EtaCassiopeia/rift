@@ -5,7 +5,6 @@
 //! - YAML rule matching and fault injection
 //! - Response behavior application (wait, copy, lookup, shell, decorate)
 
-use super::client::HttpClient;
 use super::forwarding::{error_response, forward_request_with_body, forward_with_recording};
 use super::headers::{
     RiftHeadersExt, VALUE_ERROR, VALUE_LATENCY, VALUE_TCP, VALUE_TRUE, X_RIFT_BEHAVIOR_COPY,
@@ -14,12 +13,11 @@ use super::headers::{
 };
 use super::response_ext::ResponseExt;
 use crate::behaviors::{
-    apply_copy_behaviors, apply_decorate, apply_lookup_behaviors, apply_shell_transform, CsvCache,
+    apply_copy_behaviors, apply_decorate, apply_lookup_behaviors, apply_shell_transform,
     RequestContext,
 };
 use crate::config::TcpFault;
 use crate::extensions::fault::{apply_latency, create_error_response, decide_fault, FaultDecision};
-use crate::extensions::flow_state::FlowStore;
 use crate::extensions::matcher::CompiledRule;
 use crate::extensions::metrics;
 use crate::extensions::routing::Router;
@@ -27,11 +25,7 @@ use crate::extensions::template::{has_template_variables, process_template, Requ
 use crate::proxy::context::{
     ForwardingContext, RequestHandlerContext, RequestInfo, ScriptingContext, UpstreamService,
 };
-use crate::recording::RecordingStore;
-use crate::scripting::{
-    CacheKey, CompiledScript, DecisionCache, FaultDecision as ScriptFaultDecision, ScriptPool,
-    ScriptRequest,
-};
+use crate::scripting::{CacheKey, FaultDecision as ScriptFaultDecision, ScriptRequest};
 
 use http_body_util::combinators::BoxBody;
 use http_body_util::BodyExt;
