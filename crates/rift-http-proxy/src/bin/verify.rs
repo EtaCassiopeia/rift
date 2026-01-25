@@ -295,6 +295,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
 
                 if let Some(reason) = &test_case.skip_reason {
+                    // No-match stubs count as passed (they pass by design)
+                    // Other skipped stubs (dynamic, etc.) count as skipped
                     if test_case.is_no_match_stub {
                         summary.passed += 1;
                         if args.verbose {
