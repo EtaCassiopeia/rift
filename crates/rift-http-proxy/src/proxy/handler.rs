@@ -56,6 +56,44 @@ pub struct RequestHandlerContext<'a> {
     pub flow_state_configured: bool,
 }
 
+/// Extracted request metadata
+#[derive(Clone)]
+pub struct RequestInfo {
+    pub method: hyper::Method,
+    pub uri: hyper::Uri,
+    pub headers: hyper::HeaderMap,
+}
+
+impl RequestInfo {
+    pub fn from_request<B>(req: &Request<B>) -> Self {
+        Self {
+            method: req.method().clone(),
+            uri: req.uri().clone(),
+            headers: req.headers().clone(),
+        }
+    }
+}
+
+/// Reverse-proxy upstream service
+#[derive(Clone, Default)]
+pub struct UpstreamService {
+    pub url: Option<String>,
+    pub name: Option<String>,
+}
+
+pub struct ScriptingContext<'a> {
+    pub compiled_scripts: &'a [(CompiledScript, CompiledRule, Option<String>)],
+    pub script_pool: &'a Arc<ScriptPool>,
+    pub decision_cache: &'a Arc<DecisionCache>,
+}
+
+pub struct ForwardingContext {
+    pub info: RequestInfo,
+    pub body_bytes: Bytes,
+    pub upstream_service: UpstreamService,
+    pub start_time: std::time::Instant,
+}
+
 /// Handle an incoming request with fault injection and forwarding.
 pub async fn handle_request(
     ctx: &RequestHandlerContext<'_>,
@@ -68,32 +106,24 @@ pub async fn handle_request(
 
     debug!("Received request: {} {}", method, uri);
 
-    // Select upstream for this request (reverse proxy mode)
-    let selected_upstream = select_upstream(ctx.router, ctx.upstreams, &req);
-    let (selected_upstream_url, selected_upstream_name) = match selected_upstream {
-        Some((url, name)) => (Some(url), Some(name)),
-        None => (None, None),
-    };
+    let upstream = select_upstream(ctx.router, ctx.upstreams, &req)
+        .map(|(url, name)| UpstreamService {
+            url: Some(url),
+            name: Some(name),
+        })
+        .unwrap_or_default();
 
     // Check script rules first (if configured) - optimized path with pool and cache
     let req = if let (Some(compiled_scripts), Some(script_pool), Some(decision_cache)) =
         (ctx.compiled_scripts, ctx.script_pool, ctx.decision_cache)
     {
-        match handle_script_rules(
-            ctx,
+        let scripting = ScriptingContext {
             compiled_scripts,
             script_pool,
             decision_cache,
-            req,
-            &method,
-            &uri,
-            &headers,
-            selected_upstream_url.as_deref(),
-            selected_upstream_name.as_deref(),
-            start_time,
-        )
-        .await
-        {
+        };
+
+        match handle_script_rules(ctx, &scripting, req, &upstream, start_time).await {
             RuleHandlingResult::Response(response) => return Ok(response),
             RuleHandlingResult::NoFault(req) => req,
         }
@@ -108,10 +138,7 @@ pub async fn handle_request(
         .enumerate()
         .find(|(idx, rule)| {
             rule.matches(&method, &uri, &headers)
-                && rule_applies_to_upstream(
-                    &ctx.rule_upstreams[*idx],
-                    selected_upstream_name.as_deref(),
-                )
+                && rule_applies_to_upstream(&ctx.rule_upstreams[*idx], upstream.name.as_deref())
         })
         .map(|(idx, _)| idx);
 
@@ -119,22 +146,11 @@ pub async fn handle_request(
         let rule = &ctx.compiled_rules[rule_idx];
         info!("Request matched rule: {}", rule.id);
 
-        match handle_yaml_rule(
-            ctx,
-            rule,
-            req,
-            &method,
-            &uri,
-            &headers,
-            selected_upstream_url.as_deref(),
-            start_time,
-        )
-        .await
-        {
+        match handle_yaml_rule(ctx, rule, req, upstream.url.as_deref(), start_time).await {
             RuleHandlingResult::Response(response) => return Ok(response),
             RuleHandlingResult::NoFault(r) => {
                 // Continue to forward without fault
-                let upstream_url = selected_upstream_url.as_deref().unwrap_or(ctx.upstream_uri);
+                let upstream_url = upstream.url.as_deref().unwrap_or(ctx.upstream_uri);
                 let response = forward_with_recording(
                     ctx.http_client,
                     ctx.recording_store,
@@ -153,13 +169,13 @@ pub async fn handle_request(
     }
 
     // Forward request without fault (with recording support if enabled)
-    let upstream_url = selected_upstream_url.as_deref().unwrap_or(ctx.upstream_uri);
+    let upstream_url = upstream.url.as_deref().unwrap_or(ctx.upstream_uri);
     let response = forward_with_recording(
         ctx.http_client,
         ctx.recording_store,
         ctx.recording_signature_headers,
         req,
-        upstream_url,
+        &upstream_url,
     )
     .await;
     let status = response.status().as_u16();
@@ -178,27 +194,24 @@ pub enum RuleHandlingResult {
 }
 
 /// Handle script rules - returns either a response or the request back if no script matched.
-#[allow(clippy::too_many_arguments)]
 async fn handle_script_rules(
     ctx: &RequestHandlerContext<'_>,
-    compiled_scripts: &[(CompiledScript, CompiledRule, Option<String>)],
-    script_pool: &Arc<ScriptPool>,
-    decision_cache: &Arc<DecisionCache>,
+    scripting: &ScriptingContext<'_>,
     req: Request<hyper::body::Incoming>,
-    method: &hyper::Method,
-    uri: &hyper::Uri,
-    headers: &hyper::HeaderMap,
-    selected_upstream_url: Option<&str>,
-    selected_upstream_name: Option<&str>,
+    upstream: &UpstreamService,
     start_time: std::time::Instant,
 ) -> RuleHandlingResult {
+    let request_info = RequestInfo::from_request(&req);
+
     // Find first matching script rule that applies to selected upstream
-    let matching_script = compiled_scripts
-        .iter()
-        .find(|(_, compiled_rule, rule_upstream)| {
-            compiled_rule.matches(method, uri, headers)
-                && rule_applies_to_upstream(rule_upstream, selected_upstream_name)
-        });
+    let matching_script =
+        scripting
+            .compiled_scripts
+            .iter()
+            .find(|(_, compiled_rule, rule_upstream)| {
+                compiled_rule.matches(&request_info.method, &request_info.uri, &request_info.headers)
+                    && rule_applies_to_upstream(rule_upstream, upstream.name.as_deref())
+            });
 
     let (compiled_script, compiled_rule, _) = match matching_script {
         Some(m) => m,
@@ -219,7 +232,7 @@ async fn handle_script_rules(
 
     // Convert to script request
     let mut headers_map = HashMap::new();
-    for (k, v) in headers.iter() {
+    for (k, v) in request_info.headers.iter() {
         if let Ok(value_str) = v.to_str() {
             headers_map.insert(k.as_str().to_string(), value_str.to_string());
         }
@@ -229,11 +242,11 @@ async fn handle_script_rules(
         serde_json::from_slice(&body_bytes).unwrap_or(serde_json::Value::Null);
 
     // Parse query parameters from URI
-    let query_params = crate::predicate::parse_query_string(uri.query());
+    let query_params = crate::predicate::parse_query_string(request_info.uri.query());
 
     let script_request = ScriptRequest {
-        method: method.to_string(),
-        path: uri.path().to_string(),
+        method: request_info.method.to_string(),
+        path: request_info.uri.path().to_string(),
         headers: headers_map.clone(),
         body: body_json.clone(),
         query: query_params,
@@ -242,8 +255,8 @@ async fn handle_script_rules(
 
     // Create cache key
     let cache_key = CacheKey::new(
-        method.to_string(),
-        uri.path().to_string(),
+        request_info.method.to_string(),
+        request_info.uri.path().to_string(),
         headers_map.into_iter().collect(),
         &body_json,
         compiled_rule.id.clone(),
@@ -257,14 +270,15 @@ async fn handle_script_rules(
     // Check cache first (only for stateless scripts), then execute via pool
     let script_start = std::time::Instant::now();
     let result = if use_cache {
-        if let Some(cached_decision) = decision_cache.get(&cache_key) {
+        if let Some(cached_decision) = scripting.decision_cache.get(&cache_key) {
             debug!("Cache hit for rule: {} (stateless)", compiled_rule.id);
             Ok(cached_decision)
         } else {
             debug!("Cache miss for rule: {}", compiled_rule.id);
 
             // Execute via pool
-            let pool_result = script_pool
+            let pool_result = scripting
+                .script_pool
                 .execute(
                     compiled_script.clone(),
                     script_request,
@@ -274,7 +288,7 @@ async fn handle_script_rules(
 
             // Cache the result if successful (stateless only)
             if let Ok(ref decision) = pool_result {
-                let _ = decision_cache.insert(cache_key, decision.clone());
+                let _ = scripting.decision_cache.insert(cache_key, decision.clone());
             }
 
             pool_result
@@ -282,7 +296,8 @@ async fn handle_script_rules(
     } else {
         // Stateful script: always execute, never cache
         debug!("Executing stateful script (no cache): {}", compiled_rule.id);
-        script_pool
+        scripting
+            .script_pool
             .execute(
                 compiled_script.clone(),
                 script_request,
@@ -292,18 +307,19 @@ async fn handle_script_rules(
     };
     let script_duration = script_start.elapsed().as_secs_f64() * 1000.0;
 
+    let forwarding_ctx = ForwardingContext {
+        info: request_info,
+        body_bytes,
+        start_time,
+        upstream_service: upstream.to_owned(),
+    };
+
     RuleHandlingResult::Response(
         handle_script_result(
             ctx,
             result.map_err(|e| e.to_string()),
             compiled_rule,
-            method,
-            uri,
-            headers,
-            body_bytes,
-            selected_upstream_url,
-            selected_upstream_name,
-            start_time,
+            &forwarding_ctx,
             script_duration,
         )
         .await,
@@ -311,20 +327,14 @@ async fn handle_script_rules(
 }
 
 /// Handle the result of a script execution.
-#[allow(clippy::too_many_arguments)]
 async fn handle_script_result(
     ctx: &RequestHandlerContext<'_>,
     result: Result<ScriptFaultDecision, String>,
     compiled_rule: &CompiledRule,
-    method: &hyper::Method,
-    uri: &hyper::Uri,
-    headers: &hyper::HeaderMap,
-    body_bytes: Bytes,
-    selected_upstream_url: Option<&str>,
-    selected_upstream_name: Option<&str>,
-    start_time: std::time::Instant,
+    forwarding_ctx: &ForwardingContext,
     script_duration: f64,
 ) -> Response<BoxBody<Bytes, hyper::Error>> {
+    let request_info = &forwarding_ctx.info;
     match result {
         Ok(ScriptFaultDecision::Error {
             status,
@@ -342,9 +352,9 @@ async fn handle_script_result(
             metrics::record_script_fault("error", &rule_id, None);
             metrics::record_error_injection(&rule_id, status);
 
-            let duration_ms = start_time.elapsed().as_secs_f64() * 1000.0;
-            metrics::record_proxy_duration(method.as_str(), duration_ms, "script");
-            metrics::record_request(method.as_str(), status);
+            let duration_ms = forwarding_ctx.start_time.elapsed().as_secs_f64() * 1000.0;
+            metrics::record_proxy_duration(request_info.method.as_str(), duration_ms, "script");
+            metrics::record_request(request_info.method.as_str(), status);
 
             // Find fixed headers from matching YAML rule (if any)
             let fixed_headers = ctx
@@ -352,10 +362,10 @@ async fn handle_script_result(
                 .iter()
                 .enumerate()
                 .find(|(idx, rule)| {
-                    rule.matches(method, uri, headers)
+                    rule.matches(&request_info.method, &request_info.uri, &request_info.headers)
                         && rule_applies_to_upstream(
-                            &ctx.rule_upstreams[*idx],
-                            selected_upstream_name,
+                        &ctx.rule_upstreams[*idx],
+                        forwarding_ctx.upstream_service.name.as_deref(),
                         )
                         && rule.rule.fault.error.is_some()
                 })
@@ -385,21 +395,25 @@ async fn handle_script_result(
             apply_latency(duration_ms).await;
 
             // Forward with body for latency fault
-            let upstream_url = selected_upstream_url.unwrap_or(ctx.upstream_uri);
+            let upstream_url = forwarding_ctx
+                .upstream_service
+                .url
+                .as_deref()
+                .unwrap_or(ctx.upstream_uri);
             let mut response = forward_request_with_body(
                 ctx.http_client,
-                method.clone(),
-                uri.clone(),
-                headers.clone(),
-                body_bytes,
+                request_info.method.clone(),
+                request_info.uri.clone(),
+                request_info.headers.clone(),
+                forwarding_ctx.body_bytes.clone(),
                 upstream_url,
             )
             .await;
             let status = response.status().as_u16();
 
-            let total_duration = start_time.elapsed().as_secs_f64() * 1000.0;
-            metrics::record_proxy_duration(method.as_str(), total_duration, "script");
-            metrics::record_request(method.as_str(), status);
+            let total_duration = forwarding_ctx.start_time.elapsed().as_secs_f64() * 1000.0;
+            metrics::record_proxy_duration(request_info.method.as_str(), total_duration, "script");
+            metrics::record_request(request_info.method.as_str(), status);
 
             response.set_header(&X_RIFT_FAULT, &VALUE_LATENCY);
             response.set_header_value(&X_RIFT_RULE_ID, &rule_id);
@@ -415,20 +429,24 @@ async fn handle_script_result(
             metrics::record_script_execution(&compiled_rule.id, script_duration, "pass");
 
             // Forward request
-            let upstream_url = selected_upstream_url.unwrap_or(ctx.upstream_uri);
+            let upstream_url = forwarding_ctx
+                .upstream_service
+                .url
+                .as_deref()
+                .unwrap_or(ctx.upstream_uri);
             let response = forward_request_with_body(
                 ctx.http_client,
-                method.clone(),
-                uri.clone(),
-                headers.clone(),
-                body_bytes,
+                request_info.method.clone(),
+                request_info.uri.clone(),
+                request_info.headers.clone(),
+                forwarding_ctx.body_bytes.clone(),
                 upstream_url,
             )
             .await;
             let status = response.status().as_u16();
-            let duration_ms = start_time.elapsed().as_secs_f64() * 1000.0;
-            metrics::record_proxy_duration(method.as_str(), duration_ms, "none");
-            metrics::record_request(method.as_str(), status);
+            let duration_ms = forwarding_ctx.start_time.elapsed().as_secs_f64() * 1000.0;
+            metrics::record_proxy_duration(request_info.method.as_str(), duration_ms, "none");
+            metrics::record_request(request_info.method.as_str(), status);
             response.into_boxed()
         }
         Err(e) => {
@@ -440,20 +458,24 @@ async fn handle_script_result(
             metrics::record_script_error(&compiled_rule.id, "runtime");
 
             // Forward request on error
-            let upstream_url = selected_upstream_url.unwrap_or(ctx.upstream_uri);
+            let upstream_url = forwarding_ctx
+                .upstream_service
+                .url
+                .as_deref()
+                .unwrap_or(ctx.upstream_uri);
             let response = forward_request_with_body(
                 ctx.http_client,
-                method.clone(),
-                uri.clone(),
-                headers.clone(),
-                body_bytes,
+                request_info.method.clone(),
+                request_info.uri.clone(),
+                request_info.headers.clone(),
+                forwarding_ctx.body_bytes.clone(),
                 upstream_url,
             )
             .await;
             let status = response.status().as_u16();
-            let duration_ms = start_time.elapsed().as_secs_f64() * 1000.0;
-            metrics::record_proxy_duration(method.as_str(), duration_ms, "none");
-            metrics::record_request(method.as_str(), status);
+            let duration_ms = forwarding_ctx.start_time.elapsed().as_secs_f64() * 1000.0;
+            metrics::record_proxy_duration(request_info.method.as_str(), duration_ms, "none");
+            metrics::record_request(request_info.method.as_str(), status);
             response.into_boxed()
         }
     }
@@ -465,14 +487,12 @@ async fn handle_yaml_rule(
     ctx: &RequestHandlerContext<'_>,
     rule: &CompiledRule,
     req: Request<hyper::body::Incoming>,
-    method: &hyper::Method,
-    uri: &hyper::Uri,
-    headers: &hyper::HeaderMap,
     selected_upstream_url: Option<&str>,
     start_time: std::time::Instant,
 ) -> RuleHandlingResult {
     // Decide fault
     let fault_decision = decide_fault(&rule.rule.fault, &rule.id);
+    let request_info = RequestInfo::from_request(&req);
 
     match fault_decision {
         FaultDecision::TcpFault {
@@ -484,7 +504,7 @@ async fn handle_yaml_rule(
             // Record metrics
             metrics::record_error_injection(&rule_id, 0);
             let duration_ms = start_time.elapsed().as_secs_f64() * 1000.0;
-            metrics::record_proxy_duration(method.as_str(), duration_ms, "tcp_fault");
+            metrics::record_proxy_duration(request_info.method.as_str(), duration_ms, "tcp_fault");
 
             // Return appropriate error based on fault type
             let (status, body) = match fault_type {
@@ -524,21 +544,26 @@ async fn handle_yaml_rule(
             // Record metrics
             metrics::record_error_injection(&rule_id, status);
             let duration_ms = start_time.elapsed().as_secs_f64() * 1000.0;
-            metrics::record_proxy_duration(method.as_str(), duration_ms, "error");
-            metrics::record_request(method.as_str(), status);
+            metrics::record_proxy_duration(request_info.method.as_str(), duration_ms, "error");
+            metrics::record_request(request_info.method.as_str(), status);
 
             // Build request context for behaviors
             let request_context = RequestContext::from_request(
-                method.as_str(),
-                uri,
-                headers,
+                request_info.method.as_str(),
+                &request_info.uri,
+                &request_info.headers,
                 None, // Body not available for YAML rules
             );
 
             // Process template variables in response body if present
             let mut processed_body = if has_template_variables(&body) {
-                let request_data =
-                    RequestData::new(method.as_str(), uri.path(), uri.query(), headers, None);
+                let request_data = RequestData::new(
+                    request_info.method.as_str(),
+                    request_info.uri.path(),
+                    request_info.uri.query(),
+                    &request_info.headers,
+                    None,
+                );
                 process_template(&body, &request_data)
             } else {
                 body
@@ -669,17 +694,17 @@ async fn handle_yaml_rule(
             let upstream_url = selected_upstream_url.unwrap_or(ctx.upstream_uri);
             let mut response = forward_request_with_body(
                 ctx.http_client,
-                method.clone(),
-                uri.clone(),
-                headers.clone(),
+                request_info.method.clone(),
+                request_info.uri.clone(),
+                request_info.headers.clone(),
                 body_bytes,
                 upstream_url,
             )
             .await;
             let status = response.status().as_u16();
             let total_duration = start_time.elapsed().as_secs_f64() * 1000.0;
-            metrics::record_proxy_duration(method.as_str(), total_duration, "latency");
-            metrics::record_request(method.as_str(), status);
+            metrics::record_proxy_duration(request_info.method.as_str(), total_duration, "latency");
+            metrics::record_request(request_info.method.as_str(), status);
 
             response.set_header(&X_RIFT_FAULT, &VALUE_LATENCY);
             response.set_header_value(&X_RIFT_RULE_ID, &rule_id);
