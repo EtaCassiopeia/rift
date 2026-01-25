@@ -27,6 +27,7 @@ mod response_ext;
 mod server;
 mod tls;
 
+mod context;
 #[cfg(test)]
 mod tests;
 
