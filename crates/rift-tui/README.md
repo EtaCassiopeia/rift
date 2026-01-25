@@ -85,7 +85,7 @@ rift-tui --admin-url http://localhost:2525
 
 ## Documentation
 
-Full documentation available at [etacassiopeia.github.io/rift/features/tui](https://etacassiopeia.github.io/rift/features/tui/).
+Full documentation available at [etacassiopeia.github.io/rift/features/tui](https://etacassiopeia.github.io/rift/features/tui).
 
 ## License
 
