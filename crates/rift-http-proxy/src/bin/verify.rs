@@ -294,7 +294,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("   {DIM}{curl}{RESET}");
                 }
 
-                if test_case.skip_reason.is_some() {
+                if let Some(reason) = &test_case.skip_reason {
                     // No-match stubs count as passed (they pass by design)
                     // Other skipped stubs (dynamic, etc.) count as skipped
                     if test_case.is_no_match_stub {
@@ -302,12 +302,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if args.verbose {
                             println!(
                                 "   {}PASS{} Stub #{} - {} {} ({})",
-                                GREEN,
-                                RESET,
-                                stub_index,
-                                test_case.method,
-                                test_case.path,
-                                test_case.skip_reason.as_ref().unwrap()
+                                GREEN, RESET, stub_index, test_case.method, test_case.path, reason
                             );
                         }
                     } else {

@@ -4,7 +4,7 @@
 //! and the main run loop that accepts connections and handles requests.
 
 use super::client::{create_http_client, should_skip_tls_verify, HttpClient};
-use super::handler::{handle_request, RequestHandlerContext};
+use super::handler::handle_request;
 use super::network::create_reusable_listener;
 use super::tls::create_tls_acceptor;
 use crate::behaviors::{CsvCache, ResponseCycler};
@@ -12,6 +12,7 @@ use crate::config::{Config, Protocol as RiftProtocol, Upstream};
 use crate::extensions::flow_state::{create_flow_store, FlowStore};
 use crate::extensions::matcher::CompiledRule;
 use crate::extensions::routing::Router;
+use crate::proxy::context::RequestHandlerContext;
 use crate::recording::{ProxyMode, RecordingStore};
 #[cfg(feature = "javascript")]
 use crate::scripting::compile_js_to_bytecode;
@@ -21,6 +22,7 @@ use crate::scripting::RhaiEngine;
 use crate::scripting::{
     CompiledScript, DecisionCache, DecisionCacheConfig, ScriptPool, ScriptPoolConfig,
 };
+
 #[cfg(any(feature = "lua", feature = "javascript"))]
 use anyhow::Context;
 use http_body_util::combinators::BoxBody;
