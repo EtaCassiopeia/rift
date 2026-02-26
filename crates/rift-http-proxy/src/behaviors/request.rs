@@ -42,10 +42,15 @@ impl RequestContext {
                     Some((k, v)) => (k, v),
                     None => (pair, ""),
                 };
-                query_map.insert(
-                    key.to_string(),
-                    urlencoding::decode(value).unwrap_or_default().to_string(),
-                );
+                let decoded_key = key.to_string();
+                let decoded_value = urlencoding::decode(value).unwrap_or_default().to_string();
+                query_map
+                    .entry(decoded_key)
+                    .and_modify(|existing: &mut String| {
+                        existing.push(',');
+                        existing.push_str(&decoded_value);
+                    })
+                    .or_insert(decoded_value);
             }
         }
 

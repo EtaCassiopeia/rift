@@ -1760,3 +1760,63 @@ fn test_bare_query_param_equals_empty_string() {
         None
     ));
 }
+
+// =============================================================================
+// Issue #83: Multi-valued query params
+// =============================================================================
+
+#[test]
+fn test_parse_query_string_multi_valued() {
+    let result = parse_query_string("key=a&key=b");
+    assert_eq!(result.get("key").unwrap(), "a,b");
+}
+
+#[test]
+fn test_parse_query_string_multi_valued_three() {
+    let result = parse_query_string("color=red&color=green&color=blue");
+    assert_eq!(result.get("color").unwrap(), "red,green,blue");
+}
+
+#[test]
+fn test_multi_valued_query_param_equals() {
+    let empty_headers: HashMap<String, String> = HashMap::new();
+    let predicates = predicates_from_jsons(vec![serde_json::json!({
+        "equals": {
+            "query": { "key": "a,b" }
+        }
+    })]);
+
+    assert!(stub_matches(
+        &predicates,
+        "GET",
+        "/test",
+        Some("key=a&key=b"),
+        &empty_headers,
+        None,
+        None,
+        None,
+        None
+    ));
+}
+
+#[test]
+fn test_multi_valued_query_param_contains() {
+    let empty_headers: HashMap<String, String> = HashMap::new();
+    let predicates = predicates_from_jsons(vec![serde_json::json!({
+        "contains": {
+            "query": { "key": "a,b" }
+        }
+    })]);
+
+    assert!(stub_matches(
+        &predicates,
+        "GET",
+        "/test",
+        Some("key=a&key=b&other=x"),
+        &empty_headers,
+        None,
+        None,
+        None,
+        None
+    ));
+}
