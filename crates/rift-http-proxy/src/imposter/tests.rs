@@ -1193,3 +1193,183 @@ fn test_exists_predicate_body_boolean_still_works() {
         None
     ));
 }
+
+// =============================================================================
+// Issue #77: Unexpected types in predicate lead to always matching
+// =============================================================================
+
+#[test]
+fn test_ends_with_object_value_does_not_always_match() {
+    // {"endsWith": {"path": {"abc": "123"}}} should NOT match a plain string path
+    let predicates = predicates_from_jsons(vec![serde_json::json!({
+        "endsWith": {
+            "path": {"abc": "123"}
+        }
+    })]);
+
+    let empty_headers = HashMap::new();
+
+    // Path is a plain string, not JSON → should NOT match (was incorrectly always matching)
+    assert!(!stub_matches(
+        &predicates,
+        "GET",
+        "/blah",
+        None,
+        &empty_headers,
+        None,
+        None,
+        None,
+        None
+    ));
+}
+
+#[test]
+fn test_ends_with_path_as_json_object() {
+    // When path is a JSON string, object predicate should parse it and match recursively
+    let predicates = predicates_from_jsons(vec![serde_json::json!({
+        "endsWith": {
+            "path": {"abc": "123"}
+        }
+    })]);
+
+    let empty_headers = HashMap::new();
+
+    // Path is a JSON string with a field whose value ends with "123"
+    assert!(stub_matches(
+        &predicates,
+        "GET",
+        r#"{"abc": "other123", "other": "ignored"}"#,
+        None,
+        &empty_headers,
+        None,
+        None,
+        None,
+        None
+    ));
+
+    // Path is a JSON string but field doesn't end with "123"
+    assert!(!stub_matches(
+        &predicates,
+        "GET",
+        r#"{"abc": "other456"}"#,
+        None,
+        &empty_headers,
+        None,
+        None,
+        None,
+        None
+    ));
+}
+
+#[test]
+fn test_starts_with_object_value_does_not_always_match() {
+    // {"startsWith": {"path": {"x": "y"}}} should NOT match a plain string path
+    let predicates = predicates_from_jsons(vec![serde_json::json!({
+        "startsWith": {
+            "path": {"x": "y"}
+        }
+    })]);
+
+    let empty_headers = HashMap::new();
+
+    assert!(!stub_matches(
+        &predicates,
+        "GET",
+        "/something",
+        None,
+        &empty_headers,
+        None,
+        None,
+        None,
+        None
+    ));
+}
+
+#[test]
+fn test_equals_body_as_json_object() {
+    // {"equals": {"body": {"blah": "123"}}} should parse body as JSON and compare fields
+    let predicates = predicates_from_jsons(vec![serde_json::json!({
+        "equals": {
+            "body": {
+                "blah": "123"
+            }
+        }
+    })]);
+
+    let empty_headers = HashMap::new();
+
+    // Body with matching field (extra fields ignored for equals)
+    assert!(stub_matches(
+        &predicates,
+        "POST",
+        "/test",
+        None,
+        &empty_headers,
+        Some(r#"{"blah": "123", "other": "ignored"}"#),
+        None,
+        None,
+        None
+    ));
+
+    // Body with wrong value
+    assert!(!stub_matches(
+        &predicates,
+        "POST",
+        "/test",
+        None,
+        &empty_headers,
+        Some(r#"{"blah": "456"}"#),
+        None,
+        None,
+        None
+    ));
+
+    // Body missing the field
+    assert!(!stub_matches(
+        &predicates,
+        "POST",
+        "/test",
+        None,
+        &empty_headers,
+        Some(r#"{"other": "123"}"#),
+        None,
+        None,
+        None
+    ));
+}
+
+#[test]
+fn test_ends_with_body_object_with_numeric_value() {
+    // When expected value is a number in an object, convert to string for comparison
+    let predicates = predicates_from_jsons(vec![serde_json::json!({
+        "endsWith": {
+            "body": {"abc": 123}
+        }
+    })]);
+
+    let empty_headers = HashMap::new();
+
+    assert!(stub_matches(
+        &predicates,
+        "POST",
+        "/test",
+        None,
+        &empty_headers,
+        Some(r#"{"abc": "other123"}"#),
+        None,
+        None,
+        None
+    ));
+
+    assert!(!stub_matches(
+        &predicates,
+        "POST",
+        "/test",
+        None,
+        &empty_headers,
+        Some(r#"{"abc": "other456"}"#),
+        None,
+        None,
+        None
+    ));
+}
