@@ -325,15 +325,27 @@ where
         }
     }
 
-    // Check body
+    // Check body - when expected is an object, parse actual body as JSON
+    // and compare field-by-field recursively (Mountebank compatible)
     if let Some(expected) = obj.get("body") {
-        let expected_str = match expected {
-            serde_json::Value::String(s) => s.clone(),
-            _ => expected.to_string(),
-        };
         let actual = apply_except(body);
-        if !compare(&expected_str, &actual) {
-            return false;
+        match expected {
+            serde_json::Value::Object(_) => {
+                if !compare_json_recursive(expected, &actual, &compare) {
+                    return false;
+                }
+            }
+            serde_json::Value::String(s) => {
+                if !compare(s, &actual) {
+                    return false;
+                }
+            }
+            _ => {
+                let expected_str = expected.to_string();
+                if !compare(&expected_str, &actual) {
+                    return false;
+                }
+            }
         }
     }
 
@@ -676,6 +688,52 @@ fn check_exists_predicate(
     }
 
     true
+}
+
+/// Convert a JSON value to its string representation for predicate comparison.
+/// Strings are unwrapped (no quotes), other primitives use their natural representation.
+fn json_value_to_string(val: &serde_json::Value) -> String {
+    match val {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::Bool(b) => b.to_string(),
+        serde_json::Value::Null => String::new(),
+        _ => val.to_string(),
+    }
+}
+
+/// Recursively apply a comparison function when the expected value is a JSON object.
+/// Parses the actual string as JSON and compares each field recursively.
+/// For leaf values, converts both to strings and applies the comparison function.
+fn compare_json_recursive<F>(expected: &serde_json::Value, actual_str: &str, compare: &F) -> bool
+where
+    F: Fn(&str, &str) -> bool,
+{
+    match expected {
+        serde_json::Value::Object(expected_obj) => {
+            let actual_json: serde_json::Value = match serde_json::from_str(actual_str) {
+                Ok(v) => v,
+                Err(_) => return false,
+            };
+
+            for (key, expected_val) in expected_obj {
+                let actual_val = match actual_json.get(key) {
+                    Some(v) => v,
+                    None => return false,
+                };
+
+                let actual_val_str = json_value_to_string(actual_val);
+                if !compare_json_recursive(expected_val, &actual_val_str, compare) {
+                    return false;
+                }
+            }
+            true
+        }
+        _ => {
+            let expected_str = json_value_to_string(expected);
+            compare(&expected_str, actual_str)
+        }
+    }
 }
 
 /// Parse query string into HashMap (public helper)
