@@ -624,8 +624,77 @@ fn check_predicate_fields_regex(
     true
 }
 
+/// Convert a JSON value to its string representation for predicate comparison.
+/// Strings are unwrapped (no quotes), other primitives use their natural representation.
+fn json_value_to_string(val: &serde_json::Value) -> String {
+    match val {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::Bool(b) => b.to_string(),
+        serde_json::Value::Null => String::new(),
+        _ => val.to_string(),
+    }
+}
+
+/// Recursively check field existence within a JSON object.
+/// When the exists value is an object, parse the actual string as JSON
+/// and check each field's existence recursively (Mountebank compatible).
+fn check_exists_json_recursive(expected: &serde_json::Value, actual_str: &str) -> bool {
+    match expected {
+        serde_json::Value::Bool(should_exist) => {
+            let exists = !actual_str.is_empty();
+            exists == *should_exist
+        }
+        serde_json::Value::Object(expected_obj) => {
+            let actual_json: serde_json::Value = match serde_json::from_str(actual_str) {
+                Ok(v) => v,
+                Err(_) => {
+                    // If we can't parse as JSON, check if any field expects non-existence
+                    return expected_obj
+                        .values()
+                        .all(|v| v == &serde_json::Value::Bool(false));
+                }
+            };
+
+            for (key, expected_val) in expected_obj {
+                match expected_val {
+                    serde_json::Value::Bool(should_exist) => {
+                        let exists = actual_json.get(key).is_some();
+                        if exists != *should_exist {
+                            return false;
+                        }
+                    }
+                    serde_json::Value::Object(_) => {
+                        // Recurse into nested object
+                        let nested_str = match actual_json.get(key) {
+                            Some(v) => json_value_to_string(v),
+                            None => return false,
+                        };
+                        if !check_exists_json_recursive(expected_val, &nested_str) {
+                            return false;
+                        }
+                    }
+                    _ => {
+                        // Non-boolean, non-object values are treated as true (field should exist)
+                        if actual_json.get(key).is_none() {
+                            return false;
+                        }
+                    }
+                }
+            }
+            true
+        }
+        _ => {
+            // Non-boolean, non-object exists values: treat as "should exist" = true
+            !actual_str.is_empty()
+        }
+    }
+}
+
 /// Check exists predicate - verifies field presence or absence
 /// Supports: body, query, headers, form
+/// When a field's value is an object (not a boolean), parse the actual value as JSON
+/// and recursively check field existence within it (Mountebank compatible).
 fn check_exists_predicate(
     obj: &HashMap<String, serde_json::Value>,
     query: &HashMap<String, String>,
@@ -633,10 +702,9 @@ fn check_exists_predicate(
     body: &str,
     form: Option<&HashMap<String, String>>,
 ) -> bool {
-    // Check body exists
-    if let Some(should_exist) = obj.get("body").and_then(|v| v.as_bool()) {
-        let exists = !body.is_empty();
-        if exists != should_exist {
+    // Check body exists - supports both boolean and object values
+    if let Some(expected) = obj.get("body") {
+        if !check_exists_json_recursive(expected, body) {
             return false;
         }
     }

@@ -1047,3 +1047,149 @@ fn test_predicate_matches_body_regex() {
         None
     ));
 }
+
+// =============================================================================
+// Issue #75: exists predicate doesn't match inside objects
+// =============================================================================
+
+#[test]
+fn test_exists_predicate_body_object_field_present() {
+    // {"exists": {"body": {"blah": true}}} should check that JSON body contains "blah" field
+    let predicates = predicates_from_jsons(vec![serde_json::json!({
+        "exists": {
+            "body": {
+                "blah": true
+            }
+        }
+    })]);
+
+    let empty_headers = HashMap::new();
+
+    // Body has "blah" field → should match
+    assert!(stub_matches(
+        &predicates,
+        "POST",
+        "/test",
+        None,
+        &empty_headers,
+        Some(r#"{"blah": "hello", "other": "stuff"}"#),
+        None,
+        None,
+        None
+    ));
+
+    // Body does NOT have "blah" field → should not match
+    assert!(!stub_matches(
+        &predicates,
+        "POST",
+        "/test",
+        None,
+        &empty_headers,
+        Some(r#"{"other": "stuff"}"#),
+        None,
+        None,
+        None
+    ));
+}
+
+#[test]
+fn test_exists_predicate_body_object_field_absent() {
+    // {"exists": {"body": {"blah": false}}} checks that body does NOT contain "blah"
+    let predicates = predicates_from_jsons(vec![serde_json::json!({
+        "exists": {
+            "body": {
+                "blah": false
+            }
+        }
+    })]);
+
+    let empty_headers = HashMap::new();
+
+    // Body has "blah" field → should NOT match (we want it absent)
+    assert!(!stub_matches(
+        &predicates,
+        "POST",
+        "/test",
+        None,
+        &empty_headers,
+        Some(r#"{"blah": "hello"}"#),
+        None,
+        None,
+        None
+    ));
+
+    // Body does NOT have "blah" field → should match
+    assert!(stub_matches(
+        &predicates,
+        "POST",
+        "/test",
+        None,
+        &empty_headers,
+        Some(r#"{"other": "stuff"}"#),
+        None,
+        None,
+        None
+    ));
+}
+
+#[test]
+fn test_exists_predicate_body_object_non_json_body() {
+    // When body is not valid JSON, object exists predicate should not match for true fields
+    let predicates = predicates_from_jsons(vec![serde_json::json!({
+        "exists": {
+            "body": {
+                "blah": true
+            }
+        }
+    })]);
+
+    let empty_headers = HashMap::new();
+
+    assert!(!stub_matches(
+        &predicates,
+        "POST",
+        "/test",
+        None,
+        &empty_headers,
+        Some("not json at all"),
+        None,
+        None,
+        None
+    ));
+}
+
+#[test]
+fn test_exists_predicate_body_boolean_still_works() {
+    // Original boolean behavior should still work
+    let predicates = predicates_from_jsons(vec![serde_json::json!({
+        "exists": {
+            "body": true
+        }
+    })]);
+
+    let empty_headers = HashMap::new();
+
+    assert!(stub_matches(
+        &predicates,
+        "POST",
+        "/test",
+        None,
+        &empty_headers,
+        Some("any body content"),
+        None,
+        None,
+        None
+    ));
+
+    assert!(!stub_matches(
+        &predicates,
+        "POST",
+        "/test",
+        None,
+        &empty_headers,
+        None,
+        None,
+        None,
+        None
+    ));
+}
