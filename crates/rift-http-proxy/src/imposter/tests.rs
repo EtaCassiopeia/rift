@@ -1697,3 +1697,66 @@ fn test_header_predicate_matches_title_case() {
         None
     ));
 }
+
+// =============================================================================
+// Issue #84: Bare query params (?flag) dropped
+// =============================================================================
+
+#[test]
+fn test_parse_query_string_bare_param() {
+    let result = parse_query_string("flag");
+    assert_eq!(result.get("flag").unwrap(), "");
+}
+
+#[test]
+fn test_parse_query_string_bare_and_valued() {
+    let result = parse_query_string("flag&key=value");
+    assert_eq!(result.get("flag").unwrap(), "");
+    assert_eq!(result.get("key").unwrap(), "value");
+}
+
+#[test]
+fn test_bare_query_param_exists_predicate() {
+    let predicates = predicates_from_jsons(vec![serde_json::json!({
+        "exists": {
+            "query": { "flag": true }
+        }
+    })]);
+
+    let empty_headers = HashMap::new();
+
+    assert!(stub_matches(
+        &predicates,
+        "GET",
+        "/test",
+        Some("flag"),
+        &empty_headers,
+        None,
+        None,
+        None,
+        None
+    ));
+}
+
+#[test]
+fn test_bare_query_param_equals_empty_string() {
+    let predicates = predicates_from_jsons(vec![serde_json::json!({
+        "equals": {
+            "query": { "flag": "" }
+        }
+    })]);
+
+    let empty_headers = HashMap::new();
+
+    assert!(stub_matches(
+        &predicates,
+        "GET",
+        "/test",
+        Some("flag"),
+        &empty_headers,
+        None,
+        None,
+        None,
+        None
+    ));
+}
