@@ -310,47 +310,55 @@ where
         }
     };
 
+    // Helper: check a string field against expected value.
+    // When expected is an object, parse actual as JSON and compare recursively (Mountebank compat).
+    // When expected is a string/primitive, compare directly.
+    // Previously, non-string expected values were silently ignored, causing always-match.
+    let check_string_field = |expected: &serde_json::Value, actual: &str| -> bool {
+        let actual = apply_except(actual);
+        match expected {
+            serde_json::Value::Object(_) => compare_json_recursive(expected, &actual, &compare),
+            serde_json::Value::String(s) => compare(s, &actual),
+            _ => {
+                let expected_str = expected.to_string();
+                compare(&expected_str, &actual)
+            }
+        }
+    };
+
     // Check method
-    if let Some(expected) = obj.get("method").and_then(|v| v.as_str()) {
-        if !compare(expected, method) {
+    if let Some(expected) = obj.get("method") {
+        if !check_string_field(expected, method) {
             return false;
         }
     }
 
     // Check path
-    if let Some(expected) = obj.get("path").and_then(|v| v.as_str()) {
-        let actual = apply_except(path);
-        if !compare(expected, &actual) {
+    if let Some(expected) = obj.get("path") {
+        if !check_string_field(expected, path) {
             return false;
         }
     }
 
     // Check body
     if let Some(expected) = obj.get("body") {
-        let expected_str = match expected {
-            serde_json::Value::String(s) => s.clone(),
-            _ => expected.to_string(),
-        };
-        let actual = apply_except(body);
-        if !compare(&expected_str, &actual) {
+        if !check_string_field(expected, body) {
             return false;
         }
     }
 
     // Check requestFrom (IP:port) - Mountebank compatible
-    if let Some(expected) = obj.get("requestFrom").and_then(|v| v.as_str()) {
+    if let Some(expected) = obj.get("requestFrom") {
         let actual = request_from.unwrap_or("");
-        let actual = apply_except(actual);
-        if !compare(expected, &actual) {
+        if !check_string_field(expected, actual) {
             return false;
         }
     }
 
     // Check ip (just the IP address) - Mountebank compatible
-    if let Some(expected) = obj.get("ip").and_then(|v| v.as_str()) {
+    if let Some(expected) = obj.get("ip") {
         let actual = client_ip.unwrap_or("");
-        let actual = apply_except(actual);
-        if !compare(expected, &actual) {
+        if !check_string_field(expected, actual) {
             return false;
         }
     }
@@ -744,6 +752,40 @@ fn check_exists_predicate(
     }
 
     true
+}
+
+/// Recursively apply a comparison function when the expected value is a JSON object.
+/// Parses the actual string as JSON and compares each field recursively.
+/// For leaf values, converts both to strings and applies the comparison function.
+fn compare_json_recursive<F>(expected: &serde_json::Value, actual_str: &str, compare: &F) -> bool
+where
+    F: Fn(&str, &str) -> bool,
+{
+    match expected {
+        serde_json::Value::Object(expected_obj) => {
+            let actual_json: serde_json::Value = match serde_json::from_str(actual_str) {
+                Ok(v) => v,
+                Err(_) => return false,
+            };
+
+            for (key, expected_val) in expected_obj {
+                let actual_val = match actual_json.get(key) {
+                    Some(v) => v,
+                    None => return false,
+                };
+
+                let actual_val_str = json_value_to_string(actual_val);
+                if !compare_json_recursive(expected_val, &actual_val_str, compare) {
+                    return false;
+                }
+            }
+            true
+        }
+        _ => {
+            let expected_str = json_value_to_string(expected);
+            compare(&expected_str, actual_str)
+        }
+    }
 }
 
 /// Parse query string into HashMap (public helper)
