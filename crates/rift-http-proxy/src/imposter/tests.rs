@@ -1653,3 +1653,47 @@ fn test_exists_predicate_headers_key_case_sensitive() {
         None
     ));
 }
+
+// =============================================================================
+// Issue #87: Header keys should be Title-Case for Mountebank compatibility
+// =============================================================================
+
+#[test]
+fn test_header_map_to_hashmap_title_case() {
+    use hyper::header::HeaderValue;
+    use hyper::HeaderMap;
+
+    let mut headers = HeaderMap::new();
+    headers.insert("content-type", HeaderValue::from_static("application/json"));
+    headers.insert("x-custom-header", HeaderValue::from_static("value"));
+
+    let result = Imposter::header_map_to_hashmap(&headers);
+    assert!(result.contains_key("Content-Type"));
+    assert!(result.contains_key("X-Custom-Header"));
+    assert!(!result.contains_key("content-type"));
+    assert!(!result.contains_key("x-custom-header"));
+}
+
+#[test]
+fn test_header_predicate_matches_title_case() {
+    let predicates = predicates_from_jsons(vec![serde_json::json!({
+        "equals": {
+            "headers": { "Content-Type": "application/json" }
+        }
+    })]);
+
+    let mut headers = HashMap::new();
+    headers.insert("Content-Type".to_string(), "application/json".to_string());
+
+    assert!(stub_matches(
+        &predicates,
+        "GET",
+        "/test",
+        None,
+        &headers,
+        None,
+        None,
+        None,
+        None
+    ));
+}
