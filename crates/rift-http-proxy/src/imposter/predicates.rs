@@ -237,9 +237,14 @@ pub fn predicate_matches(
             form,
             key_case_sensitive,
         ),
-        PredicateOperation::Exists(fields) => {
-            check_exists_predicate(fields, &query_map, headers, effective_body, form)
-        }
+        PredicateOperation::Exists(fields) => check_exists_predicate(
+            fields,
+            &query_map,
+            headers,
+            effective_body,
+            form,
+            key_case_sensitive,
+        ),
         PredicateOperation::Not(inner) => !predicate_matches(
             inner,
             method,
@@ -711,7 +716,17 @@ fn check_exists_predicate(
     headers: &HashMap<String, String>,
     body: &str,
     form: Option<&HashMap<String, String>>,
+    key_case_sensitive: bool,
 ) -> bool {
+    // Helper for key comparison based on keyCaseSensitive
+    let key_matches = |expected_key: &str, actual_key: &str| -> bool {
+        if key_case_sensitive {
+            expected_key == actual_key
+        } else {
+            expected_key.eq_ignore_ascii_case(actual_key)
+        }
+    };
+
     // Check body exists - supports both boolean and object values
     if let Some(expected) = obj.get("body") {
         if !check_exists_json_recursive(expected, body) {
@@ -723,7 +738,7 @@ fn check_exists_predicate(
     if let Some(expected_query) = obj.get("query").and_then(|v| v.as_object()) {
         for (key, should_exist_val) in expected_query {
             let should_exist = should_exist_val.as_bool().unwrap_or(true);
-            let exists = query.contains_key(key);
+            let exists = query.iter().any(|(k, _)| key_matches(key, k));
             if exists != should_exist {
                 return false;
             }
@@ -734,7 +749,7 @@ fn check_exists_predicate(
     if let Some(expected_headers) = obj.get("headers").and_then(|v| v.as_object()) {
         for (key, should_exist_val) in expected_headers {
             let should_exist = should_exist_val.as_bool().unwrap_or(true);
-            let exists = headers.iter().any(|(k, _)| k.eq_ignore_ascii_case(key));
+            let exists = headers.iter().any(|(k, _)| key_matches(key, k));
             if exists != should_exist {
                 return false;
             }
@@ -746,7 +761,7 @@ fn check_exists_predicate(
         let actual_form = form.cloned().unwrap_or_default();
         for (key, should_exist_val) in expected_form {
             let should_exist = should_exist_val.as_bool().unwrap_or(true);
-            let exists = actual_form.contains_key(key);
+            let exists = actual_form.iter().any(|(k, _)| key_matches(key, k));
             if exists != should_exist {
                 return false;
             }
