@@ -38,47 +38,23 @@ impl ExtractionMethod {
     }
 }
 
-/// Extract value using JSONPath
-/// Used by copy behaviors and predicate jsonpath parameter
+/// Extract value using JSONPath (RFC 9535 compliant via serde_json_path)
+/// Used by copy behaviors and predicate jsonpath parameter.
+/// Supports the full JSONPath spec: wildcards, descendant segments, filters,
+/// negative indices, selector sequences, bracket notation, etc.
 pub fn extract_jsonpath(json_str: &str, path: &str) -> Option<String> {
     let json: serde_json::Value = serde_json::from_str(json_str).ok()?;
+    let json_path = serde_json_path::JsonPath::parse(path).ok()?;
+    let node_list = json_path.query(&json);
 
-    // Simple JSONPath implementation (supports basic paths like $.field, $.array[0])
-    let path = path.trim_start_matches('$').trim_start_matches('.');
-
-    let mut current = &json;
-    for part in path.split('.') {
-        if part.is_empty() {
-            continue;
-        }
-
-        // Check for array index
-        if let Some(bracket_pos) = part.find('[') {
-            let field = &part[..bracket_pos];
-            let index_str = &part[bracket_pos + 1..part.len() - 1];
-
-            if !field.is_empty() {
-                current = current.get(field)?;
-            }
-
-            // Handle slice notation like [:0] (used by Solo/Mountebank)
-            let index: usize = if let Some(stripped) = index_str.strip_prefix(':') {
-                stripped.parse().ok()?
-            } else {
-                index_str.parse().ok()?
-            };
-            current = current.get(index)?;
-        } else {
-            current = current.get(part)?;
-        }
-    }
-
-    match current {
+    // Return the first matched node as a string
+    let first = node_list.first()?;
+    match first {
         serde_json::Value::String(s) => Some(s.clone()),
         serde_json::Value::Number(n) => Some(n.to_string()),
         serde_json::Value::Bool(b) => Some(b.to_string()),
         serde_json::Value::Null => Some("null".to_string()),
-        _ => Some(current.to_string()),
+        _ => Some(first.to_string()),
     }
 }
 
@@ -140,5 +116,162 @@ mod tests {
         };
         let json = r#"{"items": ["first", "second"]}"#;
         assert_eq!(method.extract(json), Some("first".to_string()));
+    }
+
+    // =========================================================================
+    // Issue #78: JSONPath RFC 9535 compliance tests
+    // =========================================================================
+
+    // Test data matching the RFC 9535 examples section
+    const STORE_JSON: &str = r#"{
+        "store": {
+            "book": [
+                {
+                    "category": "reference",
+                    "author": "Nigel Rees",
+                    "title": "Sayings of the Century",
+                    "price": 8.95
+                },
+                {
+                    "category": "fiction",
+                    "author": "Evelyn Waugh",
+                    "title": "Sword of Honour",
+                    "price": 12.99
+                },
+                {
+                    "category": "fiction",
+                    "author": "Herman Melville",
+                    "title": "Moby Dick",
+                    "isbn": "0-553-21311-3",
+                    "price": 8.99
+                },
+                {
+                    "category": "fiction",
+                    "author": "J. R. R. Tolkien",
+                    "title": "The Lord of the Rings",
+                    "isbn": "0-395-19395-8",
+                    "price": 22.99
+                }
+            ],
+            "bicycle": {
+                "color": "red",
+                "price": 399.99
+            }
+        }
+    }"#;
+
+    #[test]
+    fn test_jsonpath_wildcard_selector() {
+        // $.store.book[*].author → all authors
+        let result = extract_jsonpath(STORE_JSON, "$.store.book[*].author");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), "Nigel Rees");
+    }
+
+    #[test]
+    fn test_jsonpath_descendant_author() {
+        // $..author → all authors (descendant segment)
+        let result = extract_jsonpath(STORE_JSON, "$..author");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), "Nigel Rees");
+    }
+
+    #[test]
+    fn test_jsonpath_descendant_price() {
+        // $.store..price → prices of everything in the store
+        let result = extract_jsonpath(STORE_JSON, "$.store..price");
+        assert!(result.is_some());
+        // serde_json uses BTreeMap (alphabetical key ordering), so "bicycle" comes before "book"
+        assert_eq!(result.unwrap(), "399.99");
+    }
+
+    #[test]
+    fn test_jsonpath_array_index() {
+        // $..book[2] → the third book
+        let result = extract_jsonpath(STORE_JSON, "$..book[2].title");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), "Moby Dick");
+    }
+
+    #[test]
+    fn test_jsonpath_array_index_author() {
+        // $..book[2].author → the third book's author
+        let result = extract_jsonpath(STORE_JSON, "$..book[2].author");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), "Herman Melville");
+    }
+
+    #[test]
+    fn test_jsonpath_missing_field() {
+        // $..book[2].publisher → empty (third book has no publisher)
+        let result = extract_jsonpath(STORE_JSON, "$..book[2].publisher");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_jsonpath_negative_index() {
+        // $..book[-1] → the last book
+        let result = extract_jsonpath(STORE_JSON, "$..book[-1].title");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), "The Lord of the Rings");
+    }
+
+    #[test]
+    fn test_jsonpath_slice_first_two() {
+        // $..book[:2] → the first two books (slice notation)
+        let result = extract_jsonpath(STORE_JSON, "$..book[:2]");
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_jsonpath_filter_isbn() {
+        // $..book[?@.isbn] → all books with an ISBN
+        let result = extract_jsonpath(STORE_JSON, "$..book[?@.isbn].title");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), "Moby Dick");
+    }
+
+    #[test]
+    fn test_jsonpath_filter_price() {
+        // $..book[?@.price<10] → all books cheaper than 10
+        let result = extract_jsonpath(STORE_JSON, "$..book[?@.price<10].title");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), "Sayings of the Century");
+    }
+
+    #[test]
+    fn test_jsonpath_bracket_notation() {
+        // $['store']['bicycle']['color'] → bracket notation for string index
+        let result = extract_jsonpath(STORE_JSON, "$['store']['bicycle']['color']");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), "red");
+    }
+
+    #[test]
+    fn test_jsonpath_store_wildcard() {
+        // $.store.* → all things in the store
+        let result = extract_jsonpath(STORE_JSON, "$.store.*");
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_jsonpath_basic_still_works() {
+        // Ensure basic paths like $.field and $.nested.field still work
+        let json = r#"{"user": {"name": "Alice", "age": 30}}"#;
+        assert_eq!(
+            extract_jsonpath(json, "$.user.name"),
+            Some("Alice".to_string())
+        );
+        assert_eq!(extract_jsonpath(json, "$.user.age"), Some("30".to_string()));
+
+        let json = r#"{"items": ["first", "second"]}"#;
+        assert_eq!(
+            extract_jsonpath(json, "$.items[0]"),
+            Some("first".to_string())
+        );
+        assert_eq!(
+            extract_jsonpath(json, "$.items[1]"),
+            Some("second".to_string())
+        );
     }
 }
