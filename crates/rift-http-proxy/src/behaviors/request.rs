@@ -37,13 +37,15 @@ impl RequestContext {
     ) -> Self {
         let mut query_map = HashMap::new();
         if let Some(query) = uri.query() {
-            for pair in query.split('&') {
-                if let Some((key, value)) = pair.split_once('=') {
-                    query_map.insert(
-                        key.to_string(),
-                        urlencoding::decode(value).unwrap_or_default().to_string(),
-                    );
-                }
+            for pair in query.split('&').filter(|s| !s.is_empty()) {
+                let (key, value) = match pair.split_once('=') {
+                    Some((k, v)) => (k, v),
+                    None => (pair, ""),
+                };
+                query_map.insert(
+                    key.to_string(),
+                    urlencoding::decode(value).unwrap_or_default().to_string(),
+                );
             }
         }
 

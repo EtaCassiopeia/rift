@@ -846,17 +846,20 @@ where
 }
 
 /// Parse query string into HashMap (public helper)
-/// URL-decodes both keys and values to properly handle encoded characters
+/// URL-decodes both keys and values to properly handle encoded characters.
+/// Bare params without `=` (e.g. `?flag`) are treated as key with empty value.
 pub fn parse_query_string(query: &str) -> HashMap<String, String> {
     query
         .split('&')
         .filter(|s| !s.is_empty())
-        .filter_map(|pair| {
-            let (key, value) = pair.split_once('=')?;
-            // URL-decode both key and value to handle encoded characters like %2C -> ,
+        .map(|pair| {
+            let (key, value) = match pair.split_once('=') {
+                Some((k, v)) => (k, v),
+                None => (pair, ""),
+            };
             let decoded_key = urlencoding::decode(key).unwrap_or_default().into_owned();
             let decoded_value = urlencoding::decode(value).unwrap_or_default().into_owned();
-            Some((decoded_key, decoded_value))
+            (decoded_key, decoded_value)
         })
         .collect()
 }
