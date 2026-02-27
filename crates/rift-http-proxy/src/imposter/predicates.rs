@@ -317,18 +317,27 @@ where
 
     // Helper: check a string field against expected value.
     // When expected is an object/array, parse actual as JSON and compare recursively (Mountebank compat).
-    // When expected is a string/primitive, compare directly.
-    // Previously, non-string expected values were silently ignored, causing always-match.
+    // except is applied to leaf values inside compare_json_recursive, not to raw JSON.
+    // When expected is a string/primitive, compare directly with except applied.
     let check_string_field = |expected: &serde_json::Value, actual: &str| -> bool {
-        let actual = apply_except(actual);
         match expected {
-            serde_json::Value::Object(_) | serde_json::Value::Array(_) => {
-                compare_json_recursive(expected, &actual, &compare, deep_equals, key_case_sensitive)
-            }
-            serde_json::Value::String(s) => compare(s, &actual),
+            serde_json::Value::Object(_) | serde_json::Value::Array(_) => compare_json_recursive(
+                expected,
+                actual,
+                &compare,
+                deep_equals,
+                key_case_sensitive,
+                &apply_except,
+            ),
             _ => {
-                let expected_str = expected.to_string();
-                compare(&expected_str, &actual)
+                let actual = apply_except(actual);
+                match expected {
+                    serde_json::Value::String(s) => compare(s, &actual),
+                    _ => {
+                        let expected_str = expected.to_string();
+                        compare(&expected_str, &actual)
+                    }
+                }
             }
         }
     };
@@ -777,12 +786,15 @@ fn check_exists_predicate(
 /// When `deep_equals` is true, also verifies no extra keys exist in actual objects
 /// and arrays are compared structurally (same length, element-wise).
 /// `key_case_sensitive` controls whether JSON object key lookups are case-sensitive.
+/// `apply_except` is applied to leaf values (not raw JSON strings) to avoid breaking
+/// JSON structure before parsing.
 fn compare_json_recursive<F>(
     expected: &serde_json::Value,
     actual_str: &str,
     compare: &F,
     deep_equals: bool,
     key_case_sensitive: bool,
+    apply_except: &dyn Fn(&str) -> String,
 ) -> bool
 where
     F: Fn(&str, &str) -> bool,
@@ -826,6 +838,7 @@ where
                     compare,
                     deep_equals,
                     key_case_sensitive,
+                    apply_except,
                 ) {
                     return false;
                 }
@@ -855,6 +868,7 @@ where
                     compare,
                     deep_equals,
                     key_case_sensitive,
+                    apply_except,
                 ) {
                     return false;
                 }
@@ -863,7 +877,8 @@ where
         }
         _ => {
             let expected_str = json_value_to_string(expected);
-            compare(&expected_str, actual_str)
+            let actual_str = apply_except(actual_str);
+            compare(&expected_str, &actual_str)
         }
     }
 }
@@ -1895,22 +1910,13 @@ mod tests {
         );
     }
 
-    // =========================================================================
-    // Bug J: `except` applied to raw JSON string before parsing, breaking
-    // structured body matching.
-    // In check_string_field (line ~322-326), apply_except is called on the
-    // raw body string BEFORE compare_json_recursive tries to parse it as JSON.
-    // If the except regex removes JSON structural characters, parsing fails.
-    // =========================================================================
-
+    // Fix #105: except is now applied to leaf values inside compare_json_recursive,
+    // not to the raw JSON string before parsing.
     #[test]
-    fn test_except_breaks_json_body_matching() {
+    fn test_except_applied_to_leaf_values_not_raw_json() {
         // equals { body: { "greeting": "hello" } } with except="\\d+"
         // Body: {"greeting": "hello", "count": 42}
-        // BUG: except="\\d+" strips digits from raw JSON → {"greeting": "hello", "count": }
-        //      which is invalid JSON → parse fails → predicate returns false.
-        // CORRECT: except should be applied to individual leaf values AFTER parsing,
-        //          not to the raw JSON string before parsing.
+        // except strips digits from leaf values after parsing, not from raw JSON.
         let fields: HashMap<String, serde_json::Value> =
             [("body".to_string(), json!({"greeting": "hello"}))]
                 .into_iter()
@@ -1935,14 +1941,9 @@ mod tests {
             None,
         );
 
-        // BUG: Returns false because except strips "42" from the raw JSON
-        // leaving invalid JSON that fails to parse.
-        // Expected: true (equals should match "greeting"="hello" with except
-        // only stripping digits from leaf values, not breaking JSON structure)
         assert!(
-            !result,
-            "BUG(J): except applied to raw JSON body before parsing breaks structure; \
-             expected true (except should apply to leaf values, not raw JSON), got false"
+            result,
+            "except should apply to leaf values after JSON parsing, not break raw JSON structure"
         );
     }
 
