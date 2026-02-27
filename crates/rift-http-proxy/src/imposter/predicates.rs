@@ -747,6 +747,7 @@ fn check_exists_json_recursive(expected: &serde_json::Value, actual_str: &str) -
 /// Supports: method, path, body, query, headers, form, requestFrom, ip
 /// When a field's value is an object (not a boolean), parse the actual value as JSON
 /// and recursively check field existence within it (Mountebank compatible).
+#[allow(clippy::too_many_arguments)]
 fn check_exists_predicate(
     obj: &HashMap<String, serde_json::Value>,
     method: &str,
@@ -789,7 +790,7 @@ fn check_exists_predicate(
     // Check requestFrom exists
     if let Some(expected) = obj.get("requestFrom") {
         let should_exist = expected.as_bool().unwrap_or(true);
-        let exists = request_from.map_or(false, |v| !v.is_empty());
+        let exists = request_from.is_some_and(|v| !v.is_empty());
         if exists != should_exist {
             return false;
         }
@@ -798,7 +799,7 @@ fn check_exists_predicate(
     // Check ip exists
     if let Some(expected) = obj.get("ip") {
         let should_exist = expected.as_bool().unwrap_or(true);
-        let exists = client_ip.map_or(false, |v| !v.is_empty());
+        let exists = client_ip.is_some_and(|v| !v.is_empty());
         if exists != should_exist {
             return false;
         }
@@ -2132,14 +2133,20 @@ mod tests {
     #[test]
     fn test_exists_method_false_fails_when_present() {
         let fields: HashMap<String, serde_json::Value> =
-            [("method".to_string(), json!(false))]
-                .into_iter()
-                .collect();
+            [("method".to_string(), json!(false))].into_iter().collect();
 
         let pred = make_predicate(PredicateOperation::Exists(fields));
 
         let result = predicate_matches(
-            &pred, "GET", "/test", None, &empty_headers(), None, None, None, None,
+            &pred,
+            "GET",
+            "/test",
+            None,
+            &empty_headers(),
+            None,
+            None,
+            None,
+            None,
         );
 
         assert!(
@@ -2151,14 +2158,20 @@ mod tests {
     #[test]
     fn test_exists_path_false_fails_when_present() {
         let fields: HashMap<String, serde_json::Value> =
-            [("path".to_string(), json!(false))]
-                .into_iter()
-                .collect();
+            [("path".to_string(), json!(false))].into_iter().collect();
 
         let pred = make_predicate(PredicateOperation::Exists(fields));
 
         let result = predicate_matches(
-            &pred, "GET", "/test", None, &empty_headers(), None, None, None, None,
+            &pred,
+            "GET",
+            "/test",
+            None,
+            &empty_headers(),
+            None,
+            None,
+            None,
+            None,
         );
 
         assert!(
