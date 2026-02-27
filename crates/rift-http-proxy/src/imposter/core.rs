@@ -279,24 +279,26 @@ impl Imposter {
 
         if content_type.contains("application/x-www-form-urlencoded") {
             if let Some(body_str) = body {
-                return Some(
-                    body_str
-                        .split('&')
-                        .filter(|s| !s.is_empty())
-                        .filter_map(|pair| {
-                            let mut parts = pair.splitn(2, '=');
-                            let key = parts.next()?.to_string();
-                            let value = parts
-                                .next()
-                                .map(|v| urlencoding::decode(v).unwrap_or_default().into_owned())
-                                .unwrap_or_default();
-                            Some((
-                                urlencoding::decode(&key).unwrap_or_default().into_owned(),
-                                value,
-                            ))
-                        })
-                        .collect(),
-                );
+                let mut map = HashMap::new();
+                for pair in body_str.split('&').filter(|s| !s.is_empty()) {
+                    let mut parts = pair.splitn(2, '=');
+                    if let Some(raw_key) = parts.next() {
+                        let key = urlencoding::decode(raw_key)
+                            .unwrap_or_default()
+                            .into_owned();
+                        let value = parts
+                            .next()
+                            .map(|v| urlencoding::decode(v).unwrap_or_default().into_owned())
+                            .unwrap_or_default();
+                        map.entry(key)
+                            .and_modify(|existing: &mut String| {
+                                existing.push(',');
+                                existing.push_str(&value);
+                            })
+                            .or_insert(value);
+                    }
+                }
+                return Some(map);
             }
         }
         None
@@ -960,6 +962,24 @@ mod tests {
             ..Default::default()
         };
         Imposter::new(config)
+    }
+
+    // Fix #95: Multi-valued form fields are now comma-joined instead of overwritten
+    #[test]
+    fn test_parse_form_data_multi_valued_fields() {
+        let mut headers = hyper::HeaderMap::new();
+        headers.insert(
+            hyper::header::CONTENT_TYPE,
+            "application/x-www-form-urlencoded".parse().unwrap(),
+        );
+
+        let result = Imposter::parse_form_data(&headers, Some("checkbox=A&checkbox=B&checkbox=C"));
+        let form = result.expect("Should parse form data");
+        assert_eq!(
+            form.get("checkbox").unwrap(),
+            "A,B,C",
+            "Multi-valued form fields should be comma-joined"
+        );
     }
 
     // Fix #103: caseSensitive is now always written to generated predicate JSON,
