@@ -1525,3 +1525,131 @@ fn test_deep_equals_body_array_comparison() {
         None
     ));
 }
+
+// =============================================================================
+// Issue #86: keyCaseSensitive missing from check_exists_predicate
+// =============================================================================
+
+#[test]
+fn test_exists_predicate_query_key_case_insensitive() {
+    let predicates = predicates_from_jsons(vec![serde_json::json!({
+        "exists": {
+            "query": {"Token": true}
+        }
+    })]);
+
+    let empty_headers = HashMap::new();
+
+    assert!(stub_matches(
+        &predicates,
+        "GET",
+        "/test",
+        Some("token=abc"),
+        &empty_headers,
+        None,
+        None,
+        None,
+        None
+    ));
+}
+
+#[test]
+fn test_exists_predicate_query_key_case_sensitive() {
+    let predicates = predicates_from_jsons(vec![serde_json::json!({
+        "exists": {
+            "query": {"Token": true}
+        },
+        "caseSensitive": true
+    })]);
+
+    let empty_headers = HashMap::new();
+
+    assert!(!stub_matches(
+        &predicates,
+        "GET",
+        "/test",
+        Some("token=abc"),
+        &empty_headers,
+        None,
+        None,
+        None,
+        None
+    ));
+
+    assert!(stub_matches(
+        &predicates,
+        "GET",
+        "/test",
+        Some("Token=abc"),
+        &empty_headers,
+        None,
+        None,
+        None,
+        None
+    ));
+}
+
+#[test]
+fn test_exists_predicate_form_key_case_insensitive() {
+    let predicates = predicates_from_jsons(vec![serde_json::json!({
+        "exists": {
+            "form": {"Username": true}
+        }
+    })]);
+
+    let empty_headers = HashMap::new();
+    let mut form = HashMap::new();
+    form.insert("username".to_string(), "alice".to_string());
+
+    assert!(stub_matches(
+        &predicates,
+        "POST",
+        "/test",
+        None,
+        &empty_headers,
+        None,
+        None,
+        None,
+        Some(&form)
+    ));
+}
+
+#[test]
+fn test_exists_predicate_headers_key_case_sensitive() {
+    let predicates = predicates_from_jsons(vec![serde_json::json!({
+        "exists": {
+            "headers": {"X-Custom": true}
+        },
+        "caseSensitive": true
+    })]);
+
+    let mut headers = HashMap::new();
+    headers.insert("x-custom".to_string(), "value".to_string());
+
+    assert!(!stub_matches(
+        &predicates,
+        "GET",
+        "/test",
+        None,
+        &headers,
+        None,
+        None,
+        None,
+        None
+    ));
+
+    let mut headers_exact = HashMap::new();
+    headers_exact.insert("X-Custom".to_string(), "value".to_string());
+
+    assert!(stub_matches(
+        &predicates,
+        "GET",
+        "/test",
+        None,
+        &headers_exact,
+        None,
+        None,
+        None,
+        None
+    ));
+}
