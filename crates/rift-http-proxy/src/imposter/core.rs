@@ -695,7 +695,7 @@ impl Imposter {
         uri: &hyper::Uri,
         headers: &HashMap<String, String>,
         body: Option<&str>,
-    ) -> anyhow::Result<(u16, HashMap<String, String>, String, Option<u64>)> {
+    ) -> anyhow::Result<(u16, HashMap<String, String>, Vec<u8>, Option<u64>)> {
         let client = get_http_client();
 
         info!("Proxy config - addDecorateBehavior: {:?}, addWaitBehavior: {}, predicateGenerators: {:?}",
@@ -733,8 +733,7 @@ impl Imposter {
             if let Some(recorded) = self.recording_store.get_recorded(&signature) {
                 debug!("Returning recorded proxy response (proxyOnce mode)");
                 let headers: HashMap<String, String> = recorded.headers.clone();
-                let body = String::from_utf8_lossy(&recorded.body).to_string();
-                return Ok((recorded.status, headers, body, recorded.latency_ms));
+                return Ok((recorded.status, headers, recorded.body, recorded.latency_ms));
             }
         }
 
@@ -808,8 +807,6 @@ impl Imposter {
             );
         }
 
-        let body_str = String::from_utf8_lossy(&body_bytes).to_string();
-
         // Record the response
         let recorded_response = RecordedResponse {
             status,
@@ -862,7 +859,7 @@ impl Imposter {
                 predicates,
                 status,
                 &response_headers,
-                &body_str,
+                &body_bytes,
                 latency_for_stub,
                 proxy_config.add_decorate_behavior.clone(),
             );
@@ -886,7 +883,7 @@ impl Imposter {
         Ok((
             status,
             response_headers,
-            body_str,
+            body_bytes.to_vec(),
             if proxy_config.add_wait_behavior {
                 Some(latency_ms)
             } else {

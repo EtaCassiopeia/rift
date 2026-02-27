@@ -57,13 +57,25 @@ pub fn generate_stub(
         }
     }
 
-    // Build response
-    let body_str = String::from_utf8_lossy(&response.body).to_string();
+    // Build response - preserve binary bodies via base64 encoding
+    let (body_value, mode) = match std::str::from_utf8(&response.body) {
+        Ok(text) => (serde_json::json!(text), "text"),
+        Err(_) => {
+            use base64::Engine;
+            let encoded = base64::engine::general_purpose::STANDARD.encode(&response.body);
+            (serde_json::json!(encoded), "binary")
+        }
+    };
+
     let mut response_obj = serde_json::json!({
         "statusCode": response.status,
         "headers": response.headers,
-        "body": body_str,
+        "body": body_value,
     });
+
+    if mode == "binary" {
+        response_obj["_mode"] = serde_json::json!("binary");
+    }
 
     // Add wait behavior if latency was captured
     if let Some(latency) = response.latency_ms {
