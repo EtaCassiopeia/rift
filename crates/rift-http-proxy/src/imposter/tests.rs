@@ -1670,6 +1670,160 @@ fn test_equals_header_object_value() {
     ));
 }
 
+// Issue #77: matches predicate with object expected values in query/headers/form
+// The regex function had the same bug — object values were silently skipped via `continue`.
+
+#[test]
+fn test_matches_query_object_value_does_not_always_match() {
+    // {"matches": {"query": {"q": {"nested": "^abc"}}}} should NOT match
+    // when the actual query param is a plain string
+    let predicates = predicates_from_jsons(vec![serde_json::json!({
+        "matches": {
+            "query": {"q": {"nested": "^abc"}}
+        }
+    })]);
+
+    let empty_headers = HashMap::new();
+
+    assert!(
+        !stub_matches(
+            &predicates,
+            "GET",
+            "/search",
+            Some("q=hello"),
+            &empty_headers,
+            None,
+            None,
+            None,
+            None
+        ),
+        "Object expected value in matches/query should not match a plain string"
+    );
+}
+
+#[test]
+fn test_matches_query_object_value_recursive_regex() {
+    // When query param value IS a JSON string, object predicate should recurse with regex
+    let predicates = predicates_from_jsons(vec![serde_json::json!({
+        "matches": {
+            "query": {"data": {"name": "^J.*n$"}}
+        }
+    })]);
+
+    let empty_headers = HashMap::new();
+
+    // query param 'data' is JSON with a "name" field matching regex ^J.*n$
+    assert!(stub_matches(
+        &predicates,
+        "GET",
+        "/test",
+        Some(r#"data={"name": "John", "age": "30"}"#),
+        &empty_headers,
+        None,
+        None,
+        None,
+        None
+    ));
+
+    // "Jane" does NOT match ^J.*n$ (ends with 'e')
+    assert!(!stub_matches(
+        &predicates,
+        "GET",
+        "/test",
+        Some(r#"data={"name": "Jane"}"#),
+        &empty_headers,
+        None,
+        None,
+        None,
+        None
+    ));
+}
+
+#[test]
+fn test_matches_header_object_value_recursive_regex() {
+    let predicates = predicates_from_jsons(vec![serde_json::json!({
+        "matches": {
+            "headers": {"X-Data": {"id": "^\\d+$"}}
+        }
+    })]);
+
+    let mut headers = HashMap::new();
+    headers.insert(
+        "X-Data".to_string(),
+        r#"{"id": "12345", "extra": "abc"}"#.to_string(),
+    );
+
+    // "12345" matches ^\d+$
+    assert!(stub_matches(
+        &predicates,
+        "GET",
+        "/test",
+        None,
+        &headers,
+        None,
+        None,
+        None,
+        None
+    ));
+
+    // "abc" does NOT match ^\d+$
+    headers.insert("X-Data".to_string(), r#"{"id": "abc"}"#.to_string());
+    assert!(!stub_matches(
+        &predicates,
+        "GET",
+        "/test",
+        None,
+        &headers,
+        None,
+        None,
+        None,
+        None
+    ));
+}
+
+#[test]
+fn test_matches_form_object_value_recursive_regex() {
+    let predicates = predicates_from_jsons(vec![serde_json::json!({
+        "matches": {
+            "form": {"payload": {"code": "^[A-Z]{3}$"}}
+        }
+    })]);
+
+    let empty_headers = HashMap::new();
+    let mut form = HashMap::new();
+    form.insert(
+        "payload".to_string(),
+        r#"{"code": "ABC", "extra": "123"}"#.to_string(),
+    );
+
+    // "ABC" matches ^[A-Z]{3}$
+    assert!(stub_matches(
+        &predicates,
+        "POST",
+        "/submit",
+        None,
+        &empty_headers,
+        None,
+        None,
+        None,
+        Some(&form)
+    ));
+
+    // "abcd" does NOT match ^[A-Z]{3}$
+    form.insert("payload".to_string(), r#"{"code": "abcd"}"#.to_string());
+    assert!(!stub_matches(
+        &predicates,
+        "POST",
+        "/submit",
+        None,
+        &empty_headers,
+        None,
+        None,
+        None,
+        Some(&form)
+    ));
+}
+
 // =============================================================================
 // Issue #85: deepEquals body missing extra-key check
 // =============================================================================
