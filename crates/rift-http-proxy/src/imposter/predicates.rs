@@ -880,7 +880,7 @@ where
                 None => return false,
             };
 
-            if deep_equals && expected_arr.len() != actual_arr.len() {
+            if expected_arr.len() != actual_arr.len() {
                 return false;
             }
 
@@ -2029,6 +2029,61 @@ mod tests {
         assert!(
             result,
             "except should be applied to method before regex matching"
+        );
+    }
+
+    // Fix #100: equals array matching now checks array length
+    #[test]
+    fn test_equals_body_array_rejects_longer_actual() {
+        let fields: HashMap<String, serde_json::Value> =
+            [("body".to_string(), json!([1, 2]))]
+                .into_iter()
+                .collect();
+
+        let pred = make_predicate(PredicateOperation::Equals(fields));
+
+        let result = predicate_matches(
+            &pred,
+            "POST",
+            "/test",
+            None,
+            &empty_headers(),
+            Some("[1, 2, 3]"),
+            None,
+            None,
+            None,
+        );
+
+        assert!(
+            !result,
+            "equals [1, 2] should not match [1, 2, 3] — arrays have different lengths"
+        );
+    }
+
+    #[test]
+    fn test_equals_body_array_rejects_shorter_actual() {
+        let fields: HashMap<String, serde_json::Value> =
+            [("body".to_string(), json!([1, 2, 3]))]
+                .into_iter()
+                .collect();
+
+        let pred = make_predicate(PredicateOperation::Equals(fields));
+
+        let result = predicate_matches(
+            &pred,
+            "POST",
+            "/test",
+            None,
+            &empty_headers(),
+            Some("[1, 2]"),
+            None,
+            None,
+            None,
+        );
+
+        assert!(
+            !result,
+            "equals [1, 2, 3] should not match [1, 2] — arrays have different lengths"
         );
     }
 }
