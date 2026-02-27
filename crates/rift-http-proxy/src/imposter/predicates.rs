@@ -2036,9 +2036,7 @@ mod tests {
     #[test]
     fn test_equals_body_array_rejects_longer_actual() {
         let fields: HashMap<String, serde_json::Value> =
-            [("body".to_string(), json!([1, 2]))]
-                .into_iter()
-                .collect();
+            [("body".to_string(), json!([1, 2]))].into_iter().collect();
 
         let pred = make_predicate(PredicateOperation::Equals(fields));
 
@@ -2062,10 +2060,9 @@ mod tests {
 
     #[test]
     fn test_equals_body_array_rejects_shorter_actual() {
-        let fields: HashMap<String, serde_json::Value> =
-            [("body".to_string(), json!([1, 2, 3]))]
-                .into_iter()
-                .collect();
+        let fields: HashMap<String, serde_json::Value> = [("body".to_string(), json!([1, 2, 3]))]
+            .into_iter()
+            .collect();
 
         let pred = make_predicate(PredicateOperation::Equals(fields));
 
