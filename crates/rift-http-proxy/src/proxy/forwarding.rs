@@ -14,7 +14,6 @@ use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
 use hyper::{Request, Response, StatusCode};
-use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::Arc;
 use tracing::{debug, error};
@@ -217,11 +216,11 @@ pub async fn forward_with_recording(
         Err(_) => Bytes::new(),
     };
 
-    // Extract headers for recording
-    let mut recorded_headers = HashMap::new();
+    // Extract headers for recording (preserving multi-valued headers)
+    let mut recorded_headers = Vec::new();
     for (key, value) in parts.headers.iter() {
         if let Ok(value_str) = value.to_str() {
-            recorded_headers.insert(key.as_str().to_string(), value_str.to_string());
+            recorded_headers.push((key.as_str().to_string(), value_str.to_string()));
         }
     }
 

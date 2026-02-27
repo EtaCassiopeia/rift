@@ -238,20 +238,35 @@ pub fn get_rift_script_config(response: &StubResponse) -> Option<RiftScriptConfi
 /// If the body is valid UTF-8, it is stored as text (JSON or string).
 /// If the body is not valid UTF-8 (binary content), it is base64-encoded
 /// and the stub uses `_mode: "binary"` so it can be replayed correctly.
+///
+/// Headers are accepted as `&[(String, String)]` to preserve multi-valued
+/// headers (e.g., multiple `Set-Cookie`). They are converted to a HashMap
+/// for storage in the stub's `IsResponse`, which uses Mountebank's single-value
+/// header format. Multi-valued headers are comma-joined per HTTP spec.
 pub fn create_stub_from_proxy_response(
     predicates: Vec<serde_json::Value>,
     status: u16,
-    headers: &HashMap<String, String>,
+    headers: &[(String, String)],
     body: &[u8],
     latency_ms: Option<u64>,
     decorate_fn: Option<String>,
 ) -> super::types::Stub {
-    let mut response_headers = headers.clone();
-    // Filter out hop-by-hop headers
-    response_headers.retain(|k, _| {
+    // Convert to HashMap, comma-joining multi-valued headers (per HTTP spec).
+    // Filter out hop-by-hop headers.
+    let mut response_headers = HashMap::new();
+    for (k, v) in headers {
         let k_lower = k.to_lowercase();
-        k_lower != "transfer-encoding" && k_lower != "connection" && k_lower != "keep-alive"
-    });
+        if k_lower == "transfer-encoding" || k_lower == "connection" || k_lower == "keep-alive" {
+            continue;
+        }
+        response_headers
+            .entry(k.clone())
+            .and_modify(|existing: &mut String| {
+                existing.push_str(", ");
+                existing.push_str(v);
+            })
+            .or_insert_with(|| v.clone());
+    }
 
     let (body_value, mode) = if body.is_empty() {
         (None, ResponseMode::Text)

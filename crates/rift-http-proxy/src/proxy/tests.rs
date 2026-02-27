@@ -386,7 +386,6 @@ mod behavior_state_tests {
 #[cfg(test)]
 mod recording_store_tests {
     use crate::recording::{ProxyMode, RecordedResponse, RecordingStore, RequestSignature};
-    use std::collections::HashMap;
 
     #[test]
     fn test_recording_store_transparent_mode() {
@@ -426,7 +425,7 @@ mod recording_store_tests {
     fn test_recorded_response_creation() {
         let response = RecordedResponse {
             status: 200,
-            headers: HashMap::new(),
+            headers: Vec::new(),
             body: b"test body".to_vec(),
             latency_ms: Some(50),
             timestamp_secs: 1234567890,
@@ -442,7 +441,7 @@ mod recording_store_tests {
 
         let response = RecordedResponse {
             status: 200,
-            headers: HashMap::new(),
+            headers: Vec::new(),
             body: b"response".to_vec(),
             latency_ms: Some(10),
             timestamp_secs: 0,
@@ -472,7 +471,7 @@ mod recording_store_tests {
         // Even after recording, it should still proxy
         let response = RecordedResponse {
             status: 200,
-            headers: HashMap::new(),
+            headers: Vec::new(),
             body: vec![],
             latency_ms: None,
             timestamp_secs: 0,
@@ -492,7 +491,7 @@ mod recording_store_tests {
         // Record a response
         let response = RecordedResponse {
             status: 200,
-            headers: HashMap::new(),
+            headers: Vec::new(),
             body: vec![],
             latency_ms: None,
             timestamp_secs: 0,

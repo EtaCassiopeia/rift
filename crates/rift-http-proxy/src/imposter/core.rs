@@ -695,7 +695,7 @@ impl Imposter {
         uri: &hyper::Uri,
         headers: &HashMap<String, String>,
         body: Option<&str>,
-    ) -> anyhow::Result<(u16, HashMap<String, String>, Vec<u8>, Option<u64>)> {
+    ) -> anyhow::Result<(u16, Vec<(String, String)>, Vec<u8>, Option<u64>)> {
         let client = get_http_client();
 
         info!("Proxy config - addDecorateBehavior: {:?}, addWaitBehavior: {}, predicateGenerators: {:?}",
@@ -732,8 +732,12 @@ impl Imposter {
         if !self.recording_store.should_proxy(&signature) {
             if let Some(recorded) = self.recording_store.get_recorded(&signature) {
                 debug!("Returning recorded proxy response (proxyOnce mode)");
-                let headers: HashMap<String, String> = recorded.headers.clone();
-                return Ok((recorded.status, headers, recorded.body, recorded.latency_ms));
+                return Ok((
+                    recorded.status,
+                    recorded.headers.clone(),
+                    recorded.body.clone(),
+                    recorded.latency_ms,
+                ));
             }
         }
 
@@ -776,7 +780,7 @@ impl Imposter {
         let latency_ms = start.elapsed().as_millis() as u64;
 
         let status = response.status().as_u16();
-        let response_headers: HashMap<String, String> = response
+        let response_headers: Vec<(String, String)> = response
             .headers()
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))

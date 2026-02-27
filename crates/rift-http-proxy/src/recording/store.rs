@@ -229,7 +229,7 @@ mod tests {
         // First response should be recorded
         let resp1 = RecordedResponse {
             status: 200,
-            headers: HashMap::new(),
+            headers: Vec::new(),
             body: b"first".to_vec(),
             latency_ms: Some(100),
             timestamp_secs: unix_timestamp(),
@@ -239,7 +239,7 @@ mod tests {
         // Second response should NOT be recorded (proxyOnce)
         let resp2 = RecordedResponse {
             status: 201,
-            headers: HashMap::new(),
+            headers: Vec::new(),
             body: b"second".to_vec(),
             latency_ms: Some(50),
             timestamp_secs: unix_timestamp(),
@@ -261,7 +261,7 @@ mod tests {
             sig.clone(),
             RecordedResponse {
                 status: 200,
-                headers: HashMap::new(),
+                headers: Vec::new(),
                 body: b"first".to_vec(),
                 latency_ms: Some(100),
                 timestamp_secs: unix_timestamp(),
@@ -272,7 +272,7 @@ mod tests {
             sig.clone(),
             RecordedResponse {
                 status: 201,
-                headers: HashMap::new(),
+                headers: Vec::new(),
                 body: b"second".to_vec(),
                 latency_ms: Some(50),
                 timestamp_secs: unix_timestamp(),
@@ -293,7 +293,7 @@ mod tests {
             sig.clone(),
             RecordedResponse {
                 status: 200,
-                headers: HashMap::new(),
+                headers: Vec::new(),
                 body: b"test".to_vec(),
                 latency_ms: Some(100),
                 timestamp_secs: unix_timestamp(),
@@ -317,7 +317,7 @@ mod tests {
             sig.clone(),
             RecordedResponse {
                 status: 200,
-                headers: HashMap::new(),
+                headers: Vec::new(),
                 body: b"test".to_vec(),
                 latency_ms: Some(100),
                 timestamp_secs: unix_timestamp(),
@@ -346,7 +346,7 @@ mod tests {
             sig1.clone(),
             RecordedResponse {
                 status: 200,
-                headers: HashMap::new(),
+                headers: Vec::new(),
                 body: b"response1".to_vec(),
                 latency_ms: Some(10),
                 timestamp_secs: unix_timestamp(),
@@ -373,7 +373,7 @@ mod tests {
             get_sig.clone(),
             RecordedResponse {
                 status: 200,
-                headers: HashMap::new(),
+                headers: Vec::new(),
                 body: b"GET response".to_vec(),
                 latency_ms: Some(10),
                 timestamp_secs: unix_timestamp(),
@@ -399,7 +399,7 @@ mod tests {
             sig.clone(),
             RecordedResponse {
                 status: 200,
-                headers: HashMap::new(),
+                headers: Vec::new(),
                 body: b"test".to_vec(),
                 latency_ms: Some(100),
                 timestamp_secs: unix_timestamp(),

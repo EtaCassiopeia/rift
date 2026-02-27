@@ -1,13 +1,15 @@
 //! Types for proxy recording - responses and request signatures.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
-/// Recorded response from proxy
+/// Recorded response from proxy.
+///
+/// Headers are stored as `Vec<(String, String)>` to preserve multi-valued
+/// headers (e.g., multiple `Set-Cookie` headers) that would be lost with a HashMap.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecordedResponse {
     pub status: u16,
-    pub headers: HashMap<String, String>,
+    pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
     pub latency_ms: Option<u64>,
     /// Unix timestamp in seconds
