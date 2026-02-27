@@ -323,7 +323,7 @@ where
         let actual = apply_except(actual);
         match expected {
             serde_json::Value::Object(_) | serde_json::Value::Array(_) => {
-                compare_json_recursive(expected, &actual, &compare, deep_equals)
+                compare_json_recursive(expected, &actual, &compare, deep_equals, key_case_sensitive)
             }
             serde_json::Value::String(s) => compare(s, &actual),
             _ => {
@@ -776,11 +776,13 @@ fn check_exists_predicate(
 /// For leaf values, converts both to strings and applies the comparison function.
 /// When `deep_equals` is true, also verifies no extra keys exist in actual objects
 /// and arrays are compared structurally (same length, element-wise).
+/// `key_case_sensitive` controls whether JSON object key lookups are case-sensitive.
 fn compare_json_recursive<F>(
     expected: &serde_json::Value,
     actual_str: &str,
     compare: &F,
     deep_equals: bool,
+    key_case_sensitive: bool,
 ) -> bool
 where
     F: Fn(&str, &str) -> bool,
@@ -803,13 +805,28 @@ where
             }
 
             for (key, expected_val) in expected_obj {
-                let actual_val = match actual_obj.get(key) {
+                let actual_val = if key_case_sensitive {
+                    actual_obj.get(key)
+                } else {
+                    actual_obj
+                        .iter()
+                        .find(|(k, _)| k.eq_ignore_ascii_case(key))
+                        .map(|(_, v)| v)
+                };
+
+                let actual_val = match actual_val {
                     Some(v) => v,
                     None => return false,
                 };
 
                 let actual_val_str = json_value_to_string(actual_val);
-                if !compare_json_recursive(expected_val, &actual_val_str, compare, deep_equals) {
+                if !compare_json_recursive(
+                    expected_val,
+                    &actual_val_str,
+                    compare,
+                    deep_equals,
+                    key_case_sensitive,
+                ) {
                     return false;
                 }
             }
@@ -832,7 +849,13 @@ where
 
             for (expected_elem, actual_elem) in expected_arr.iter().zip(actual_arr.iter()) {
                 let actual_elem_str = json_value_to_string(actual_elem);
-                if !compare_json_recursive(expected_elem, &actual_elem_str, compare, deep_equals) {
+                if !compare_json_recursive(
+                    expected_elem,
+                    &actual_elem_str,
+                    compare,
+                    deep_equals,
+                    key_case_sensitive,
+                ) {
                     return false;
                 }
             }
@@ -1842,14 +1865,7 @@ mod tests {
         assert!(result.is_empty());
     }
 
-    // =========================================================================
-    // Bug I: JSON body key matching ignores keyCaseSensitive
-    // compare_json_recursive uses exact `actual_obj.get(key)` for JSON body
-    // key lookup, ignoring keyCaseSensitive (and caseSensitive). In Mountebank,
-    // when caseSensitive is false (the default), JSON body keys are matched
-    // case-insensitively.
-    // =========================================================================
-
+    // Fix #104: JSON body key matching now respects keyCaseSensitive
     #[test]
     fn test_equals_json_body_key_case_insensitive_by_default() {
         // equals { body: { "Name": "John" } } should match body {"name": "John"}
@@ -1873,13 +1889,9 @@ mod tests {
             None,
         );
 
-        // BUG: Returns false because compare_json_recursive uses exact
-        // actual_obj.get("Name") which fails to find "name" (lowercase).
-        // Expected: true (caseSensitive=false means keys should match case-insensitively)
         assert!(
-            !result,
-            "BUG(I): JSON body key matching ignores keyCaseSensitive; \
-             expected true (default caseSensitive=false should match 'Name' to 'name'), got false"
+            result,
+            "caseSensitive=false (default) should match JSON body keys case-insensitively"
         );
     }
 
