@@ -1374,6 +1374,456 @@ fn test_ends_with_body_object_with_numeric_value() {
     ));
 }
 
+// Issue #77 (reopened): Object predicates in query, headers, and form
+// The original fix only applied check_string_field to method/path/body.
+// Query, headers, and form still used inline to_string() which broke
+// recursive JSON matching when the expected value is an object.
+
+#[test]
+fn test_ends_with_query_object_value_does_not_always_match() {
+    // {"endsWith": {"query": {"q": {"nested": "val"}}}} should NOT match
+    // when the actual query param value is a plain string
+    let predicates = predicates_from_jsons(vec![serde_json::json!({
+        "endsWith": {
+            "query": {"q": {"nested": "val"}}
+        }
+    })]);
+
+    let empty_headers = HashMap::new();
+
+    assert!(
+        !stub_matches(
+            &predicates,
+            "GET",
+            "/search",
+            Some("q=hello"),
+            &empty_headers,
+            None,
+            None,
+            None,
+            None
+        ),
+        "Object expected value in query should not match a plain string"
+    );
+}
+
+#[test]
+fn test_ends_with_query_object_value_recursive_match() {
+    // When query param value IS a JSON string, object predicate should recurse
+    let predicates = predicates_from_jsons(vec![serde_json::json!({
+        "endsWith": {
+            "query": {"data": {"key": "123"}}
+        }
+    })]);
+
+    let empty_headers = HashMap::new();
+
+    // query param 'data' is a JSON string with a field ending in "123"
+    assert!(stub_matches(
+        &predicates,
+        "GET",
+        "/test",
+        Some(r#"data={"key": "other123", "extra": "ignored"}"#),
+        &empty_headers,
+        None,
+        None,
+        None,
+        None
+    ));
+
+    // query param 'data' has a field NOT ending in "123"
+    assert!(!stub_matches(
+        &predicates,
+        "GET",
+        "/test",
+        Some(r#"data={"key": "other456"}"#),
+        &empty_headers,
+        None,
+        None,
+        None,
+        None
+    ));
+}
+
+#[test]
+fn test_ends_with_header_object_value_does_not_always_match() {
+    // {"endsWith": {"headers": {"X-Custom": {"nested": "val"}}}} should NOT match
+    // when the actual header value is a plain string
+    let predicates = predicates_from_jsons(vec![serde_json::json!({
+        "endsWith": {
+            "headers": {"X-Custom": {"nested": "val"}}
+        }
+    })]);
+
+    let mut headers = HashMap::new();
+    headers.insert("X-Custom".to_string(), "plaintext".to_string());
+
+    assert!(
+        !stub_matches(
+            &predicates,
+            "GET",
+            "/test",
+            None,
+            &headers,
+            None,
+            None,
+            None,
+            None
+        ),
+        "Object expected value in headers should not match a plain string"
+    );
+}
+
+#[test]
+fn test_ends_with_header_object_value_recursive_match() {
+    // When header value IS a JSON string, object predicate should recurse
+    let predicates = predicates_from_jsons(vec![serde_json::json!({
+        "endsWith": {
+            "headers": {"X-Data": {"abc": "123"}}
+        }
+    })]);
+
+    let mut headers = HashMap::new();
+    headers.insert(
+        "X-Data".to_string(),
+        r#"{"abc": "other123", "extra": "ignored"}"#.to_string(),
+    );
+
+    assert!(stub_matches(
+        &predicates,
+        "GET",
+        "/test",
+        None,
+        &headers,
+        None,
+        None,
+        None,
+        None
+    ));
+
+    // Header value with field NOT ending in "123"
+    headers.insert("X-Data".to_string(), r#"{"abc": "other456"}"#.to_string());
+    assert!(!stub_matches(
+        &predicates,
+        "GET",
+        "/test",
+        None,
+        &headers,
+        None,
+        None,
+        None,
+        None
+    ));
+}
+
+#[test]
+fn test_ends_with_form_object_value_does_not_always_match() {
+    // {"endsWith": {"form": {"field": {"nested": "val"}}}} should NOT match
+    // when the actual form field value is a plain string
+    let predicates = predicates_from_jsons(vec![serde_json::json!({
+        "endsWith": {
+            "form": {"field": {"nested": "val"}}
+        }
+    })]);
+
+    let empty_headers = HashMap::new();
+    let mut form = HashMap::new();
+    form.insert("field".to_string(), "plaintext".to_string());
+
+    assert!(
+        !stub_matches(
+            &predicates,
+            "POST",
+            "/submit",
+            None,
+            &empty_headers,
+            None,
+            None,
+            None,
+            Some(&form)
+        ),
+        "Object expected value in form should not match a plain string"
+    );
+}
+
+#[test]
+fn test_ends_with_form_object_value_recursive_match() {
+    // When form field value IS a JSON string, object predicate should recurse
+    let predicates = predicates_from_jsons(vec![serde_json::json!({
+        "endsWith": {
+            "form": {"payload": {"key": "123"}}
+        }
+    })]);
+
+    let empty_headers = HashMap::new();
+    let mut form = HashMap::new();
+    form.insert(
+        "payload".to_string(),
+        r#"{"key": "other123", "extra": "ignored"}"#.to_string(),
+    );
+
+    assert!(stub_matches(
+        &predicates,
+        "POST",
+        "/submit",
+        None,
+        &empty_headers,
+        None,
+        None,
+        None,
+        Some(&form)
+    ));
+
+    // Form field with value NOT ending in "123"
+    form.insert("payload".to_string(), r#"{"key": "other456"}"#.to_string());
+    assert!(!stub_matches(
+        &predicates,
+        "POST",
+        "/submit",
+        None,
+        &empty_headers,
+        None,
+        None,
+        None,
+        Some(&form)
+    ));
+}
+
+#[test]
+fn test_contains_query_object_value() {
+    // Also verify 'contains' operator works for query with object expected values
+    let predicates = predicates_from_jsons(vec![serde_json::json!({
+        "contains": {
+            "query": {"data": {"name": "ohn"}}
+        }
+    })]);
+
+    let empty_headers = HashMap::new();
+
+    // query param 'data' is a JSON string with a field containing "ohn"
+    assert!(stub_matches(
+        &predicates,
+        "GET",
+        "/test",
+        Some(r#"data={"name": "John", "age": "30"}"#),
+        &empty_headers,
+        None,
+        None,
+        None,
+        None
+    ));
+
+    // query param 'data' does NOT contain "ohn"
+    assert!(!stub_matches(
+        &predicates,
+        "GET",
+        "/test",
+        Some(r#"data={"name": "Jane"}"#),
+        &empty_headers,
+        None,
+        None,
+        None,
+        None
+    ));
+}
+
+#[test]
+fn test_equals_header_object_value() {
+    // 'equals' operator should also recurse for headers with object expected values
+    let predicates = predicates_from_jsons(vec![serde_json::json!({
+        "equals": {
+            "headers": {"X-Config": {"mode": "test"}}
+        }
+    })]);
+
+    let mut headers = HashMap::new();
+    headers.insert(
+        "X-Config".to_string(),
+        r#"{"mode": "test", "extra": "ignored"}"#.to_string(),
+    );
+
+    // equals with object does recursive field match (extra fields OK)
+    assert!(stub_matches(
+        &predicates,
+        "GET",
+        "/test",
+        None,
+        &headers,
+        None,
+        None,
+        None,
+        None
+    ));
+
+    // Mismatched value
+    headers.insert("X-Config".to_string(), r#"{"mode": "prod"}"#.to_string());
+    assert!(!stub_matches(
+        &predicates,
+        "GET",
+        "/test",
+        None,
+        &headers,
+        None,
+        None,
+        None,
+        None
+    ));
+}
+
+// Issue #77: matches predicate with object expected values in query/headers/form
+// The regex function had the same bug — object values were silently skipped via `continue`.
+
+#[test]
+fn test_matches_query_object_value_does_not_always_match() {
+    // {"matches": {"query": {"q": {"nested": "^abc"}}}} should NOT match
+    // when the actual query param is a plain string
+    let predicates = predicates_from_jsons(vec![serde_json::json!({
+        "matches": {
+            "query": {"q": {"nested": "^abc"}}
+        }
+    })]);
+
+    let empty_headers = HashMap::new();
+
+    assert!(
+        !stub_matches(
+            &predicates,
+            "GET",
+            "/search",
+            Some("q=hello"),
+            &empty_headers,
+            None,
+            None,
+            None,
+            None
+        ),
+        "Object expected value in matches/query should not match a plain string"
+    );
+}
+
+#[test]
+fn test_matches_query_object_value_recursive_regex() {
+    // When query param value IS a JSON string, object predicate should recurse with regex
+    let predicates = predicates_from_jsons(vec![serde_json::json!({
+        "matches": {
+            "query": {"data": {"name": "^J.*n$"}}
+        }
+    })]);
+
+    let empty_headers = HashMap::new();
+
+    // query param 'data' is JSON with a "name" field matching regex ^J.*n$
+    assert!(stub_matches(
+        &predicates,
+        "GET",
+        "/test",
+        Some(r#"data={"name": "John", "age": "30"}"#),
+        &empty_headers,
+        None,
+        None,
+        None,
+        None
+    ));
+
+    // "Jane" does NOT match ^J.*n$ (ends with 'e')
+    assert!(!stub_matches(
+        &predicates,
+        "GET",
+        "/test",
+        Some(r#"data={"name": "Jane"}"#),
+        &empty_headers,
+        None,
+        None,
+        None,
+        None
+    ));
+}
+
+#[test]
+fn test_matches_header_object_value_recursive_regex() {
+    let predicates = predicates_from_jsons(vec![serde_json::json!({
+        "matches": {
+            "headers": {"X-Data": {"id": "^\\d+$"}}
+        }
+    })]);
+
+    let mut headers = HashMap::new();
+    headers.insert(
+        "X-Data".to_string(),
+        r#"{"id": "12345", "extra": "abc"}"#.to_string(),
+    );
+
+    // "12345" matches ^\d+$
+    assert!(stub_matches(
+        &predicates,
+        "GET",
+        "/test",
+        None,
+        &headers,
+        None,
+        None,
+        None,
+        None
+    ));
+
+    // "abc" does NOT match ^\d+$
+    headers.insert("X-Data".to_string(), r#"{"id": "abc"}"#.to_string());
+    assert!(!stub_matches(
+        &predicates,
+        "GET",
+        "/test",
+        None,
+        &headers,
+        None,
+        None,
+        None,
+        None
+    ));
+}
+
+#[test]
+fn test_matches_form_object_value_recursive_regex() {
+    let predicates = predicates_from_jsons(vec![serde_json::json!({
+        "matches": {
+            "form": {"payload": {"code": "^[A-Z]{3}$"}}
+        }
+    })]);
+
+    let empty_headers = HashMap::new();
+    let mut form = HashMap::new();
+    form.insert(
+        "payload".to_string(),
+        r#"{"code": "ABC", "extra": "123"}"#.to_string(),
+    );
+
+    // "ABC" matches ^[A-Z]{3}$
+    assert!(stub_matches(
+        &predicates,
+        "POST",
+        "/submit",
+        None,
+        &empty_headers,
+        None,
+        None,
+        None,
+        Some(&form)
+    ));
+
+    // "abcd" does NOT match ^[A-Z]{3}$
+    form.insert("payload".to_string(), r#"{"code": "abcd"}"#.to_string());
+    assert!(!stub_matches(
+        &predicates,
+        "POST",
+        "/submit",
+        None,
+        &empty_headers,
+        None,
+        None,
+        None,
+        Some(&form)
+    ));
+}
+
 // =============================================================================
 // Issue #85: deepEquals body missing extra-key check
 // =============================================================================

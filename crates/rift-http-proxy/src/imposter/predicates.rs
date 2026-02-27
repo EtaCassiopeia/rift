@@ -394,10 +394,6 @@ where
             }
 
             for (key, expected_val) in expected_obj {
-                let expected_str = match expected_val {
-                    serde_json::Value::String(s) => s.clone(),
-                    _ => expected_val.to_string(),
-                };
                 // Find key using keyCaseSensitive option
                 let actual = actual_form
                     .iter()
@@ -406,8 +402,7 @@ where
 
                 match actual {
                     Some(actual) => {
-                        let actual = apply_except(actual);
-                        if !compare(&expected_str, &actual) {
+                        if !check_string_field(expected_val, actual) {
                             return false;
                         }
                     }
@@ -426,10 +421,6 @@ where
             }
 
             for (key, expected_val) in expected_obj {
-                let expected_str = match expected_val {
-                    serde_json::Value::String(s) => s.clone(),
-                    _ => expected_val.to_string(),
-                };
                 // Find key using keyCaseSensitive option
                 let actual = query
                     .iter()
@@ -438,8 +429,7 @@ where
 
                 match actual {
                     Some(actual) => {
-                        let actual = apply_except(actual);
-                        if !compare(&expected_str, &actual) {
+                        if !check_string_field(expected_val, actual) {
                             return false;
                         }
                     }
@@ -458,10 +448,6 @@ where
             }
 
             for (key, expected_val) in expected_obj {
-                let expected_str = match expected_val {
-                    serde_json::Value::String(s) => s.clone(),
-                    _ => expected_val.to_string(),
-                };
                 // Headers use keyCaseSensitive option
                 let actual = headers
                     .iter()
@@ -470,8 +456,7 @@ where
 
                 match actual {
                     Some(actual) => {
-                        let actual = apply_except(actual);
-                        if !compare(&expected_str, &actual) {
+                        if !check_string_field(expected_val, actual) {
                             return false;
                         }
                     }
@@ -520,68 +505,75 @@ fn check_predicate_fields_regex(
         }
     };
 
-    // Check method
-    if let Some(pattern) = obj.get("method").and_then(|v| v.as_str()) {
-        match build_regex(pattern) {
-            Ok(re) => {
-                let actual = apply_except(method);
-                if !re.is_match(&actual) {
-                    return false;
+    // Helper: check a field against expected value for regex matching.
+    // When expected is an object/array, recurse via compare_json_recursive with regex comparator.
+    // When expected is a string, build regex and match directly.
+    let check_regex_field = |expected: &serde_json::Value, actual: &str| -> bool {
+        match expected {
+            serde_json::Value::Object(_) | serde_json::Value::Array(_) => {
+                let regex_compare = |pattern: &str, actual: &str| -> bool {
+                    match build_regex(pattern) {
+                        Ok(re) => re.is_match(actual),
+                        Err(_) => false,
+                    }
+                };
+                compare_json_recursive(
+                    expected,
+                    actual,
+                    &regex_compare,
+                    false,
+                    key_case_sensitive,
+                    &apply_except,
+                )
+            }
+            _ => {
+                let pattern = match expected {
+                    serde_json::Value::String(s) => s.as_str().to_string(),
+                    _ => expected.to_string(),
+                };
+                match build_regex(&pattern) {
+                    Ok(re) => {
+                        let actual = apply_except(actual);
+                        re.is_match(&actual)
+                    }
+                    Err(_) => false,
                 }
             }
-            Err(_) => return false,
+        }
+    };
+
+    // Check method
+    if let Some(expected) = obj.get("method") {
+        if !check_regex_field(expected, method) {
+            return false;
         }
     }
 
     // Check path
-    if let Some(pattern) = obj.get("path").and_then(|v| v.as_str()) {
-        match build_regex(pattern) {
-            Ok(re) => {
-                let actual = apply_except(path);
-                if !re.is_match(&actual) {
-                    return false;
-                }
-            }
-            Err(_) => return false,
+    if let Some(expected) = obj.get("path") {
+        if !check_regex_field(expected, path) {
+            return false;
         }
     }
 
     // Check body
-    if let Some(pattern) = obj.get("body").and_then(|v| v.as_str()) {
-        match build_regex(pattern) {
-            Ok(re) => {
-                let actual = apply_except(body);
-                if !re.is_match(&actual) {
-                    return false;
-                }
-            }
-            Err(_) => return false,
+    if let Some(expected) = obj.get("body") {
+        if !check_regex_field(expected, body) {
+            return false;
         }
     }
 
     // Check requestFrom
-    if let Some(pattern) = obj.get("requestFrom").and_then(|v| v.as_str()) {
-        match build_regex(pattern) {
-            Ok(re) => {
-                let actual = apply_except(request_from.unwrap_or(""));
-                if !re.is_match(&actual) {
-                    return false;
-                }
-            }
-            Err(_) => return false,
+    if let Some(expected) = obj.get("requestFrom") {
+        if !check_regex_field(expected, request_from.unwrap_or("")) {
+            return false;
         }
     }
 
     // Check ip
-    if let Some(pattern) = obj.get("ip").and_then(|v| v.as_str()) {
-        match build_regex(pattern) {
-            Ok(re) => {
-                let actual = apply_except(client_ip.unwrap_or(""));
-                if !re.is_match(&actual) {
-                    return false;
-                }
-            }
-            Err(_) => return false,
+    if let Some(expected) = obj.get("ip") {
+        if !check_regex_field(expected, client_ip.unwrap_or("")) {
+            return false;
         }
     }
 
@@ -589,28 +581,18 @@ fn check_predicate_fields_regex(
     if let Some(expected_form) = obj.get("form").and_then(|v| v.as_object()) {
         let actual_form = form.cloned().unwrap_or_default();
         for (key, pattern_val) in expected_form {
-            let pattern = match pattern_val {
-                serde_json::Value::String(s) => s.as_str(),
-                _ => continue,
-            };
-            match build_regex(pattern) {
-                Ok(re) => {
-                    let actual = actual_form
-                        .iter()
-                        .find(|(k, _)| key_matches(key, k))
-                        .map(|(_, v)| v.as_str());
+            let actual = actual_form
+                .iter()
+                .find(|(k, _)| key_matches(key, k))
+                .map(|(_, v)| v.as_str());
 
-                    match actual {
-                        Some(actual) => {
-                            let actual = apply_except(actual);
-                            if !re.is_match(&actual) {
-                                return false;
-                            }
-                        }
-                        None => return false,
+            match actual {
+                Some(actual) => {
+                    if !check_regex_field(pattern_val, actual) {
+                        return false;
                     }
                 }
-                Err(_) => return false,
+                None => return false,
             }
         }
     }
@@ -618,28 +600,18 @@ fn check_predicate_fields_regex(
     // Check query parameters
     if let Some(expected_query) = obj.get("query").and_then(|v| v.as_object()) {
         for (key, pattern_val) in expected_query {
-            let pattern = match pattern_val {
-                serde_json::Value::String(s) => s.as_str(),
-                _ => continue,
-            };
-            match build_regex(pattern) {
-                Ok(re) => {
-                    let actual = query
-                        .iter()
-                        .find(|(k, _)| key_matches(key, k))
-                        .map(|(_, v)| v.as_str());
+            let actual = query
+                .iter()
+                .find(|(k, _)| key_matches(key, k))
+                .map(|(_, v)| v.as_str());
 
-                    match actual {
-                        Some(actual) => {
-                            let actual = apply_except(actual);
-                            if !re.is_match(&actual) {
-                                return false;
-                            }
-                        }
-                        None => return false,
+            match actual {
+                Some(actual) => {
+                    if !check_regex_field(pattern_val, actual) {
+                        return false;
                     }
                 }
-                Err(_) => return false,
+                None => return false,
             }
         }
     }
@@ -647,28 +619,18 @@ fn check_predicate_fields_regex(
     // Check headers
     if let Some(expected_headers) = obj.get("headers").and_then(|v| v.as_object()) {
         for (key, pattern_val) in expected_headers {
-            let pattern = match pattern_val {
-                serde_json::Value::String(s) => s.as_str(),
-                _ => continue,
-            };
-            match build_regex(pattern) {
-                Ok(re) => {
-                    let actual = headers
-                        .iter()
-                        .find(|(k, _)| key_matches(key, k))
-                        .map(|(_, v)| v.as_str());
+            let actual = headers
+                .iter()
+                .find(|(k, _)| key_matches(key, k))
+                .map(|(_, v)| v.as_str());
 
-                    match actual {
-                        Some(actual) => {
-                            let actual = apply_except(actual);
-                            if !re.is_match(&actual) {
-                                return false;
-                            }
-                        }
-                        None => return false,
+            match actual {
+                Some(actual) => {
+                    if !check_regex_field(pattern_val, actual) {
+                        return false;
                     }
                 }
-                Err(_) => return false,
+                None => return false,
             }
         }
     }
