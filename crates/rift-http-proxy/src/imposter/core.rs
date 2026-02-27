@@ -921,3 +921,159 @@ impl Imposter {
         self.enabled.load(Ordering::SeqCst)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::imposter::types::ImposterConfig;
+    use serde_json::json;
+
+    fn make_test_imposter() -> Imposter {
+        let config = ImposterConfig {
+            port: Some(0),
+            protocol: "http".to_string(),
+            ..Default::default()
+        };
+        Imposter::new(config)
+    }
+
+    // =========================================================================
+    // Bug H: caseSensitive default mismatch between generator and matcher
+    // The predicate generator defaults caseSensitive to true (core.rs line 482)
+    // and only writes it to the predicate JSON when false (line 571).
+    // But the predicate matcher defaults caseSensitive to false when absent
+    // (predicates.rs line 69). This means generated predicates are evaluated
+    // case-insensitively when they should be case-sensitive.
+    // =========================================================================
+
+    #[test]
+    fn test_generator_case_sensitive_default_mismatch() {
+        // A predicateGenerator with default caseSensitive (true) generates a
+        // predicate without a caseSensitive field. When the matcher evaluates
+        // it, it defaults to false — the opposite of what was intended.
+        let imposter = make_test_imposter();
+
+        let generators = vec![json!({
+            "matches": { "method": true, "path": true }
+            // no caseSensitive field → generator defaults to true
+        })];
+
+        let headers = HashMap::new();
+        let predicates = imposter.generate_predicates_from_request(
+            &generators,
+            "GET",
+            "/API/Users",
+            &headers,
+            None,
+        );
+
+        assert_eq!(predicates.len(), 1);
+        let pred_json = &predicates[0];
+
+        // The generator defaults caseSensitive to true, but since true is the
+        // "default", it doesn't write the field to the predicate JSON.
+        assert!(
+            pred_json.get("caseSensitive").is_none(),
+            "Generator should not write caseSensitive when it's the 'default' (true)"
+        );
+
+        // Now deserialize as a Predicate and check what the matcher sees
+        let pred: crate::imposter::types::Predicate = serde_json::from_value(pred_json.clone())
+            .expect("Generated predicate should deserialize");
+
+        // BUG: The matcher defaults caseSensitive to false when absent.
+        // Generator intended true, matcher sees false.
+        assert_eq!(
+            pred.parameters.case_sensitive, None,
+            "caseSensitive should be None (absent from JSON)"
+        );
+        // When None, matcher uses unwrap_or(false) — so case-INSENSITIVE matching
+        let effective_case_sensitive = pred.parameters.case_sensitive.unwrap_or(false);
+        assert!(
+            !effective_case_sensitive,
+            "BUG(H): Generator defaults caseSensitive=true but doesn't write it; \
+             matcher defaults to false when absent. Generated predicates intended to be \
+             case-sensitive are evaluated case-insensitively."
+        );
+    }
+
+    // =========================================================================
+    // Bug M: `except` not applied to method in generate_predicates_from_request
+    // The generator applies except to path (line 500-503) and body (line 550-553)
+    // but NOT to method (line 514-516). The method value is stored raw.
+    // =========================================================================
+
+    #[test]
+    fn test_generator_except_not_applied_to_method() {
+        // A predicateGenerator with except="^(POST|DELETE)$" that matches method.
+        // For method "POST": except should strip "POST" → empty string.
+        // BUG: Method value "POST" is stored as-is, except is not applied.
+        let imposter = make_test_imposter();
+
+        let generators = vec![json!({
+            "matches": { "method": true },
+            "except": "^POST$"
+        })];
+
+        let headers = HashMap::new();
+        let predicates =
+            imposter.generate_predicates_from_request(&generators, "POST", "/test", &headers, None);
+
+        assert_eq!(predicates.len(), 1);
+        let pred_json = &predicates[0];
+        let method_val = pred_json["equals"]["method"].as_str().unwrap();
+
+        // BUG: Method is "POST" (raw) instead of "" (with except applied).
+        // Compare with path handling which correctly applies except.
+        assert_eq!(
+            method_val, "POST",
+            "BUG(M): except pattern not applied to method in predicate generator; \
+             expected '' (except strips 'POST'), got 'POST'"
+        );
+    }
+
+    // =========================================================================
+    // Bug N: generate_predicates_from_request ignores query parameters
+    // The function only handles method, path, headers, and body.
+    // If a predicateGenerator has "matches": { "query": true }, the query
+    // field is silently ignored — no query constraint is generated.
+    // =========================================================================
+
+    #[test]
+    fn test_generator_ignores_query_parameters() {
+        // A predicateGenerator that matches query should generate a query predicate.
+        // BUG: The function doesn't accept or process query parameters at all.
+        let imposter = make_test_imposter();
+
+        let generators = vec![json!({
+            "matches": { "path": true, "query": true }
+        })];
+
+        let headers = HashMap::new();
+        let predicates = imposter.generate_predicates_from_request(
+            &generators,
+            "GET",
+            "/search",
+            &headers,
+            None,
+        );
+
+        assert_eq!(predicates.len(), 1);
+        let pred_json = &predicates[0];
+        let equals_obj = pred_json["equals"].as_object().unwrap();
+
+        // Path should be present
+        assert!(
+            equals_obj.contains_key("path"),
+            "Path should be in generated predicate"
+        );
+
+        // BUG: Query is NOT present because the function doesn't handle it.
+        // Expected: query parameters should be included in the generated predicate.
+        assert!(
+            !equals_obj.contains_key("query"),
+            "BUG(N): generate_predicates_from_request ignores query parameters; \
+             expected query field in generated predicate, but it is missing"
+        );
+    }
+}
