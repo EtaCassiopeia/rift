@@ -34,7 +34,7 @@ fn get_http_client() -> &'static reqwest::Client {
             .timeout(Duration::from_secs(30))
             .pool_max_idle_per_host(0) // Disable connection pooling to avoid stale connections
             .build()
-            .expect("Failed to create HTTP client")
+            .expect("Failed to create HTTP client: check system TLS/DNS configuration")
     })
 }
 

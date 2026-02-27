@@ -283,7 +283,17 @@ pub fn create_stub_from_proxy_response(
 
     let predicates: Vec<Predicate> = predicates
         .into_iter()
-        .map(|value| serde_json::from_value(value).expect("expected to generate a valid predicate"))
+        .filter_map(|value| match serde_json::from_value(value.clone()) {
+            Ok(pred) => Some(pred),
+            Err(e) => {
+                tracing::warn!(
+                    "Skipping malformed generated predicate: {} (from: {})",
+                    e,
+                    value
+                );
+                None
+            }
+        })
         .collect();
     super::types::Stub {
         id: None,
