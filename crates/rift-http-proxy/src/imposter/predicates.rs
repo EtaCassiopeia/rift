@@ -311,13 +311,15 @@ where
     };
 
     // Helper: check a string field against expected value.
-    // When expected is an object, parse actual as JSON and compare recursively (Mountebank compat).
+    // When expected is an object/array, parse actual as JSON and compare recursively (Mountebank compat).
     // When expected is a string/primitive, compare directly.
     // Previously, non-string expected values were silently ignored, causing always-match.
     let check_string_field = |expected: &serde_json::Value, actual: &str| -> bool {
         let actual = apply_except(actual);
         match expected {
-            serde_json::Value::Object(_) => compare_json_recursive(expected, &actual, &compare),
+            serde_json::Value::Object(_) | serde_json::Value::Array(_) => {
+                compare_json_recursive(expected, &actual, &compare, deep_equals)
+            }
             serde_json::Value::String(s) => compare(s, &actual),
             _ => {
                 let expected_str = expected.to_string();
@@ -757,7 +759,14 @@ fn check_exists_predicate(
 /// Recursively apply a comparison function when the expected value is a JSON object.
 /// Parses the actual string as JSON and compares each field recursively.
 /// For leaf values, converts both to strings and applies the comparison function.
-fn compare_json_recursive<F>(expected: &serde_json::Value, actual_str: &str, compare: &F) -> bool
+/// When `deep_equals` is true, also verifies no extra keys exist in actual objects
+/// and arrays are compared structurally (same length, element-wise).
+fn compare_json_recursive<F>(
+    expected: &serde_json::Value,
+    actual_str: &str,
+    compare: &F,
+    deep_equals: bool,
+) -> bool
 where
     F: Fn(&str, &str) -> bool,
 {
@@ -768,14 +777,47 @@ where
                 Err(_) => return false,
             };
 
+            let actual_obj = match actual_json.as_object() {
+                Some(obj) => obj,
+                None => return false,
+            };
+
+            // For deepEquals, actual must have exactly the same keys
+            if deep_equals && expected_obj.len() != actual_obj.len() {
+                return false;
+            }
+
             for (key, expected_val) in expected_obj {
-                let actual_val = match actual_json.get(key) {
+                let actual_val = match actual_obj.get(key) {
                     Some(v) => v,
                     None => return false,
                 };
 
                 let actual_val_str = json_value_to_string(actual_val);
-                if !compare_json_recursive(expected_val, &actual_val_str, compare) {
+                if !compare_json_recursive(expected_val, &actual_val_str, compare, deep_equals) {
+                    return false;
+                }
+            }
+            true
+        }
+        serde_json::Value::Array(expected_arr) => {
+            let actual_json: serde_json::Value = match serde_json::from_str(actual_str) {
+                Ok(v) => v,
+                Err(_) => return false,
+            };
+
+            let actual_arr = match actual_json.as_array() {
+                Some(arr) => arr,
+                None => return false,
+            };
+
+            if deep_equals && expected_arr.len() != actual_arr.len() {
+                return false;
+            }
+
+            for (expected_elem, actual_elem) in expected_arr.iter().zip(actual_arr.iter()) {
+                let actual_elem_str = json_value_to_string(actual_elem);
+                if !compare_json_recursive(expected_elem, &actual_elem_str, compare, deep_equals) {
                     return false;
                 }
             }

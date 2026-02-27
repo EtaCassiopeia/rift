@@ -1373,3 +1373,155 @@ fn test_ends_with_body_object_with_numeric_value() {
         None
     ));
 }
+
+// =============================================================================
+// Issue #85: deepEquals body missing extra-key check
+// =============================================================================
+
+#[test]
+fn test_deep_equals_body_extra_keys_rejected() {
+    let predicates = predicates_from_jsons(vec![serde_json::json!({
+        "deepEquals": {
+            "body": {"a": "1"}
+        }
+    })]);
+
+    let empty_headers = HashMap::new();
+
+    // Exact match should pass
+    assert!(stub_matches(
+        &predicates,
+        "POST",
+        "/test",
+        None,
+        &empty_headers,
+        Some(r#"{"a": "1"}"#),
+        None,
+        None,
+        None
+    ));
+
+    // Extra key should be rejected by deepEquals
+    assert!(!stub_matches(
+        &predicates,
+        "POST",
+        "/test",
+        None,
+        &empty_headers,
+        Some(r#"{"a": "1", "b": "2"}"#),
+        None,
+        None,
+        None
+    ));
+}
+
+#[test]
+fn test_equals_body_extra_keys_allowed() {
+    // Regular equals should still allow extra keys
+    let predicates = predicates_from_jsons(vec![serde_json::json!({
+        "equals": {
+            "body": {"a": "1"}
+        }
+    })]);
+
+    let empty_headers = HashMap::new();
+
+    assert!(stub_matches(
+        &predicates,
+        "POST",
+        "/test",
+        None,
+        &empty_headers,
+        Some(r#"{"a": "1", "b": "2"}"#),
+        None,
+        None,
+        None
+    ));
+}
+
+#[test]
+fn test_deep_equals_body_nested_extra_keys_rejected() {
+    let predicates = predicates_from_jsons(vec![serde_json::json!({
+        "deepEquals": {
+            "body": {"outer": {"inner": "val"}}
+        }
+    })]);
+
+    let empty_headers = HashMap::new();
+
+    // Exact nested match
+    assert!(stub_matches(
+        &predicates,
+        "POST",
+        "/test",
+        None,
+        &empty_headers,
+        Some(r#"{"outer": {"inner": "val"}}"#),
+        None,
+        None,
+        None
+    ));
+
+    // Extra key in nested object
+    assert!(!stub_matches(
+        &predicates,
+        "POST",
+        "/test",
+        None,
+        &empty_headers,
+        Some(r#"{"outer": {"inner": "val", "extra": "x"}}"#),
+        None,
+        None,
+        None
+    ));
+}
+
+#[test]
+fn test_deep_equals_body_array_comparison() {
+    let predicates = predicates_from_jsons(vec![serde_json::json!({
+        "deepEquals": {
+            "body": {"items": [1, 2, 3]}
+        }
+    })]);
+
+    let empty_headers = HashMap::new();
+
+    // Exact array match
+    assert!(stub_matches(
+        &predicates,
+        "POST",
+        "/test",
+        None,
+        &empty_headers,
+        Some(r#"{"items": [1, 2, 3]}"#),
+        None,
+        None,
+        None
+    ));
+
+    // Different length array
+    assert!(!stub_matches(
+        &predicates,
+        "POST",
+        "/test",
+        None,
+        &empty_headers,
+        Some(r#"{"items": [1, 2, 3, 4]}"#),
+        None,
+        None,
+        None
+    ));
+
+    // Different values
+    assert!(!stub_matches(
+        &predicates,
+        "POST",
+        "/test",
+        None,
+        &empty_headers,
+        Some(r#"{"items": [1, 2, 99]}"#),
+        None,
+        None,
+        None
+    ));
+}
