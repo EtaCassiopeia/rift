@@ -29,7 +29,6 @@ pub use store::RecordingStore;
 pub use stub_generator::generate_stub;
 pub use types::{RecordedResponse, RequestSignature};
 
-use std::collections::HashMap;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 /// Get current unix timestamp in seconds
@@ -45,7 +44,7 @@ fn unix_timestamp() -> u64 {
 // Public API for future use (higher-level recording helper)
 pub fn record_with_timing<F, T>(store: &RecordingStore, signature: RequestSignature, f: F) -> T
 where
-    F: FnOnce() -> (T, u16, HashMap<String, String>, Vec<u8>),
+    F: FnOnce() -> (T, u16, Vec<(String, String)>, Vec<u8>),
 {
     let start = Instant::now();
     let (result, status, headers, body) = f();

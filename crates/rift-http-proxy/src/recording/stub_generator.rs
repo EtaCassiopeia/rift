@@ -57,7 +57,20 @@ pub fn generate_stub(
         }
     }
 
-    // Build response - preserve binary bodies via base64 encoding
+    // Build response - convert Vec headers to HashMap for Mountebank JSON format,
+    // comma-joining multi-valued headers per HTTP spec.
+    let mut headers_map: HashMap<String, String> = HashMap::new();
+    for (k, v) in &response.headers {
+        headers_map
+            .entry(k.clone())
+            .and_modify(|existing| {
+                existing.push_str(", ");
+                existing.push_str(v);
+            })
+            .or_insert_with(|| v.clone());
+    }
+
+    // Preserve binary bodies via base64 encoding
     let (body_value, mode) = match std::str::from_utf8(&response.body) {
         Ok(text) => (serde_json::json!(text), "text"),
         Err(_) => {
@@ -69,7 +82,7 @@ pub fn generate_stub(
 
     let mut response_obj = serde_json::json!({
         "statusCode": response.status,
-        "headers": response.headers,
+        "headers": headers_map,
         "body": body_value,
     });
 
@@ -98,7 +111,7 @@ mod tests {
     fn make_response() -> RecordedResponse {
         RecordedResponse {
             status: 200,
-            headers: HashMap::new(),
+            headers: Vec::new(),
             body: b"OK".to_vec(),
             latency_ms: None,
             timestamp_secs: 0,
