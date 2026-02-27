@@ -283,8 +283,9 @@ impl Imposter {
                 for pair in body_str.split('&').filter(|s| !s.is_empty()) {
                     let mut parts = pair.splitn(2, '=');
                     if let Some(raw_key) = parts.next() {
-                        let key =
-                            urlencoding::decode(raw_key).unwrap_or_default().into_owned();
+                        let key = urlencoding::decode(raw_key)
+                            .unwrap_or_default()
+                            .into_owned();
                         let value = parts
                             .next()
                             .map(|v| urlencoding::decode(v).unwrap_or_default().into_owned())
@@ -972,8 +973,7 @@ mod tests {
             "application/x-www-form-urlencoded".parse().unwrap(),
         );
 
-        let result =
-            Imposter::parse_form_data(&headers, Some("checkbox=A&checkbox=B&checkbox=C"));
+        let result = Imposter::parse_form_data(&headers, Some("checkbox=A&checkbox=B&checkbox=C"));
         let form = result.expect("Should parse form data");
         assert_eq!(
             form.get("checkbox").unwrap(),
