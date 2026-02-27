@@ -9,6 +9,12 @@ use std::fs;
 use std::path::Path;
 use tracing::{debug, info};
 
+/// Maximum number of recorded responses per signature (proxyAlways mode)
+const MAX_RECORDINGS_PER_SIGNATURE: usize = 1000;
+
+/// Maximum total number of unique request signatures to record
+const MAX_TOTAL_SIGNATURES: usize = 10_000;
+
 /// Recording store for proxy responses
 pub struct RecordingStore {
     /// Recorded responses by request signature
@@ -36,12 +42,33 @@ impl RecordingStore {
             ProxyMode::ProxyOnce => {
                 // Only record if not already recorded
                 let mut store = self.responses.write();
+                if store.len() >= MAX_TOTAL_SIGNATURES && !store.contains_key(&signature) {
+                    debug!(
+                        "Recording store full ({} signatures), dropping new recording",
+                        MAX_TOTAL_SIGNATURES
+                    );
+                    return;
+                }
                 store.entry(signature).or_insert_with(|| vec![response]);
             }
             ProxyMode::ProxyAlways => {
-                // Always record, append to list
                 let mut store = self.responses.write();
-                store.entry(signature).or_default().push(response);
+                if store.len() >= MAX_TOTAL_SIGNATURES && !store.contains_key(&signature) {
+                    debug!(
+                        "Recording store full ({} signatures), dropping new recording",
+                        MAX_TOTAL_SIGNATURES
+                    );
+                    return;
+                }
+                let recordings = store.entry(signature).or_default();
+                if recordings.len() >= MAX_RECORDINGS_PER_SIGNATURE {
+                    debug!(
+                        "Recording limit reached ({} per signature), dropping oldest",
+                        MAX_RECORDINGS_PER_SIGNATURE
+                    );
+                    recordings.remove(0);
+                }
+                recordings.push(response);
             }
             ProxyMode::ProxyTransparent => {
                 // Never record

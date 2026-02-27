@@ -25,6 +25,9 @@ use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 use tracing::{debug, error, info, warn};
 
+/// Maximum allowed proxy response body size (10 MB)
+const MAX_PROXY_RESPONSE_BODY_SIZE: usize = 10 * 1024 * 1024;
+
 /// Global HTTP client for proxy requests
 static HTTP_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
 
@@ -769,10 +772,32 @@ impl Imposter {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
             .collect();
+        // Check Content-Length before reading the full body to reject obviously oversized responses
+        if let Some(content_length) = response.content_length() {
+            if content_length as usize > MAX_PROXY_RESPONSE_BODY_SIZE {
+                anyhow::bail!(
+                    "Proxy response body from {} exceeds maximum size ({} > {} bytes)",
+                    target_url,
+                    content_length,
+                    MAX_PROXY_RESPONSE_BODY_SIZE
+                );
+            }
+        }
+
         let body_bytes = response
             .bytes()
             .await
             .with_context(|| format!("Failed to read response body from {}", target_url))?;
+
+        if body_bytes.len() > MAX_PROXY_RESPONSE_BODY_SIZE {
+            anyhow::bail!(
+                "Proxy response body from {} exceeds maximum size ({} > {} bytes)",
+                target_url,
+                body_bytes.len(),
+                MAX_PROXY_RESPONSE_BODY_SIZE
+            );
+        }
+
         let body_str = String::from_utf8_lossy(&body_bytes).to_string();
 
         // Record the response

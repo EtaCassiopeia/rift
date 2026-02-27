@@ -16,9 +16,12 @@ use crate::scripting::{execute_mountebank_inject, MountebankRequest};
 use crate::scripting::{FaultDecision, ScriptEngine, ScriptRequest};
 use base64::Engine;
 use bytes::Bytes;
-use http_body_util::{BodyExt, Full};
+use http_body_util::{BodyExt, Full, Limited};
 use hyper::body::Incoming;
 use hyper::{Request, Response, StatusCode};
+
+/// Maximum allowed request body size (10 MB)
+const MAX_REQUEST_BODY_SIZE: usize = 10 * 1024 * 1024;
 use rand::Rng;
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -61,8 +64,9 @@ pub async fn handle_imposter_request(
     let path = uri.path().to_string();
     let query_str = uri.query().unwrap_or("").to_string();
 
-    // Always collect request body - needed for recording, copy behaviors, and predicate matching
-    let body_string = match req.into_body().collect().await {
+    // Collect request body with size limit to prevent memory exhaustion
+    let limited_body = Limited::new(req.into_body(), MAX_REQUEST_BODY_SIZE);
+    let body_string = match limited_body.collect().await {
         Ok(collected) => {
             let bytes = collected.to_bytes();
             if bytes.is_empty() {
@@ -71,7 +75,16 @@ pub async fn handle_imposter_request(
                 Some(String::from_utf8_lossy(&bytes).to_string())
             }
         }
-        Err(_) => None,
+        Err(_) => {
+            return Ok(build_response_with_headers(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                [("x-rift-imposter", "true")],
+                format!(
+                    r#"{{"error": "Request body exceeds maximum size of {} bytes"}}"#,
+                    MAX_REQUEST_BODY_SIZE
+                ),
+            ));
+        }
     };
 
     // Build HeaderMap from captured headers for request context
