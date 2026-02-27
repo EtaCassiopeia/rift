@@ -25,7 +25,29 @@ pub fn error_response(status: u16, message: &str) -> Response<Full<Bytes>> {
         .status(status)
         .header("content-type", "application/json")
         .body(Full::new(Bytes::from(body)))
-        .unwrap()
+        .unwrap_or_else(|_| Response::new(Full::new(Bytes::from(r#"{"error": "internal"}"#))))
+}
+
+/// Build a `Request::Builder` pointing at the upstream, with headers copied
+/// (skipping `host`). Callers attach the body and send.
+fn build_upstream_request(
+    method: hyper::Method,
+    uri: &hyper::Uri,
+    headers: &hyper::HeaderMap,
+    upstream_uri: &str,
+) -> hyper::http::request::Builder {
+    let upstream_path = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
+    let full_uri = format!("{upstream_uri}{upstream_path}");
+
+    let mut builder = Request::builder().method(method).uri(full_uri);
+
+    for (key, value) in headers.iter() {
+        if key != "host" {
+            builder = builder.header(key, value);
+        }
+    }
+
+    builder
 }
 
 /// Forward a request with a pre-collected body.
@@ -37,22 +59,14 @@ pub async fn forward_request_with_body(
     body_bytes: Bytes,
     upstream_uri: &str,
 ) -> Response<Full<Bytes>> {
-    let upstream_path = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
-    let full_uri = format!("{upstream_uri}{upstream_path}");
+    let builder = build_upstream_request(method, &uri, &headers, upstream_uri);
 
-    debug!("Forwarding to: {}", full_uri);
+    debug!(
+        "Forwarding to: {}",
+        uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/")
+    );
 
-    // Create new request to upstream
-    let mut upstream_req = Request::builder().method(method).uri(full_uri);
-
-    // Copy headers (skip host)
-    for (key, value) in headers.iter() {
-        if key != "host" {
-            upstream_req = upstream_req.header(key, value);
-        }
-    }
-
-    let upstream_req = upstream_req
+    let upstream_req = builder
         .body(BoxBody::new(
             Full::new(body_bytes).map_err(|never: Infallible| match never {}),
         ))
@@ -89,24 +103,15 @@ pub async fn forward_request_streaming(
     let uri = req.uri().clone();
     let headers = req.headers().clone();
 
-    // Build upstream URI
-    let upstream_path = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
-    let full_uri = format!("{upstream_uri}{upstream_path}");
+    let builder = build_upstream_request(method, &uri, &headers, upstream_uri);
 
-    debug!("Forwarding (streaming) to: {}", full_uri);
-
-    // Create upstream request with streaming body (no collect!)
-    let mut upstream_req = Request::builder().method(method).uri(full_uri);
-
-    // Copy headers (skip host)
-    for (key, value) in headers.iter() {
-        if key != "host" {
-            upstream_req = upstream_req.header(key, value);
-        }
-    }
+    debug!(
+        "Forwarding (streaming) to: {}",
+        uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/")
+    );
 
     // Pass request body through directly without buffering
-    let upstream_req = upstream_req.body(BoxBody::new(req.into_body())).unwrap();
+    let upstream_req = builder.body(BoxBody::new(req.into_body())).unwrap();
 
     // Forward with streaming response
     match http_client.request(upstream_req).await {
@@ -230,10 +235,7 @@ pub async fn forward_with_recording(
         headers: recorded_headers,
         body: response_body_bytes.to_vec(),
         latency_ms: Some(latency_ms),
-        timestamp_secs: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs(),
+        timestamp_secs: crate::util::unix_timestamp(),
     };
 
     recording_store.record(signature, recorded_response.clone());

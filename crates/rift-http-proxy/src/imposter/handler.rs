@@ -178,12 +178,7 @@ pub async fn handle_imposter_request(
                     let mut response = Response::builder().status(status);
 
                     for (k, v) in &response_headers {
-                        // Skip hop-by-hop headers
-                        let k_lower = k.to_lowercase();
-                        if k_lower != "transfer-encoding"
-                            && k_lower != "connection"
-                            && k_lower != "keep-alive"
-                        {
+                        if !crate::util::is_hop_by_hop_header(k) {
                             response = response.header(k, v);
                         }
                     }

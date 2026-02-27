@@ -143,9 +143,9 @@ fn test_execute_stub() {
         scenario_name: None,
     };
 
-    let result = imposter.execute_stub(&StubState::new(stub));
+    let result = imposter.execute_stub_with_rift(&StubState::new(stub));
     assert!(result.is_some());
-    let (status, _headers, body, _behaviors, is_fault) = result.unwrap();
+    let (status, _headers, body, _behaviors, _rift_ext, _mode, is_fault) = result.unwrap();
     assert_eq!(status, 201);
     assert!(body.contains("created"));
     assert!(!is_fault);

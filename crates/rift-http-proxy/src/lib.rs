@@ -24,6 +24,9 @@ pub use extensions::rule_index;
 pub use extensions::stub_analysis;
 pub use extensions::template;
 
+// Shared utilities
+pub mod util;
+
 // Backends (pub for integration tests)
 pub mod backends;
 mod scripting;

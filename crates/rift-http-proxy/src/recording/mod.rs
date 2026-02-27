@@ -29,16 +29,7 @@ pub use store::RecordingStore;
 pub use stub_generator::generate_stub;
 pub use types::{RecordedResponse, RequestSignature};
 
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
-
-/// Get current unix timestamp in seconds
-// Used in tests and helpers
-fn unix_timestamp() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
+use std::time::Instant;
 
 /// Record a response with timing
 // Public API for future use (higher-level recording helper)
@@ -55,7 +46,7 @@ where
         headers,
         body,
         latency_ms: Some(latency_ms),
-        timestamp_secs: unix_timestamp(),
+        timestamp_secs: crate::util::unix_timestamp(),
     };
 
     store.record(signature, response);

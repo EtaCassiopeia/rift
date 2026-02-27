@@ -212,14 +212,7 @@ impl RecordingStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    fn unix_timestamp() -> u64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs()
-    }
+    use crate::util::unix_timestamp;
 
     #[test]
     fn test_proxy_once_records_first_only() {

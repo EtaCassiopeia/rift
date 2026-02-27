@@ -59,26 +59,12 @@ pub fn generate_stub(
 
     // Build response - convert Vec headers to HashMap for Mountebank JSON format,
     // comma-joining multi-valued headers per HTTP spec.
-    let mut headers_map: HashMap<String, String> = HashMap::new();
-    for (k, v) in &response.headers {
-        headers_map
-            .entry(k.clone())
-            .and_modify(|existing| {
-                existing.push_str(", ");
-                existing.push_str(v);
-            })
-            .or_insert_with(|| v.clone());
-    }
+    let headers_map = crate::util::merge_headers_to_map(&response.headers);
 
     // Preserve binary bodies via base64 encoding
-    let (body_value, mode) = match std::str::from_utf8(&response.body) {
-        Ok(text) => (serde_json::json!(text), "text"),
-        Err(_) => {
-            use base64::Engine;
-            let encoded = base64::engine::general_purpose::STANDARD.encode(&response.body);
-            (serde_json::json!(encoded), "binary")
-        }
-    };
+    let (body_value_opt, is_binary) = crate::util::encode_body_for_stub(&response.body);
+    let body_value = body_value_opt.unwrap_or_else(|| serde_json::json!(""));
+    let mode = if is_binary { "binary" } else { "text" };
 
     let mut response_obj = serde_json::json!({
         "statusCode": response.status,
