@@ -616,16 +616,27 @@ impl Imposter {
         debug!("Inserted generated stub at index {}", index);
     }
 
-    /// Insert or append a generated stub based on proxy mode
+    /// Insert or append a generated stub based on proxy mode.
+    ///
+    /// Instead of trusting a previously-obtained stub index (which may be stale
+    /// if concurrent requests modified the stub list), this method re-locates the
+    /// proxy stub under the write lock using `proxy_to` as identifier.
+    ///
     /// For proxyOnce: Insert new stub BEFORE the proxy stub (so it matches first next time)
     /// For proxyAlways: Append response to existing stub AFTER proxy stub, or insert new AFTER proxy
-    pub fn insert_or_append_proxy_stub(
-        &self,
-        stub: Stub,
-        proxy_stub_index: usize,
-        proxy_mode: &str,
-    ) {
+    pub fn insert_or_append_proxy_stub(&self, stub: Stub, proxy_to: &str, proxy_mode: &str) {
         let mut stubs = self.stubs.write();
+
+        // Re-locate the proxy stub under the write lock to avoid stale-index races.
+        let proxy_stub_index = stubs
+            .iter()
+            .position(|s| {
+                s.stub
+                    .responses
+                    .iter()
+                    .any(|r| matches!(r, StubResponse::Proxy { proxy } if proxy.to == proxy_to))
+            })
+            .unwrap_or(stubs.len());
 
         if proxy_mode == "proxyAlways" {
             // For proxyAlways, recorded stubs go AFTER the proxy stub
@@ -684,7 +695,6 @@ impl Imposter {
         uri: &hyper::Uri,
         headers: &HashMap<String, String>,
         body: Option<&str>,
-        stub_index: usize,
     ) -> anyhow::Result<(u16, HashMap<String, String>, String, Option<u64>)> {
         let client = get_http_client();
 
@@ -865,7 +875,7 @@ impl Imposter {
             } else {
                 &proxy_config.mode
             };
-            self.insert_or_append_proxy_stub(new_stub, stub_index, mode);
+            self.insert_or_append_proxy_stub(new_stub, &proxy_config.to, mode);
             debug!(
                 "Generated stub from proxy response for path {} (mode: {})",
                 uri.path(),
