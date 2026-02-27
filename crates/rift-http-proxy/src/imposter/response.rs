@@ -233,12 +233,16 @@ pub fn get_rift_script_config(response: &StubResponse) -> Option<RiftScriptConfi
     }
 }
 
-/// Create a stub from a recorded proxy response
+/// Create a stub from a recorded proxy response.
+///
+/// If the body is valid UTF-8, it is stored as text (JSON or string).
+/// If the body is not valid UTF-8 (binary content), it is base64-encoded
+/// and the stub uses `_mode: "binary"` so it can be replayed correctly.
 pub fn create_stub_from_proxy_response(
     predicates: Vec<serde_json::Value>,
     status: u16,
     headers: &HashMap<String, String>,
-    body: &str,
+    body: &[u8],
     latency_ms: Option<u64>,
     decorate_fn: Option<String>,
 ) -> super::types::Stub {
@@ -249,14 +253,28 @@ pub fn create_stub_from_proxy_response(
         k_lower != "transfer-encoding" && k_lower != "connection" && k_lower != "keep-alive"
     });
 
-    let body_value = if body.is_empty() {
-        None
+    let (body_value, mode) = if body.is_empty() {
+        (None, ResponseMode::Text)
     } else {
-        // Try to parse as JSON, otherwise store as string
-        if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(body) {
-            Some(json_val)
-        } else {
-            Some(serde_json::Value::String(body.to_string()))
+        match std::str::from_utf8(body) {
+            Ok(text) => {
+                // Valid UTF-8: try to parse as JSON, otherwise store as string
+                let val = if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(text) {
+                    json_val
+                } else {
+                    serde_json::Value::String(text.to_string())
+                };
+                (Some(val), ResponseMode::Text)
+            }
+            Err(_) => {
+                // Binary content: base64-encode and use binary mode
+                use base64::Engine;
+                let encoded = base64::engine::general_purpose::STANDARD.encode(body);
+                (
+                    Some(serde_json::Value::String(encoded)),
+                    ResponseMode::Binary,
+                )
+            }
         }
     };
 
@@ -264,7 +282,7 @@ pub fn create_stub_from_proxy_response(
         status_code: status,
         headers: response_headers,
         body: body_value,
-        mode: ResponseMode::Text, // Proxy responses are always text
+        mode,
     };
 
     // Build behaviors object if needed
