@@ -898,44 +898,27 @@ mod tests {
     }
 
     // =========================================================================
-    // Bug 1: Multi-valued query parameters lost
-    // Mountebank preserves all values for ?key=first&key=second
-    // Current code: HashMap overwrites, keeping only one value
+    // Multi-valued query parameters (Issue #83 - fixed)
+    // Multiple values for the same key are comma-joined: ?key=first&key=second → "first,second"
     // =========================================================================
 
     #[test]
-    fn test_parse_query_string_multi_valued_first_value_preserved() {
-        // In Mountebank, ?key=first&key=second results in key having value ["first","second"]
-        // In Rift, HashMap<String, String> can only hold one value per key.
-        // This test documents the bug: the first value "first" should be accessible
-        // but depending on iteration order, it may be overwritten by "second".
+    fn test_parse_query_string_multi_valued_comma_joined() {
         let result = parse_query_string("key=first&key=second");
 
-        // The bug: HashMap can only store one value. We can't verify WHICH value
-        // survives, but we know one is lost.
+        assert_eq!(result.len(), 1);
         assert_eq!(
-            result.len(),
-            1,
-            "HashMap collapses multi-valued params to 1 entry"
-        );
-
-        // For Mountebank compatibility, we'd need both values accessible.
-        // This test should eventually assert that both "first" and "second" are available.
-        let value = result.get("key").unwrap();
-        // The value will be either "first" or "second" - either way, one is lost
-        assert!(
-            value == "first" || value == "second",
-            "Got unexpected value: {value}"
+            result.get("key"),
+            Some(&"first,second".to_string()),
+            "Multi-valued query params should be comma-joined"
         );
     }
 
     #[test]
     fn test_equals_query_multi_valued_param() {
-        // Mountebank: equals { query: { key: "first" } } should match ?key=first&key=second
-        // because "first" is one of the values for "key"
-        // Rift bug: only one value is kept, so if "second" overwrites "first", this fails
+        // equals { query: { key: "first,second" } } should match ?key=first&key=second
         let fields: HashMap<String, serde_json::Value> =
-            [("query".to_string(), json!({"key": "first"}))]
+            [("query".to_string(), json!({"key": "first,second"}))]
                 .into_iter()
                 .collect();
 
@@ -953,58 +936,42 @@ mod tests {
             None,
         );
 
-        // Bug: This may fail if "second" overwrites "first" in the HashMap
-        // Mountebank would match because "first" is among the values
-        // We document this as a known failure for the bug report
-        if !result {
-            eprintln!(
-                "BUG CONFIRMED: Multi-valued query param 'first' lost when 'second' overwrites"
-            );
-        }
-        // Note: we don't assert true/false here because behavior depends on HashMap ordering
-        // The real fix would use HashMap<String, Vec<String>>
+        assert!(
+            result,
+            "equals should match comma-joined multi-valued query params"
+        );
     }
 
     // =========================================================================
-    // Bug 2: Query parameters without '=' sign filtered out
+    // Bare query parameters without '=' sign (Issue #84 - fixed)
     // Mountebank treats ?flag as flag=""
-    // Current code: split_once('=') returns None, filter_map drops it
     // =========================================================================
 
     #[test]
     fn test_parse_query_string_bare_param() {
-        // Mountebank: ?flag is treated as flag=""
-        // Current code: split_once('=') returns None for "flag", so it's dropped
         let result = parse_query_string("flag");
 
-        // BUG: bare param "flag" is dropped entirely
-        assert!(
-            !result.contains_key("flag"),
-            "BUG CONFIRMED: bare query param 'flag' should be present with empty value, \
-             but it was dropped because split_once('=') returned None"
+        assert_eq!(
+            result.get("flag"),
+            Some(&String::new()),
+            "Bare query param 'flag' should be present with empty value"
         );
-        // After fix, this should be:
-        // assert_eq!(result.get("flag"), Some(&String::new()));
     }
 
     #[test]
     fn test_parse_query_string_mixed_bare_and_valued() {
-        // ?a=1&flag&b=2 - Mountebank keeps all three
         let result = parse_query_string("a=1&flag&b=2");
 
         assert_eq!(result.get("a"), Some(&"1".to_string()));
         assert_eq!(result.get("b"), Some(&"2".to_string()));
-        // BUG: "flag" is missing
         assert!(
-            !result.contains_key("flag"),
-            "BUG CONFIRMED: bare param 'flag' dropped from mixed query string"
+            result.contains_key("flag"),
+            "Bare param 'flag' should be present in mixed query string"
         );
     }
 
     #[test]
     fn test_exists_query_bare_param() {
-        // exists: { query: { flag: true } } should match ?flag
-        // But parse_query_string drops "flag", so exists check returns false
         let fields: HashMap<String, serde_json::Value> =
             [("query".to_string(), json!({"flag": true}))]
                 .into_iter()
@@ -1024,27 +991,19 @@ mod tests {
             None,
         );
 
-        // BUG: Returns false because parse_query_string drops "flag"
         assert!(
-            !result,
-            "BUG CONFIRMED: exists predicate fails for bare query param '?flag'"
+            result,
+            "exists predicate should match bare query param '?flag'"
         );
     }
 
     // =========================================================================
-    // Bug 3: deepEquals body comparison is string-based, not structural
-    // Mountebank does recursive structural comparison for JSON bodies
-    // Current code: serializes to string and does string comparison
+    // deepEquals body structural comparison (Issue #85 - fixed)
+    // JSON objects are compared structurally, not by string representation
     // =========================================================================
 
     #[test]
     fn test_deep_equals_body_json_key_order_independence() {
-        // Mountebank: deepEquals { body: { "a": 1, "b": 2 } } should match body {"b":2,"a":1}
-        // because JSON objects are unordered. Mountebank does structural comparison.
-        // Rift bug: serializes expected to string via serde_json (which uses BTreeMap,
-        // producing alphabetically-sorted keys like '{"a":1,"b":2}'), then does string
-        // comparison against the actual body. If the body has non-alphabetical key order,
-        // the string comparison fails.
         let fields: HashMap<String, serde_json::Value> =
             [("body".to_string(), json!({"a": 1, "b": 2}))]
                 .into_iter()
@@ -1052,9 +1011,6 @@ mod tests {
 
         let pred = make_predicate(PredicateOperation::DeepEquals(fields));
 
-        // Body with keys in non-alphabetical order (as a real HTTP client might send)
-        // serde_json serializes the predicate value to '{"a":1,"b":2}' (BTreeMap sorts keys)
-        // but the actual body has keys in different order
         let body = r#"{"b":2,"a":1}"#;
 
         let result = predicate_matches(
@@ -1069,13 +1025,10 @@ mod tests {
             None,
         );
 
-        // BUG: expected.to_string() produces '{"a":1,"b":2}' which doesn't match '{"b":2,"a":1}'
         assert!(
-            !result,
-            "BUG CONFIRMED: deepEquals body comparison is string-based, not structural. \
-             JSON key order difference causes mismatch."
+            result,
+            "deepEquals should match JSON bodies regardless of key order"
         );
-        // After fix, this should assert true (structural equality)
     }
 
     #[test]
@@ -1104,8 +1057,7 @@ mod tests {
     }
 
     // =========================================================================
-    // Bug 4: keyCaseSensitive not passed to check_exists_predicate
-    // The exists predicate ignores the keyCaseSensitive parameter entirely
+    // keyCaseSensitive in exists predicate (Issue #86 - fixed)
     // =========================================================================
 
     #[test]
@@ -1131,22 +1083,18 @@ mod tests {
             None,
         );
 
-        // BUG: check_exists_predicate uses query.contains_key(key) which is exact match
-        // "Key" != "key", so this returns false even though keyCaseSensitive defaults to false
         assert!(
-            !result,
-            "BUG CONFIRMED: exists predicate query check ignores keyCaseSensitive, \
-             uses exact key match instead of case-insensitive"
+            result,
+            "exists with keyCaseSensitive=false should match case-insensitively"
         );
     }
 
     #[test]
     fn test_exists_header_key_case_sensitive_true() {
-        // With keyCaseSensitive: true, exists { headers: { "content-type": true } }
-        // should NOT match header "Content-Type" because keys must match exactly
-        // But currently, check_exists_predicate ALWAYS uses eq_ignore_ascii_case for headers
+        // With keyCaseSensitive: true, exists { headers: { "Content-Type": true } }
+        // should match header "Content-Type" (exact case match)
         let fields: HashMap<String, serde_json::Value> =
-            [("headers".to_string(), json!({"content-type": true}))]
+            [("headers".to_string(), json!({"Content-Type": true}))]
                 .into_iter()
                 .collect();
 
@@ -1157,28 +1105,23 @@ mod tests {
 
         let pred = make_predicate_with_params(PredicateOperation::Exists(fields), params);
 
-        // Headers have uppercase "Content-Type" key (but hyper lowercases, so use lowercase)
         let mut headers = HashMap::new();
-        headers.insert("content-type".to_string(), "application/json".to_string());
+        headers.insert("Content-Type".to_string(), "application/json".to_string());
 
         let result = predicate_matches(
             &pred, "GET", "/test", None, &headers, None, None, None, None,
         );
 
-        // This matches because both are lowercase, but the point is keyCaseSensitive
-        // is completely ignored - check_exists_predicate doesn't receive it
         assert!(
             result,
-            "This case happens to work because both keys are lowercase, \
-             but keyCaseSensitive is not actually being respected"
+            "exists with keyCaseSensitive=true should match exact case header key"
         );
     }
 
     #[test]
     fn test_exists_form_key_case_sensitive() {
-        // exists { form: { Name: true } } with keyCaseSensitive: false
+        // exists { form: { Name: true } } with keyCaseSensitive: false (default)
         // should match form with key "name"
-        // BUG: check_exists_predicate uses actual_form.contains_key(key) - exact match
         let fields: HashMap<String, serde_json::Value> =
             [("form".to_string(), json!({"Name": true}))]
                 .into_iter()
@@ -1201,24 +1144,21 @@ mod tests {
             Some(&form),
         );
 
-        // BUG: "Name" != "name", returns false despite keyCaseSensitive defaulting to false
         assert!(
-            !result,
-            "BUG CONFIRMED: exists predicate form check ignores keyCaseSensitive"
+            result,
+            "exists with keyCaseSensitive=false should match form key case-insensitively"
         );
     }
 
     // =========================================================================
-    // Bug 5: Header keys always lowercase breaks keyCaseSensitive=true
-    // hyper lowercases all header keys, so keyCaseSensitive=true with
-    // Title-Case headers in predicates will never match
+    // Header keys Title-Case normalization (Issue #87 - fixed)
+    // Headers are now Title-Case (Content-Type, not content-type)
     // =========================================================================
 
     #[test]
     fn test_header_key_case_sensitive_true_with_title_case() {
         // With keyCaseSensitive: true, equals { headers: { "Content-Type": "application/json" } }
-        // should match header "Content-Type: application/json"
-        // But hyper lowercases keys to "content-type", so exact match fails
+        // should match because headers are now Title-Case after fix #87
         let fields: HashMap<String, serde_json::Value> = [(
             "headers".to_string(),
             json!({"Content-Type": "application/json"}),
@@ -1234,27 +1174,23 @@ mod tests {
 
         let pred = make_predicate_with_params(PredicateOperation::Equals(fields), params);
 
-        // Simulate hyper header map - keys are always lowercase
+        // After fix #87, header_map_to_hashmap() produces Title-Case keys
         let mut headers = HashMap::new();
-        headers.insert("content-type".to_string(), "application/json".to_string());
+        headers.insert("Content-Type".to_string(), "application/json".to_string());
 
         let result = predicate_matches(
             &pred, "GET", "/test", None, &headers, None, None, None, None,
         );
 
-        // BUG: "Content-Type" != "content-type" when keyCaseSensitive=true
-        // The predicate specifies Title-Case but hyper always lowercases
         assert!(
-            !result,
-            "BUG CONFIRMED: keyCaseSensitive=true with Title-Case header key never matches \
-             because hyper lowercases all header keys to 'content-type'"
+            result,
+            "keyCaseSensitive=true with Title-Case header key should match"
         );
     }
 
     #[test]
     fn test_header_key_case_sensitive_false_default() {
         // Default: keyCaseSensitive=false, header key matching should be case-insensitive
-        // This should work correctly (not a bug, just verifying the default works)
         let fields: HashMap<String, serde_json::Value> = [(
             "headers".to_string(),
             json!({"Content-Type": "application/json"}),
@@ -1264,6 +1200,7 @@ mod tests {
 
         let pred = make_predicate(PredicateOperation::Equals(fields));
 
+        // Even with lowercase keys, keyCaseSensitive=false means case-insensitive matching
         let mut headers = HashMap::new();
         headers.insert("content-type".to_string(), "application/json".to_string());
 

@@ -126,6 +126,39 @@ jobs:
       - name: Build
         run: cargo build --workspace --all-features --release
 
+  redis-integration:
+    name: Redis Integration Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install LuaJIT
+        run: sudo apt-get update && sudo apt-get install -y libluajit-5.1-dev
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo index
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo build
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run Redis integration tests
+        run: cargo test --package rift-http-proxy --test redis_backend --all-features
+
   compatibility-test:
     name: Compatibility Tests
     runs-on: ubuntu-latest

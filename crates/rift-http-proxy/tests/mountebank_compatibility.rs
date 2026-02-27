@@ -1,8 +1,7 @@
 //! Mountebank compatibility integration tests.
 //!
 //! These tests verify that Rift behaves compatibly with Mountebank's HTTP imposter API.
-//! Tests are organized by feature category and include tests for known bugs
-//! (marked with `#[should_panic]` or documented assertions).
+//! Tests are organized by feature category and require a running Rift server.
 
 use reqwest::Client;
 use serde_json::json;
@@ -429,10 +428,9 @@ async fn test_except_regex_exclusion() {
 // 2. deepEquals Semantics
 // =============================================================================
 
-/// Bug 3: deepEquals body comparison is string-based, not structural
-/// Mountebank does recursive structural comparison for JSON bodies
+/// deepEquals body does structural comparison (Issue #85 - fixed)
 #[tokio::test]
-#[ignore = "requires running server - known bug: deepEquals body is string-based"]
+#[ignore = "requires running server"]
 async fn test_deep_equals_body_json_key_order() {
     let (admin_port, imposter_port) = get_test_ports();
     let mut server = start_rift_server(admin_port).await;
@@ -451,7 +449,7 @@ async fn test_deep_equals_body_json_key_order() {
 
     create_imposter(&client, admin_port, config).await;
 
-    // Body with keys in different order - Mountebank matches, Rift may not (Bug 3)
+    // Body with keys in different order should match structurally
     let resp = client
         .post(format!("{ADMIN_URL}:{imposter_port}/"))
         .header("content-type", "application/json")
@@ -460,11 +458,10 @@ async fn test_deep_equals_body_json_key_order() {
         .await
         .unwrap();
 
-    // BUG 3: This may fail because deepEquals does string comparison, not structural
     assert_eq!(
         resp.status(),
         200,
-        "Bug 3: deepEquals body should match regardless of JSON key order"
+        "deepEquals body should match regardless of JSON key order"
     );
 
     clear_imposters(&client, admin_port).await;
@@ -559,27 +556,26 @@ async fn test_deep_equals_headers_extra() {
 // 3. Query String Edge Cases
 // =============================================================================
 
-/// Bug 1: Multi-valued query parameters lost
-/// Mountebank preserves all values as array
+/// Multi-valued query parameters are comma-joined (Issue #83 - fixed)
 #[tokio::test]
-#[ignore = "requires running server - known bug: multi-valued query params"]
+#[ignore = "requires running server"]
 async fn test_query_multi_valued_params() {
     let (admin_port, imposter_port) = get_test_ports();
     let mut server = start_rift_server(admin_port).await;
     let client = Client::builder().timeout(TEST_TIMEOUT).build().unwrap();
 
+    // Multi-valued params are comma-joined: ?key=first&key=second → "first,second"
     let config = json!({
         "port": imposter_port,
         "protocol": "http",
         "stubs": [{
-            "predicates": [{"equals": {"query": {"key": "first"}}}],
-            "responses": [{"is": {"statusCode": 200, "body": "found first"}}]
+            "predicates": [{"equals": {"query": {"key": "first,second"}}}],
+            "responses": [{"is": {"statusCode": 200, "body": "found both"}}]
         }]
     });
 
     create_imposter(&client, admin_port, config).await;
 
-    // Bug 1: ?key=first&key=second - "second" may overwrite "first" in HashMap
     let resp = client
         .get(format!(
             "{ADMIN_URL}:{imposter_port}/search?key=first&key=second"
@@ -588,22 +584,19 @@ async fn test_query_multi_valued_params() {
         .await
         .unwrap();
 
-    // In Mountebank, this matches because "first" is one of the values
-    // In Rift, HashMap keeps only one value, so this may fail
     assert_eq!(
         resp.status(),
         200,
-        "Bug 1: Multi-valued query param should preserve all values"
+        "Multi-valued query params should be comma-joined and matchable"
     );
 
     clear_imposters(&client, admin_port).await;
     server.kill().await.ok();
 }
 
-/// Bug 2: Query parameters without '=' sign filtered out
-/// Mountebank treats ?flag as flag=""
+/// Bare query params without '=' are treated as key="" (Issue #84 - fixed)
 #[tokio::test]
-#[ignore = "requires running server - known bug: bare query params"]
+#[ignore = "requires running server"]
 async fn test_query_bare_param_no_equals() {
     let (admin_port, imposter_port) = get_test_ports();
     let mut server = start_rift_server(admin_port).await;
@@ -620,7 +613,6 @@ async fn test_query_bare_param_no_equals() {
 
     create_imposter(&client, admin_port, config).await;
 
-    // Bug 2: ?flag (no = sign) should be treated as flag=""
     let resp = client
         .get(format!("{ADMIN_URL}:{imposter_port}/search?flag"))
         .send()
@@ -630,7 +622,7 @@ async fn test_query_bare_param_no_equals() {
     assert_eq!(
         resp.status(),
         200,
-        "Bug 2: Bare query param '?flag' should be treated as flag='' and exist"
+        "Bare query param '?flag' should be treated as flag='' and exist"
     );
 
     clear_imposters(&client, admin_port).await;
@@ -638,7 +630,7 @@ async fn test_query_bare_param_no_equals() {
 }
 
 #[tokio::test]
-#[ignore = "requires running server - known bug: bare query params"]
+#[ignore = "requires running server"]
 async fn test_query_mixed_bare_and_valued() {
     let (admin_port, imposter_port) = get_test_ports();
     let mut server = start_rift_server(admin_port).await;
@@ -743,9 +735,9 @@ async fn test_query_empty_string() {
 // 4. Header Edge Cases
 // =============================================================================
 
-/// Bug 5: Header keys always lowercase breaks keyCaseSensitive=true
+/// Header keys are Title-Case for keyCaseSensitive matching (Issue #87 - fixed)
 #[tokio::test]
-#[ignore = "requires running server - known bug: header keys always lowercase"]
+#[ignore = "requires running server"]
 async fn test_header_key_case_sensitive_true() {
     let (admin_port, imposter_port) = get_test_ports();
     let mut server = start_rift_server(admin_port).await;
@@ -765,8 +757,6 @@ async fn test_header_key_case_sensitive_true() {
 
     create_imposter(&client, admin_port, config).await;
 
-    // Bug 5: hyper lowercases headers to "content-type", but predicate has "Content-Type"
-    // With keyCaseSensitive=true, exact match fails
     let resp = client
         .get(format!("{ADMIN_URL}:{imposter_port}/test"))
         .header("Content-Type", "application/json")
@@ -777,8 +767,7 @@ async fn test_header_key_case_sensitive_true() {
     assert_eq!(
         resp.status(),
         200,
-        "Bug 5: keyCaseSensitive=true with Title-Case header should match, \
-         but fails because hyper lowercases all keys"
+        "keyCaseSensitive=true with Title-Case header should match"
     );
 
     clear_imposters(&client, admin_port).await;
@@ -952,9 +941,9 @@ async fn test_exists_header() {
     server.kill().await.ok();
 }
 
-/// Bug 4: keyCaseSensitive not passed to check_exists_predicate
+/// exists predicate respects keyCaseSensitive (Issue #86 - fixed)
 #[tokio::test]
-#[ignore = "requires running server - known bug: exists ignores keyCaseSensitive"]
+#[ignore = "requires running server"]
 async fn test_exists_key_case_sensitive() {
     let (admin_port, imposter_port) = get_test_ports();
     let mut server = start_rift_server(admin_port).await;
@@ -974,8 +963,7 @@ async fn test_exists_key_case_sensitive() {
 
     create_imposter(&client, admin_port, config).await;
 
-    // Bug 4: keyCaseSensitive=false, predicate has "Token", query has "token"
-    // Should match case-insensitively, but check_exists_predicate uses exact match
+    // keyCaseSensitive=false: predicate "Token" should match query "token"
     let resp = client
         .get(format!("{ADMIN_URL}:{imposter_port}/test?token=abc"))
         .send()
@@ -985,7 +973,7 @@ async fn test_exists_key_case_sensitive() {
     assert_eq!(
         resp.status(),
         200,
-        "Bug 4: exists predicate should respect keyCaseSensitive=false for query keys"
+        "exists predicate should respect keyCaseSensitive=false for query keys"
     );
 
     clear_imposters(&client, admin_port).await;
