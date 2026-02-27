@@ -848,18 +848,22 @@ where
 /// Parse query string into HashMap (public helper)
 /// URL-decodes both keys and values to properly handle encoded characters.
 /// Bare params without `=` (e.g. `?flag`) are treated as key with empty value.
+/// Duplicate keys are joined with commas (Mountebank `stringify` behavior).
 pub fn parse_query_string(query: &str) -> HashMap<String, String> {
-    query
-        .split('&')
-        .filter(|s| !s.is_empty())
-        .map(|pair| {
-            let (key, value) = match pair.split_once('=') {
-                Some((k, v)) => (k, v),
-                None => (pair, ""),
-            };
-            let decoded_key = urlencoding::decode(key).unwrap_or_default().into_owned();
-            let decoded_value = urlencoding::decode(value).unwrap_or_default().into_owned();
-            (decoded_key, decoded_value)
-        })
-        .collect()
+    let mut map = HashMap::new();
+    for pair in query.split('&').filter(|s| !s.is_empty()) {
+        let (key, value) = match pair.split_once('=') {
+            Some((k, v)) => (k, v),
+            None => (pair, ""),
+        };
+        let decoded_key = urlencoding::decode(key).unwrap_or_default().into_owned();
+        let decoded_value = urlencoding::decode(value).unwrap_or_default().into_owned();
+        map.entry(decoded_key)
+            .and_modify(|existing: &mut String| {
+                existing.push(',');
+                existing.push_str(&decoded_value);
+            })
+            .or_insert(decoded_value);
+    }
+    map
 }
