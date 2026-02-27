@@ -567,10 +567,11 @@ impl Imposter {
                 serde_json::Value::Object(pred_values),
             );
 
-            // Add caseSensitive if not default
-            if !case_sensitive {
-                predicate.insert("caseSensitive".to_string(), serde_json::Value::Bool(false));
-            }
+            // Always write caseSensitive so the matcher sees the generator's intent
+            predicate.insert(
+                "caseSensitive".to_string(),
+                serde_json::Value::Bool(case_sensitive),
+            );
 
             predicates.push(serde_json::Value::Object(predicate));
         }
@@ -937,20 +938,10 @@ mod tests {
         Imposter::new(config)
     }
 
-    // =========================================================================
-    // Bug H: caseSensitive default mismatch between generator and matcher
-    // The predicate generator defaults caseSensitive to true (core.rs line 482)
-    // and only writes it to the predicate JSON when false (line 571).
-    // But the predicate matcher defaults caseSensitive to false when absent
-    // (predicates.rs line 69). This means generated predicates are evaluated
-    // case-insensitively when they should be case-sensitive.
-    // =========================================================================
-
+    // Fix #103: caseSensitive is now always written to generated predicate JSON,
+    // so the matcher sees the generator's intended value.
     #[test]
-    fn test_generator_case_sensitive_default_mismatch() {
-        // A predicateGenerator with default caseSensitive (true) generates a
-        // predicate without a caseSensitive field. When the matcher evaluates
-        // it, it defaults to false — the opposite of what was intended.
+    fn test_generator_always_writes_case_sensitive() {
         let imposter = make_test_imposter();
 
         let generators = vec![json!({
@@ -970,30 +961,21 @@ mod tests {
         assert_eq!(predicates.len(), 1);
         let pred_json = &predicates[0];
 
-        // The generator defaults caseSensitive to true, but since true is the
-        // "default", it doesn't write the field to the predicate JSON.
-        assert!(
-            pred_json.get("caseSensitive").is_none(),
-            "Generator should not write caseSensitive when it's the 'default' (true)"
+        // caseSensitive should now always be written
+        assert_eq!(
+            pred_json.get("caseSensitive"),
+            Some(&serde_json::Value::Bool(true)),
+            "Generator should always write caseSensitive to the predicate JSON"
         );
 
-        // Now deserialize as a Predicate and check what the matcher sees
+        // Deserialize and verify the matcher sees the correct value
         let pred: crate::imposter::types::Predicate = serde_json::from_value(pred_json.clone())
             .expect("Generated predicate should deserialize");
 
-        // BUG: The matcher defaults caseSensitive to false when absent.
-        // Generator intended true, matcher sees false.
         assert_eq!(
-            pred.parameters.case_sensitive, None,
-            "caseSensitive should be None (absent from JSON)"
-        );
-        // When None, matcher uses unwrap_or(false) — so case-INSENSITIVE matching
-        let effective_case_sensitive = pred.parameters.case_sensitive.unwrap_or(false);
-        assert!(
-            !effective_case_sensitive,
-            "BUG(H): Generator defaults caseSensitive=true but doesn't write it; \
-             matcher defaults to false when absent. Generated predicates intended to be \
-             case-sensitive are evaluated case-insensitively."
+            pred.parameters.case_sensitive,
+            Some(true),
+            "Matcher should see caseSensitive=true from the generated predicate"
         );
     }
 
