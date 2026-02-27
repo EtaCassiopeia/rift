@@ -354,10 +354,16 @@ impl Imposter {
     }
 
     /// Convert hyper HeaderMap to HashMap<String, String>
-    fn header_map_to_hashmap(headers: &hyper::HeaderMap) -> HashMap<String, String> {
+    /// Uses Title-Case for header keys to match Mountebank's convention.
+    pub(crate) fn header_map_to_hashmap(headers: &hyper::HeaderMap) -> HashMap<String, String> {
         headers
             .iter()
-            .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
+            .map(|(k, v)| {
+                (
+                    crate::behaviors::header_to_title_case(k.as_str()),
+                    v.to_str().unwrap_or("").to_string(),
+                )
+            })
             .collect()
     }
 
