@@ -497,14 +497,13 @@ fn check_predicate_fields_regex(
     form: Option<&HashMap<String, String>>,
     key_case_sensitive: bool,
 ) -> bool {
-    let build_regex = |pattern: &str| -> Option<regex::Regex> {
+    let build_regex = |pattern: &str| -> Result<regex::Regex, regex::Error> {
         if case_sensitive {
-            regex::Regex::new(pattern).ok()
+            regex::Regex::new(pattern)
         } else {
             regex::RegexBuilder::new(pattern)
                 .case_insensitive(true)
                 .build()
-                .ok()
         }
     };
 
@@ -519,50 +518,65 @@ fn check_predicate_fields_regex(
 
     // Check method
     if let Some(pattern) = obj.get("method").and_then(|v| v.as_str()) {
-        if let Some(re) = build_regex(pattern) {
-            if !re.is_match(method) {
-                return false;
+        match build_regex(pattern) {
+            Ok(re) => {
+                if !re.is_match(method) {
+                    return false;
+                }
             }
+            Err(_) => return false,
         }
     }
 
     // Check path
     if let Some(pattern) = obj.get("path").and_then(|v| v.as_str()) {
-        if let Some(re) = build_regex(pattern) {
-            let actual = apply_except(path);
-            if !re.is_match(&actual) {
-                return false;
+        match build_regex(pattern) {
+            Ok(re) => {
+                let actual = apply_except(path);
+                if !re.is_match(&actual) {
+                    return false;
+                }
             }
+            Err(_) => return false,
         }
     }
 
     // Check body
     if let Some(pattern) = obj.get("body").and_then(|v| v.as_str()) {
-        if let Some(re) = build_regex(pattern) {
-            let actual = apply_except(body);
-            if !re.is_match(&actual) {
-                return false;
+        match build_regex(pattern) {
+            Ok(re) => {
+                let actual = apply_except(body);
+                if !re.is_match(&actual) {
+                    return false;
+                }
             }
+            Err(_) => return false,
         }
     }
 
     // Check requestFrom
     if let Some(pattern) = obj.get("requestFrom").and_then(|v| v.as_str()) {
-        if let Some(re) = build_regex(pattern) {
-            let actual = apply_except(request_from.unwrap_or(""));
-            if !re.is_match(&actual) {
-                return false;
+        match build_regex(pattern) {
+            Ok(re) => {
+                let actual = apply_except(request_from.unwrap_or(""));
+                if !re.is_match(&actual) {
+                    return false;
+                }
             }
+            Err(_) => return false,
         }
     }
 
     // Check ip
     if let Some(pattern) = obj.get("ip").and_then(|v| v.as_str()) {
-        if let Some(re) = build_regex(pattern) {
-            let actual = apply_except(client_ip.unwrap_or(""));
-            if !re.is_match(&actual) {
-                return false;
+        match build_regex(pattern) {
+            Ok(re) => {
+                let actual = apply_except(client_ip.unwrap_or(""));
+                if !re.is_match(&actual) {
+                    return false;
+                }
             }
+            Err(_) => return false,
         }
     }
 
@@ -574,21 +588,24 @@ fn check_predicate_fields_regex(
                 serde_json::Value::String(s) => s.as_str(),
                 _ => continue,
             };
-            if let Some(re) = build_regex(pattern) {
-                let actual = actual_form
-                    .iter()
-                    .find(|(k, _)| key_matches(key, k))
-                    .map(|(_, v)| v.as_str());
+            match build_regex(pattern) {
+                Ok(re) => {
+                    let actual = actual_form
+                        .iter()
+                        .find(|(k, _)| key_matches(key, k))
+                        .map(|(_, v)| v.as_str());
 
-                match actual {
-                    Some(actual) => {
-                        let actual = apply_except(actual);
-                        if !re.is_match(&actual) {
-                            return false;
+                    match actual {
+                        Some(actual) => {
+                            let actual = apply_except(actual);
+                            if !re.is_match(&actual) {
+                                return false;
+                            }
                         }
+                        None => return false,
                     }
-                    None => return false,
                 }
+                Err(_) => return false,
             }
         }
     }
@@ -600,21 +617,24 @@ fn check_predicate_fields_regex(
                 serde_json::Value::String(s) => s.as_str(),
                 _ => continue,
             };
-            if let Some(re) = build_regex(pattern) {
-                let actual = query
-                    .iter()
-                    .find(|(k, _)| key_matches(key, k))
-                    .map(|(_, v)| v.as_str());
+            match build_regex(pattern) {
+                Ok(re) => {
+                    let actual = query
+                        .iter()
+                        .find(|(k, _)| key_matches(key, k))
+                        .map(|(_, v)| v.as_str());
 
-                match actual {
-                    Some(actual) => {
-                        let actual = apply_except(actual);
-                        if !re.is_match(&actual) {
-                            return false;
+                    match actual {
+                        Some(actual) => {
+                            let actual = apply_except(actual);
+                            if !re.is_match(&actual) {
+                                return false;
+                            }
                         }
+                        None => return false,
                     }
-                    None => return false,
                 }
+                Err(_) => return false,
             }
         }
     }
@@ -626,21 +646,24 @@ fn check_predicate_fields_regex(
                 serde_json::Value::String(s) => s.as_str(),
                 _ => continue,
             };
-            if let Some(re) = build_regex(pattern) {
-                let actual = headers
-                    .iter()
-                    .find(|(k, _)| key_matches(key, k))
-                    .map(|(_, v)| v.as_str());
+            match build_regex(pattern) {
+                Ok(re) => {
+                    let actual = headers
+                        .iter()
+                        .find(|(k, _)| key_matches(key, k))
+                        .map(|(_, v)| v.as_str());
 
-                match actual {
-                    Some(actual) => {
-                        let actual = apply_except(actual);
-                        if !re.is_match(&actual) {
-                            return false;
+                    match actual {
+                        Some(actual) => {
+                            let actual = apply_except(actual);
+                            if !re.is_match(&actual) {
+                                return false;
+                            }
                         }
+                        None => return false,
                     }
-                    None => return false,
                 }
+                Err(_) => return false,
             }
         }
     }
@@ -1947,19 +1970,9 @@ mod tests {
         );
     }
 
-    // =========================================================================
-    // Bug K: Invalid regex patterns silently match everything
-    // build_regex uses .ok() to discard regex compilation errors. When the
-    // regex is invalid, build_regex returns None, the if-let body is skipped,
-    // and the field check passes successfully — meaning an invalid regex
-    // matches all requests instead of matching none.
-    // =========================================================================
-
+    // Fix #106: Invalid regex patterns now cause the predicate to not match
     #[test]
-    fn test_matches_invalid_regex_silently_matches_everything() {
-        // matches { path: "[unclosed" } — this is an invalid regex.
-        // CORRECT: An invalid regex should cause the predicate to NOT match.
-        // BUG: build_regex returns None, the check is skipped, predicate matches.
+    fn test_matches_invalid_regex_returns_false() {
         let fields: HashMap<String, serde_json::Value> = [("path".to_string(), json!("[unclosed"))]
             .into_iter()
             .collect();
@@ -1978,13 +1991,9 @@ mod tests {
             None,
         );
 
-        // BUG: Returns true because the invalid regex is silently discarded
-        // and the path check is skipped entirely.
-        // Expected: false (an invalid regex should fail to match)
         assert!(
-            result,
-            "BUG(K): Invalid regex pattern silently matches everything; \
-             expected false (invalid regex should not match), got true"
+            !result,
+            "Invalid regex pattern should cause the predicate to not match"
         );
     }
 }
