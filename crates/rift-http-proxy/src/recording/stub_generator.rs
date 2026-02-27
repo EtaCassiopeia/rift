@@ -83,3 +83,105 @@ pub fn generate_stub(
         "responses": [{ "is": response_obj }]
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::recording::types::{RecordedResponse, RequestSignature};
+
+    fn make_response() -> RecordedResponse {
+        RecordedResponse {
+            status: 200,
+            headers: HashMap::new(),
+            body: b"OK".to_vec(),
+            latency_ms: None,
+            timestamp_secs: 0,
+        }
+    }
+
+    // =========================================================================
+    // Bug B: Query params not URL-decoded in generated predicates
+    // generate_stub parses query params by splitting on '&' and '=' but does
+    // NOT URL-decode the values. The predicate matcher (parse_query_string)
+    // DOES URL-decode, so encoded values like "John%20Doe" will never match
+    // the decoded "John Doe" in the matcher.
+    // =========================================================================
+
+    #[test]
+    fn test_stub_generator_url_decodes_query_params() {
+        // Query: name=John%20Doe
+        // CORRECT: generated predicate should have "John Doe" (decoded)
+        // BUG: generated predicate has "John%20Doe" (raw/encoded)
+        let sig = RequestSignature::new("GET", "/search", Some("name=John%20Doe"), &[]);
+        let resp = make_response();
+
+        let stub = generate_stub(&sig, &resp, false, false, true, &[]);
+        let query_equals = &stub["predicates"][0]["and"]["query"]["equals"];
+
+        // BUG: Value is "John%20Doe" (not decoded) instead of "John Doe".
+        // When this predicate is later matched, parse_query_string decodes
+        // the incoming query to "John Doe", which won't match "John%20Doe".
+        assert_eq!(
+            query_equals["name"].as_str().unwrap(),
+            "John%20Doe",
+            "BUG(B): Query param values are not URL-decoded in generated predicates; \
+             expected 'John Doe' (decoded), got 'John%20Doe'"
+        );
+    }
+
+    // =========================================================================
+    // Bug C: Bare query params (`?flag`) silently dropped (same as #84)
+    // generate_stub uses `parts.next()?` for the value part, which returns
+    // None for bare params (no '=' sign), causing filter_map to drop them.
+    // This is the same bug pattern fixed for predicate matching in Issue #84.
+    // =========================================================================
+
+    #[test]
+    fn test_stub_generator_preserves_bare_query_params() {
+        // Query: flag&key=value
+        // CORRECT: generated predicate should have {"flag": "", "key": "value"}
+        // BUG: "flag" is silently dropped because parts.next()? returns None
+        let sig = RequestSignature::new("GET", "/test", Some("flag&key=value"), &[]);
+        let resp = make_response();
+
+        let stub = generate_stub(&sig, &resp, false, false, true, &[]);
+        let query_equals = &stub["predicates"][0]["and"]["query"]["equals"];
+
+        // BUG: "flag" is missing from the generated predicate.
+        // Only "key" is present because bare params without '=' are dropped.
+        assert!(
+            query_equals.get("flag").is_none(),
+            "BUG(C): Bare query params are silently dropped in stub generation; \
+             expected 'flag' to be present with empty value, but it is missing"
+        );
+    }
+
+    // =========================================================================
+    // Bug D: Multi-valued query params overwritten (same as #83)
+    // generate_stub uses .collect() into HashMap, which overwrites duplicate
+    // keys with the last value. This is the same bug pattern fixed for
+    // predicate matching in Issue #83.
+    // =========================================================================
+
+    #[test]
+    fn test_stub_generator_comma_joins_multi_valued_params() {
+        // Query: color=red&color=blue
+        // CORRECT: generated predicate should have {"color": "red,blue"} (comma-joined)
+        // BUG: .collect() overwrites to {"color": "blue"} (last wins)
+        let sig = RequestSignature::new("GET", "/test", Some("color=red&color=blue"), &[]);
+        let resp = make_response();
+
+        let stub = generate_stub(&sig, &resp, false, false, true, &[]);
+        let query_equals = &stub["predicates"][0]["and"]["query"]["equals"];
+
+        // BUG: Value is "blue" (last wins) instead of "red,blue" (comma-joined).
+        // The predicate matcher (parse_query_string) comma-joins duplicate keys,
+        // producing "red,blue", which won't match the generated "blue".
+        assert_eq!(
+            query_equals["color"].as_str().unwrap(),
+            "blue",
+            "BUG(D): Multi-valued query params are overwritten in stub generation; \
+             expected 'red,blue' (comma-joined like predicate matcher), got 'blue'"
+        );
+    }
+}

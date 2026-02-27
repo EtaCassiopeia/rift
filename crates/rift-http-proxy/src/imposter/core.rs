@@ -921,3 +921,40 @@ impl Imposter {
         self.enabled.load(Ordering::SeqCst)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // =========================================================================
+    // Bug A: Multi-valued form fields silently overwritten (same pattern as #83)
+    // parse_form_data uses .collect() on an iterator of (key, value) pairs,
+    // which means duplicate keys get silently overwritten by the last value.
+    // This is the same bug pattern fixed for query params in Issue #83.
+    // =========================================================================
+
+    #[test]
+    fn test_parse_form_data_multi_valued_fields() {
+        // Form body: checkbox=A&checkbox=B
+        // CORRECT: should produce {"checkbox": "A,B"} (comma-joined, like query params)
+        // BUG: .collect() at line ~298 overwrites to {"checkbox": "B"}
+        let mut headers = hyper::HeaderMap::new();
+        headers.insert(
+            "content-type",
+            "application/x-www-form-urlencoded".parse().unwrap(),
+        );
+
+        let body = "checkbox=A&checkbox=B";
+        let result = Imposter::parse_form_data(&headers, Some(body)).unwrap();
+
+        // BUG: The value is "B" (last wins) instead of "A,B" (comma-joined).
+        // Expected: "A,B" (multi-valued form fields should be comma-joined,
+        // matching the query param fix from Issue #83)
+        assert_eq!(
+            result.get("checkbox"),
+            Some(&"B".to_string()),
+            "BUG(A): Multi-valued form fields are overwritten by last value; \
+             expected 'A,B' (comma-joined like query params in #83), got 'B'"
+        );
+    }
+}

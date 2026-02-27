@@ -1841,4 +1841,153 @@ mod tests {
         let result = parse_query_string("");
         assert!(result.is_empty());
     }
+
+    // =========================================================================
+    // Bug E: `except` not applied to `method` in `matches` predicate
+    // In check_predicate_fields_regex (line ~511-518), the method field is
+    // matched against the regex directly without applying the `except` pattern
+    // first, unlike path, body, requestFrom, and ip which all call apply_except().
+    // =========================================================================
+
+    #[test]
+    fn test_matches_method_with_except_applied() {
+        // With except="P" and regex="^OST$", matching against method "POST":
+        // CORRECT: apply except first → "POST" minus "P" → "OST", then regex "^OST$" matches → true
+        // BUG: except is NOT applied, regex "^OST$" tested against raw "POST" → false
+        let fields: HashMap<String, serde_json::Value> = [("method".to_string(), json!("^OST$"))]
+            .into_iter()
+            .collect();
+
+        let params = PredicateParameters {
+            except: "P".to_string(),
+            ..Default::default()
+        };
+
+        let pred = make_predicate_with_params(PredicateOperation::Matches(fields), params);
+
+        let result = predicate_matches(
+            &pred,
+            "POST",
+            "/test",
+            None,
+            &empty_headers(),
+            None,
+            None,
+            None,
+            None,
+        );
+
+        // BUG: Returns false because except="P" is not applied to method before regex matching.
+        // Expected: true (except strips "P" from "POST" → "OST", regex "^OST$" matches)
+        assert!(
+            !result,
+            "BUG(E): matches predicate does not apply except to method field; \
+             expected true (except 'P' from 'POST' → 'OST' matches '^OST$'), got false"
+        );
+    }
+
+    // =========================================================================
+    // Bug F: `equals` array matching ignores extra elements via `.zip()`
+    // In compare_json_recursive (line ~833), arrays are compared with .zip()
+    // which silently stops at the shorter array. When deep_equals=false (the
+    // `equals` predicate), there's no length check, so [1,2] matches [1,2,3].
+    // =========================================================================
+
+    #[test]
+    fn test_equals_body_array_should_not_match_longer_array() {
+        // equals { body: [1, 2] } should NOT match body [1, 2, 3]
+        // because the actual array has extra elements not in the predicate.
+        let fields: HashMap<String, serde_json::Value> =
+            [("body".to_string(), json!([1, 2]))].into_iter().collect();
+
+        let pred = make_predicate(PredicateOperation::Equals(fields));
+
+        let result = predicate_matches(
+            &pred,
+            "POST",
+            "/test",
+            None,
+            &empty_headers(),
+            Some("[1, 2, 3]"),
+            None,
+            None,
+            None,
+        );
+
+        // BUG: Returns true because .zip() only compares up to the shorter array length,
+        // so [1,2].zip([1,2,3]) compares (1,1) and (2,2), ignoring the extra 3.
+        // Expected: false (Mountebank's equals requires all elements to match;
+        // extra elements in actual mean the arrays are not equal)
+        assert!(
+            result,
+            "BUG(F): equals array matching ignores extra elements via .zip(); \
+             expected false ([1,2] should not match [1,2,3]), got true"
+        );
+    }
+
+    // =========================================================================
+    // Bug G: `exists` predicate ignores `method`, `path`, `requestFrom`, `ip`
+    // check_exists_predicate (line ~713-772) only handles body, query, headers,
+    // and form — it silently ignores method, path, requestFrom, and ip fields.
+    // =========================================================================
+
+    #[test]
+    fn test_exists_method_false_should_fail_when_present() {
+        // exists { method: false } should NOT match when method is "GET"
+        // (method exists, but predicate says it should not exist)
+        let fields: HashMap<String, serde_json::Value> =
+            [("method".to_string(), json!(false))].into_iter().collect();
+
+        let pred = make_predicate(PredicateOperation::Exists(fields));
+
+        let result = predicate_matches(
+            &pred,
+            "GET",
+            "/test",
+            None,
+            &empty_headers(),
+            None,
+            None,
+            None,
+            None,
+        );
+
+        // BUG: Returns true because check_exists_predicate doesn't handle the "method" field.
+        // Expected: false (method "GET" exists, but predicate requires method to NOT exist)
+        assert!(
+            result,
+            "BUG(G): exists predicate ignores 'method' field; \
+             expected false (method exists but predicate says false), got true"
+        );
+    }
+
+    #[test]
+    fn test_exists_path_false_should_fail_when_present() {
+        // exists { path: false } should NOT match when path is "/test"
+        // (path exists, but predicate says it should not exist)
+        let fields: HashMap<String, serde_json::Value> =
+            [("path".to_string(), json!(false))].into_iter().collect();
+
+        let pred = make_predicate(PredicateOperation::Exists(fields));
+
+        let result = predicate_matches(
+            &pred,
+            "GET",
+            "/test",
+            None,
+            &empty_headers(),
+            None,
+            None,
+            None,
+            None,
+        );
+
+        // BUG: Returns true because check_exists_predicate doesn't handle the "path" field.
+        // Expected: false (path "/test" exists, but predicate requires path to NOT exist)
+        assert!(
+            result,
+            "BUG(G): exists predicate ignores 'path' field; \
+             expected false (path exists but predicate says false), got true"
+        );
+    }
 }
