@@ -520,7 +520,8 @@ fn check_predicate_fields_regex(
     if let Some(pattern) = obj.get("method").and_then(|v| v.as_str()) {
         match build_regex(pattern) {
             Ok(re) => {
-                if !re.is_match(method) {
+                let actual = apply_except(method);
+                if !re.is_match(&actual) {
                     return false;
                 }
             }
@@ -1994,6 +1995,40 @@ mod tests {
         assert!(
             !result,
             "Invalid regex pattern should cause the predicate to not match"
+        );
+    }
+
+    // Fix #99: except is now applied to method in matches predicate
+    #[test]
+    fn test_matches_method_with_except_applied() {
+        // matches { method: "^OST$" } with except="P" and method "POST"
+        // After applying except: "POST" → "OST", regex "^OST$" matches "OST" → true
+        let fields: HashMap<String, serde_json::Value> = [("method".to_string(), json!("^OST$"))]
+            .into_iter()
+            .collect();
+
+        let params = PredicateParameters {
+            except: "P".to_string(),
+            ..Default::default()
+        };
+
+        let pred = make_predicate_with_params(PredicateOperation::Matches(fields), params);
+
+        let result = predicate_matches(
+            &pred,
+            "POST",
+            "/test",
+            None,
+            &empty_headers(),
+            None,
+            None,
+            None,
+            None,
+        );
+
+        assert!(
+            result,
+            "except should be applied to method before regex matching"
         );
     }
 }
