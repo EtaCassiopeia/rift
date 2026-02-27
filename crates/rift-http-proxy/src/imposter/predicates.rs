@@ -394,10 +394,6 @@ where
             }
 
             for (key, expected_val) in expected_obj {
-                let expected_str = match expected_val {
-                    serde_json::Value::String(s) => s.clone(),
-                    _ => expected_val.to_string(),
-                };
                 // Find key using keyCaseSensitive option
                 let actual = actual_form
                     .iter()
@@ -406,8 +402,7 @@ where
 
                 match actual {
                     Some(actual) => {
-                        let actual = apply_except(actual);
-                        if !compare(&expected_str, &actual) {
+                        if !check_string_field(expected_val, actual) {
                             return false;
                         }
                     }
@@ -426,10 +421,6 @@ where
             }
 
             for (key, expected_val) in expected_obj {
-                let expected_str = match expected_val {
-                    serde_json::Value::String(s) => s.clone(),
-                    _ => expected_val.to_string(),
-                };
                 // Find key using keyCaseSensitive option
                 let actual = query
                     .iter()
@@ -438,8 +429,7 @@ where
 
                 match actual {
                     Some(actual) => {
-                        let actual = apply_except(actual);
-                        if !compare(&expected_str, &actual) {
+                        if !check_string_field(expected_val, actual) {
                             return false;
                         }
                     }
@@ -458,10 +448,6 @@ where
             }
 
             for (key, expected_val) in expected_obj {
-                let expected_str = match expected_val {
-                    serde_json::Value::String(s) => s.clone(),
-                    _ => expected_val.to_string(),
-                };
                 // Headers use keyCaseSensitive option
                 let actual = headers
                     .iter()
@@ -470,8 +456,7 @@ where
 
                 match actual {
                     Some(actual) => {
-                        let actual = apply_except(actual);
-                        if !compare(&expected_str, &actual) {
+                        if !check_string_field(expected_val, actual) {
                             return false;
                         }
                     }
