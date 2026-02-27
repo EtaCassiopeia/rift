@@ -324,6 +324,165 @@ pub fn apply_js_or_rhai_decorate(
 mod tests {
     use super::*;
 
+    // =========================================================================
+    // Issue #116: Multi-valued headers preserved via create_stub_from_proxy_response
+    // =========================================================================
+
+    #[test]
+    fn test_create_stub_multi_valued_headers_comma_joined() {
+        // Multiple Set-Cookie headers should be comma-joined in the stub
+        let headers = vec![
+            ("Set-Cookie".to_string(), "session=abc".to_string()),
+            ("Set-Cookie".to_string(), "theme=dark".to_string()),
+            ("Content-Type".to_string(), "text/html".to_string()),
+        ];
+
+        let stub = create_stub_from_proxy_response(vec![], 200, &headers, b"OK", None, None);
+
+        match &stub.responses[0] {
+            StubResponse::Is { is, .. } => {
+                assert_eq!(
+                    is.headers.get("Set-Cookie").unwrap(),
+                    "session=abc, theme=dark",
+                    "Multi-valued Set-Cookie headers should be comma-joined"
+                );
+                assert_eq!(is.headers.get("Content-Type").unwrap(), "text/html");
+            }
+            _ => panic!("Expected StubResponse::Is"),
+        }
+    }
+
+    #[test]
+    fn test_create_stub_hop_by_hop_headers_filtered() {
+        let headers = vec![
+            ("Content-Type".to_string(), "text/html".to_string()),
+            ("Transfer-Encoding".to_string(), "chunked".to_string()),
+            ("Connection".to_string(), "keep-alive".to_string()),
+            ("Keep-Alive".to_string(), "timeout=5".to_string()),
+        ];
+
+        let stub = create_stub_from_proxy_response(vec![], 200, &headers, b"OK", None, None);
+
+        match &stub.responses[0] {
+            StubResponse::Is { is, .. } => {
+                assert!(is.headers.contains_key("Content-Type"));
+                assert!(
+                    !is.headers.contains_key("Transfer-Encoding"),
+                    "Transfer-Encoding should be filtered"
+                );
+                assert!(
+                    !is.headers.contains_key("Connection"),
+                    "Connection should be filtered"
+                );
+                assert!(
+                    !is.headers.contains_key("Keep-Alive"),
+                    "Keep-Alive should be filtered"
+                );
+            }
+            _ => panic!("Expected StubResponse::Is"),
+        }
+    }
+
+    // =========================================================================
+    // Issue #117: Binary response bodies correctly base64-encoded
+    // =========================================================================
+
+    #[test]
+    fn test_create_stub_binary_body_base64_encoded() {
+        // Non-UTF-8 bytes should be base64-encoded with binary mode
+        let binary_body: Vec<u8> = vec![0x00, 0xFF, 0xFE, 0xFD, 0x89, 0x50, 0x4E, 0x47];
+
+        let stub = create_stub_from_proxy_response(vec![], 200, &[], &binary_body, None, None);
+
+        match &stub.responses[0] {
+            StubResponse::Is { is, .. } => {
+                assert_eq!(is.mode, ResponseMode::Binary, "Binary body should set mode");
+
+                // Verify the body is base64
+                use base64::Engine;
+                let expected_b64 = base64::engine::general_purpose::STANDARD.encode(&binary_body);
+                assert_eq!(
+                    is.body.as_ref().unwrap().as_str().unwrap(),
+                    expected_b64,
+                    "Binary body should be base64-encoded"
+                );
+            }
+            _ => panic!("Expected StubResponse::Is"),
+        }
+    }
+
+    #[test]
+    fn test_create_stub_text_body_not_base64() {
+        let stub = create_stub_from_proxy_response(vec![], 200, &[], b"Hello, World!", None, None);
+
+        match &stub.responses[0] {
+            StubResponse::Is { is, .. } => {
+                assert_eq!(
+                    is.mode,
+                    ResponseMode::Text,
+                    "Text body should use text mode"
+                );
+                assert_eq!(is.body.as_ref().unwrap().as_str().unwrap(), "Hello, World!");
+            }
+            _ => panic!("Expected StubResponse::Is"),
+        }
+    }
+
+    #[test]
+    fn test_create_stub_json_body_parsed() {
+        let stub =
+            create_stub_from_proxy_response(vec![], 200, &[], br#"{"key": "value"}"#, None, None);
+
+        match &stub.responses[0] {
+            StubResponse::Is { is, .. } => {
+                assert_eq!(is.mode, ResponseMode::Text);
+                // JSON bodies are parsed into serde_json::Value, not stored as strings
+                let body = is.body.as_ref().unwrap();
+                assert!(body.is_object(), "JSON body should be parsed as object");
+                assert_eq!(body["key"], "value");
+            }
+            _ => panic!("Expected StubResponse::Is"),
+        }
+    }
+
+    #[test]
+    fn test_create_stub_empty_body() {
+        let stub = create_stub_from_proxy_response(vec![], 204, &[], b"", None, None);
+
+        match &stub.responses[0] {
+            StubResponse::Is { is, .. } => {
+                assert_eq!(is.mode, ResponseMode::Text);
+                assert!(is.body.is_none(), "Empty body should be None");
+            }
+            _ => panic!("Expected StubResponse::Is"),
+        }
+    }
+
+    #[test]
+    fn test_create_stub_with_latency_and_decorate() {
+        let stub = create_stub_from_proxy_response(
+            vec![],
+            200,
+            &[],
+            b"OK",
+            Some(150),
+            Some("function(request, response) {}".to_string()),
+        );
+
+        match &stub.responses[0] {
+            StubResponse::Is { behaviors, .. } => {
+                let b = behaviors.as_ref().unwrap();
+                assert_eq!(b["wait"], 150);
+                assert_eq!(b["decorate"], "function(request, response) {}");
+            }
+            _ => panic!("Expected StubResponse::Is"),
+        }
+    }
+
+    // =========================================================================
+    // Truncation tests
+    // =========================================================================
+
     #[test]
     fn test_truncate_with_ellipsis_short_string() {
         assert_eq!(truncate_with_ellipsis("hello", 10), "hello");
@@ -373,5 +532,41 @@ mod tests {
     #[test]
     fn test_truncate_with_ellipsis_zero_max_len() {
         assert_eq!(truncate_with_ellipsis("hello", 0), "...");
+    }
+
+    // Issue #119: Malformed predicates are skipped instead of panicking
+    #[test]
+    fn test_create_stub_malformed_predicate_skipped() {
+        // A valid predicate alongside a completely invalid one
+        let valid_predicate = serde_json::json!({
+            "equals": { "method": "GET" }
+        });
+        // This is not a valid Predicate shape — should be skipped via filter_map
+        let malformed_predicate = serde_json::json!({
+            "notARealPredicate": { "foo": "bar" }
+        });
+
+        let stub = create_stub_from_proxy_response(
+            vec![valid_predicate, malformed_predicate],
+            200,
+            &[],
+            b"OK",
+            None,
+            None,
+        );
+
+        // The malformed predicate should be silently skipped
+        assert_eq!(stub.predicates.len(), 1);
+    }
+
+    #[test]
+    fn test_create_stub_all_predicates_malformed() {
+        // All predicates are invalid — stub should have zero predicates
+        let bad1 = serde_json::json!({"garbage": 123});
+        let bad2 = serde_json::json!("just a string");
+
+        let stub = create_stub_from_proxy_response(vec![bad1, bad2], 200, &[], b"OK", None, None);
+
+        assert!(stub.predicates.is_empty());
     }
 }

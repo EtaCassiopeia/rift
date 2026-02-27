@@ -423,4 +423,163 @@ mod tests {
         let transparent = RecordingStore::new(ProxyMode::ProxyTransparent);
         assert_eq!(transparent.mode(), ProxyMode::ProxyTransparent);
     }
+
+    // =========================================================================
+    // Issue #118: Race conditions — concurrent should_proxy in proxyOnce mode
+    // =========================================================================
+
+    #[test]
+    fn test_proxy_once_concurrent_should_proxy_only_one_wins() {
+        // In proxyOnce mode, only the first caller to should_proxy for a given
+        // signature should get true. All subsequent callers should get false
+        // until the response is recorded and the pending flag is cleared.
+        use std::sync::Arc;
+        use std::thread;
+
+        let store = Arc::new(RecordingStore::new(ProxyMode::ProxyOnce));
+        let sig = RequestSignature::new("GET", "/concurrent-test", None, &[]);
+
+        let num_threads = 10;
+        let wins = Arc::new(std::sync::atomic::AtomicU32::new(0));
+
+        let handles: Vec<_> = (0..num_threads)
+            .map(|_| {
+                let store = Arc::clone(&store);
+                let sig = sig.clone();
+                let wins = Arc::clone(&wins);
+                thread::spawn(move || {
+                    if store.should_proxy(&sig) {
+                        wins.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    }
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        assert_eq!(
+            wins.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "Only one thread should win should_proxy in proxyOnce mode"
+        );
+    }
+
+    #[test]
+    fn test_proxy_once_should_proxy_false_after_recording() {
+        // After recording, both should_proxy and pending should be cleared
+        let store = RecordingStore::new(ProxyMode::ProxyOnce);
+        let sig = RequestSignature::new("GET", "/test", None, &[]);
+
+        assert!(store.should_proxy(&sig), "First call should return true");
+        assert!(
+            !store.should_proxy(&sig),
+            "Second call should return false (pending)"
+        );
+
+        // Record the response — clears pending
+        store.record(
+            sig.clone(),
+            RecordedResponse {
+                status: 200,
+                headers: Vec::new(),
+                body: b"ok".to_vec(),
+                latency_ms: Some(10),
+                timestamp_secs: unix_timestamp(),
+            },
+        );
+
+        // Now it should still return false (recorded)
+        assert!(
+            !store.should_proxy(&sig),
+            "After recording, should return false"
+        );
+    }
+
+    // =========================================================================
+    // Issue #120: Recording store enforces size limits
+    // =========================================================================
+
+    #[test]
+    fn test_proxy_always_evicts_oldest_when_limit_reached() {
+        let store = RecordingStore::new(ProxyMode::ProxyAlways);
+        let sig = RequestSignature::new("GET", "/evict-test", None, &[]);
+
+        // Record MAX_RECORDINGS_PER_SIGNATURE + 1 responses
+        for i in 0..=MAX_RECORDINGS_PER_SIGNATURE {
+            store.record(
+                sig.clone(),
+                RecordedResponse {
+                    status: 200,
+                    headers: Vec::new(),
+                    body: format!("response-{i}").into_bytes(),
+                    latency_ms: Some(10),
+                    timestamp_secs: unix_timestamp(),
+                },
+            );
+        }
+
+        let all = store.get_all();
+        let recordings = all.get(&sig).unwrap();
+        assert_eq!(
+            recordings.len(),
+            MAX_RECORDINGS_PER_SIGNATURE,
+            "Should not exceed MAX_RECORDINGS_PER_SIGNATURE"
+        );
+
+        // The oldest (response-0) should have been evicted
+        assert_eq!(
+            recordings[0].body, b"response-1",
+            "Oldest recording should be evicted"
+        );
+    }
+
+    #[test]
+    fn test_recording_store_drops_new_signatures_when_full() {
+        let store = RecordingStore::new(ProxyMode::ProxyOnce);
+
+        // Fill up to MAX_TOTAL_SIGNATURES
+        for i in 0..MAX_TOTAL_SIGNATURES {
+            let sig = RequestSignature::new("GET", &format!("/path-{i}"), None, &[]);
+            // Claim the signature first so record() succeeds
+            store.should_proxy(&sig);
+            store.record(
+                sig,
+                RecordedResponse {
+                    status: 200,
+                    headers: Vec::new(),
+                    body: b"ok".to_vec(),
+                    latency_ms: Some(10),
+                    timestamp_secs: unix_timestamp(),
+                },
+            );
+        }
+
+        assert_eq!(store.len(), MAX_TOTAL_SIGNATURES);
+
+        // Adding a new signature should be silently dropped
+        let new_sig = RequestSignature::new("GET", "/overflow", None, &[]);
+        store.should_proxy(&new_sig);
+        store.record(
+            new_sig.clone(),
+            RecordedResponse {
+                status: 200,
+                headers: Vec::new(),
+                body: b"dropped".to_vec(),
+                latency_ms: Some(10),
+                timestamp_secs: unix_timestamp(),
+            },
+        );
+
+        assert_eq!(
+            store.len(),
+            MAX_TOTAL_SIGNATURES,
+            "Store should not grow beyond MAX_TOTAL_SIGNATURES"
+        );
+        assert!(
+            store.get_recorded(&new_sig).is_none(),
+            "Overflow signature should not be recorded"
+        );
+    }
 }
