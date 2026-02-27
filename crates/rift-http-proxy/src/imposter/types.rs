@@ -127,6 +127,7 @@ pub struct Stub {
     pub id: Option<String>,
     #[serde(default)]
     pub predicates: Vec<Predicate>,
+    #[serde(default)]
     pub responses: Vec<StubResponse>,
 }
 
@@ -879,29 +880,19 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    // =========================================================================
-    // Bug L: Stub.responses missing #[serde(default)]
-    // The predicates field has #[serde(default)] but responses does not.
-    // A stub JSON without a "responses" field fails to deserialize, even
-    // though Mountebank allows stubs with no responses.
-    // =========================================================================
-
+    // Fix #107: Stub.responses now has #[serde(default)]
     #[test]
     fn test_stub_deserialize_without_responses_field() {
-        // A stub with predicates but no responses field should deserialize.
-        // Mountebank allows this — the stub matches but returns the default response.
         let stub_json = json!({
             "predicates": [{ "equals": { "path": "/test" } }]
         });
 
         let result: Result<Stub, _> = serde_json::from_value(stub_json);
 
-        // BUG: Deserialization fails because `responses` has no #[serde(default)].
-        // Expected: Ok with empty responses vec
         assert!(
-            result.is_err(),
-            "BUG(L): Stub.responses missing #[serde(default)] causes deserialization failure; \
-             expected Ok with empty responses, got Err"
+            result.is_ok(),
+            "Stub without responses field should deserialize with empty responses vec"
         );
+        assert!(result.unwrap().responses.is_empty());
     }
 }
