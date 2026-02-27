@@ -301,8 +301,13 @@ impl ProxyServer {
                 match protocol {
                     RiftProtocol::Https => {
                         // HTTPS: perform TLS handshake first
-                        let acceptor =
-                            tls_acceptor.expect("TLS acceptor must be present for HTTPS");
+                        let Some(acceptor) = tls_acceptor else {
+                            error!(
+                                "TLS acceptor missing for HTTPS connection from {}",
+                                remote_addr
+                            );
+                            return;
+                        };
                         match acceptor.accept(stream).await {
                             Ok(tls_stream) => {
                                 let io = TokioIo::new(tls_stream);
