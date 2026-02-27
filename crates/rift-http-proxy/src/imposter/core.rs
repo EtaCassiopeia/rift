@@ -460,6 +460,7 @@ impl Imposter {
         path: &str,
         headers: &HashMap<String, String>,
         body: Option<&str>,
+        query: Option<&str>,
     ) -> Vec<serde_json::Value> {
         let mut predicates = Vec::new();
 
@@ -511,10 +512,32 @@ impl Imposter {
                 .and_then(|m| m.as_bool())
                 .unwrap_or(false)
             {
-                pred_values.insert(
-                    "method".to_string(),
-                    serde_json::Value::String(method.to_string()),
-                );
+                let mut method_val = method.to_string();
+                if let Some(pattern) = except_pattern {
+                    if let Ok(re) = regex::Regex::new(pattern) {
+                        method_val = re.replace_all(&method_val, "").to_string();
+                    }
+                }
+                pred_values.insert("method".to_string(), serde_json::Value::String(method_val));
+            }
+
+            // Handle query
+            if matches
+                .get("query")
+                .and_then(|q| q.as_bool())
+                .unwrap_or(false)
+            {
+                if let Some(query_str) = query {
+                    let query_map = crate::imposter::parse_query_string(query_str);
+                    if !query_map.is_empty() {
+                        let query_json: serde_json::Map<String, serde_json::Value> = query_map
+                            .into_iter()
+                            .map(|(k, v)| (k, serde_json::Value::String(v)))
+                            .collect();
+                        pred_values
+                            .insert("query".to_string(), serde_json::Value::Object(query_json));
+                    }
+                }
             }
 
             // Handle headers
@@ -781,6 +804,7 @@ impl Imposter {
                     uri.path(),
                     headers,
                     body,
+                    uri.query(),
                 )
             } else {
                 // No predicateGenerators, generate empty predicates (matches all requests)
@@ -956,6 +980,7 @@ mod tests {
             "/API/Users",
             &headers,
             None,
+            None,
         );
 
         assert_eq!(predicates.len(), 1);
@@ -979,17 +1004,9 @@ mod tests {
         );
     }
 
-    // =========================================================================
-    // Bug M: `except` not applied to method in generate_predicates_from_request
-    // The generator applies except to path (line 500-503) and body (line 550-553)
-    // but NOT to method (line 514-516). The method value is stored raw.
-    // =========================================================================
-
+    // Fix: `except` is now applied to method in generate_predicates_from_request
     #[test]
-    fn test_generator_except_not_applied_to_method() {
-        // A predicateGenerator with except="^(POST|DELETE)$" that matches method.
-        // For method "POST": except should strip "POST" → empty string.
-        // BUG: Method value "POST" is stored as-is, except is not applied.
+    fn test_generator_except_applied_to_method() {
         let imposter = make_test_imposter();
 
         let generators = vec![json!({
@@ -998,33 +1015,28 @@ mod tests {
         })];
 
         let headers = HashMap::new();
-        let predicates =
-            imposter.generate_predicates_from_request(&generators, "POST", "/test", &headers, None);
+        let predicates = imposter.generate_predicates_from_request(
+            &generators,
+            "POST",
+            "/test",
+            &headers,
+            None,
+            None,
+        );
 
         assert_eq!(predicates.len(), 1);
         let pred_json = &predicates[0];
         let method_val = pred_json["equals"]["method"].as_str().unwrap();
 
-        // BUG: Method is "POST" (raw) instead of "" (with except applied).
-        // Compare with path handling which correctly applies except.
         assert_eq!(
-            method_val, "POST",
-            "BUG(M): except pattern not applied to method in predicate generator; \
-             expected '' (except strips 'POST'), got 'POST'"
+            method_val, "",
+            "except pattern should be applied to method in predicate generator"
         );
     }
 
-    // =========================================================================
-    // Bug N: generate_predicates_from_request ignores query parameters
-    // The function only handles method, path, headers, and body.
-    // If a predicateGenerator has "matches": { "query": true }, the query
-    // field is silently ignored — no query constraint is generated.
-    // =========================================================================
-
+    // Fix #109: generate_predicates_from_request now handles query parameters
     #[test]
-    fn test_generator_ignores_query_parameters() {
-        // A predicateGenerator that matches query should generate a query predicate.
-        // BUG: The function doesn't accept or process query parameters at all.
+    fn test_generator_includes_query_parameters() {
         let imposter = make_test_imposter();
 
         let generators = vec![json!({
@@ -1038,24 +1050,25 @@ mod tests {
             "/search",
             &headers,
             None,
+            Some("q=hello&page=1"),
         );
 
         assert_eq!(predicates.len(), 1);
         let pred_json = &predicates[0];
         let equals_obj = pred_json["equals"].as_object().unwrap();
 
-        // Path should be present
         assert!(
             equals_obj.contains_key("path"),
             "Path should be in generated predicate"
         );
 
-        // BUG: Query is NOT present because the function doesn't handle it.
-        // Expected: query parameters should be included in the generated predicate.
         assert!(
-            !equals_obj.contains_key("query"),
-            "BUG(N): generate_predicates_from_request ignores query parameters; \
-             expected query field in generated predicate, but it is missing"
+            equals_obj.contains_key("query"),
+            "Query should be in generated predicate"
         );
+
+        let query_obj = equals_obj["query"].as_object().unwrap();
+        assert_eq!(query_obj["q"].as_str().unwrap(), "hello");
+        assert_eq!(query_obj["page"].as_str().unwrap(), "1");
     }
 }
