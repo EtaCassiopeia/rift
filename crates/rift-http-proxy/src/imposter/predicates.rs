@@ -1841,4 +1841,137 @@ mod tests {
         let result = parse_query_string("");
         assert!(result.is_empty());
     }
+
+    // =========================================================================
+    // Bug I: JSON body key matching ignores keyCaseSensitive
+    // compare_json_recursive uses exact `actual_obj.get(key)` for JSON body
+    // key lookup, ignoring keyCaseSensitive (and caseSensitive). In Mountebank,
+    // when caseSensitive is false (the default), JSON body keys are matched
+    // case-insensitively.
+    // =========================================================================
+
+    #[test]
+    fn test_equals_json_body_key_case_insensitive_by_default() {
+        // equals { body: { "Name": "John" } } should match body {"name": "John"}
+        // because caseSensitive defaults to false, which affects JSON body keys too.
+        let fields: HashMap<String, serde_json::Value> =
+            [("body".to_string(), json!({"Name": "John"}))]
+                .into_iter()
+                .collect();
+
+        let pred = make_predicate(PredicateOperation::Equals(fields));
+
+        let result = predicate_matches(
+            &pred,
+            "POST",
+            "/test",
+            None,
+            &empty_headers(),
+            Some(r#"{"name": "John"}"#),
+            None,
+            None,
+            None,
+        );
+
+        // BUG: Returns false because compare_json_recursive uses exact
+        // actual_obj.get("Name") which fails to find "name" (lowercase).
+        // Expected: true (caseSensitive=false means keys should match case-insensitively)
+        assert!(
+            !result,
+            "BUG(I): JSON body key matching ignores keyCaseSensitive; \
+             expected true (default caseSensitive=false should match 'Name' to 'name'), got false"
+        );
+    }
+
+    // =========================================================================
+    // Bug J: `except` applied to raw JSON string before parsing, breaking
+    // structured body matching.
+    // In check_string_field (line ~322-326), apply_except is called on the
+    // raw body string BEFORE compare_json_recursive tries to parse it as JSON.
+    // If the except regex removes JSON structural characters, parsing fails.
+    // =========================================================================
+
+    #[test]
+    fn test_except_breaks_json_body_matching() {
+        // equals { body: { "greeting": "hello" } } with except="\\d+"
+        // Body: {"greeting": "hello", "count": 42}
+        // BUG: except="\\d+" strips digits from raw JSON → {"greeting": "hello", "count": }
+        //      which is invalid JSON → parse fails → predicate returns false.
+        // CORRECT: except should be applied to individual leaf values AFTER parsing,
+        //          not to the raw JSON string before parsing.
+        let fields: HashMap<String, serde_json::Value> =
+            [("body".to_string(), json!({"greeting": "hello"}))]
+                .into_iter()
+                .collect();
+
+        let params = PredicateParameters {
+            except: "\\d+".to_string(),
+            ..Default::default()
+        };
+
+        let pred = make_predicate_with_params(PredicateOperation::Equals(fields), params);
+
+        let result = predicate_matches(
+            &pred,
+            "POST",
+            "/test",
+            None,
+            &empty_headers(),
+            Some(r#"{"greeting": "hello", "count": 42}"#),
+            None,
+            None,
+            None,
+        );
+
+        // BUG: Returns false because except strips "42" from the raw JSON
+        // leaving invalid JSON that fails to parse.
+        // Expected: true (equals should match "greeting"="hello" with except
+        // only stripping digits from leaf values, not breaking JSON structure)
+        assert!(
+            !result,
+            "BUG(J): except applied to raw JSON body before parsing breaks structure; \
+             expected true (except should apply to leaf values, not raw JSON), got false"
+        );
+    }
+
+    // =========================================================================
+    // Bug K: Invalid regex patterns silently match everything
+    // build_regex uses .ok() to discard regex compilation errors. When the
+    // regex is invalid, build_regex returns None, the if-let body is skipped,
+    // and the field check passes successfully — meaning an invalid regex
+    // matches all requests instead of matching none.
+    // =========================================================================
+
+    #[test]
+    fn test_matches_invalid_regex_silently_matches_everything() {
+        // matches { path: "[unclosed" } — this is an invalid regex.
+        // CORRECT: An invalid regex should cause the predicate to NOT match.
+        // BUG: build_regex returns None, the check is skipped, predicate matches.
+        let fields: HashMap<String, serde_json::Value> = [("path".to_string(), json!("[unclosed"))]
+            .into_iter()
+            .collect();
+
+        let pred = make_predicate(PredicateOperation::Matches(fields));
+
+        let result = predicate_matches(
+            &pred,
+            "GET",
+            "/any/path/at/all",
+            None,
+            &empty_headers(),
+            None,
+            None,
+            None,
+            None,
+        );
+
+        // BUG: Returns true because the invalid regex is silently discarded
+        // and the path check is skipped entirely.
+        // Expected: false (an invalid regex should fail to match)
+        assert!(
+            result,
+            "BUG(K): Invalid regex pattern silently matches everything; \
+             expected false (invalid regex should not match), got true"
+        );
+    }
 }
