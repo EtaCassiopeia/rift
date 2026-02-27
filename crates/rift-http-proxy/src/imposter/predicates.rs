@@ -867,3 +867,978 @@ pub fn parse_query_string(query: &str) -> HashMap<String, String> {
     }
     map
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::imposter::types::{Predicate, PredicateOperation, PredicateParameters};
+    use serde_json::json;
+
+    /// Helper to build a Predicate from operation with default parameters
+    fn make_predicate(op: PredicateOperation) -> Predicate {
+        Predicate {
+            parameters: PredicateParameters::default(),
+            operation: op,
+        }
+    }
+
+    /// Helper to build a Predicate with custom parameters
+    fn make_predicate_with_params(
+        op: PredicateOperation,
+        params: PredicateParameters,
+    ) -> Predicate {
+        Predicate {
+            parameters: params,
+            operation: op,
+        }
+    }
+
+    fn empty_headers() -> HashMap<String, String> {
+        HashMap::new()
+    }
+
+    // =========================================================================
+    // Multi-valued query parameters (Issue #83 - fixed)
+    // Multiple values for the same key are comma-joined: ?key=first&key=second → "first,second"
+    // =========================================================================
+
+    #[test]
+    fn test_parse_query_string_multi_valued_comma_joined() {
+        let result = parse_query_string("key=first&key=second");
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result.get("key"),
+            Some(&"first,second".to_string()),
+            "Multi-valued query params should be comma-joined"
+        );
+    }
+
+    #[test]
+    fn test_equals_query_multi_valued_param() {
+        // equals { query: { key: "first,second" } } should match ?key=first&key=second
+        let fields: HashMap<String, serde_json::Value> =
+            [("query".to_string(), json!({"key": "first,second"}))]
+                .into_iter()
+                .collect();
+
+        let pred = make_predicate(PredicateOperation::Equals(fields));
+
+        let result = predicate_matches(
+            &pred,
+            "GET",
+            "/test",
+            Some("key=first&key=second"),
+            &empty_headers(),
+            None,
+            None,
+            None,
+            None,
+        );
+
+        assert!(
+            result,
+            "equals should match comma-joined multi-valued query params"
+        );
+    }
+
+    // =========================================================================
+    // Bare query parameters without '=' sign (Issue #84 - fixed)
+    // Mountebank treats ?flag as flag=""
+    // =========================================================================
+
+    #[test]
+    fn test_parse_query_string_bare_param() {
+        let result = parse_query_string("flag");
+
+        assert_eq!(
+            result.get("flag"),
+            Some(&String::new()),
+            "Bare query param 'flag' should be present with empty value"
+        );
+    }
+
+    #[test]
+    fn test_parse_query_string_mixed_bare_and_valued() {
+        let result = parse_query_string("a=1&flag&b=2");
+
+        assert_eq!(result.get("a"), Some(&"1".to_string()));
+        assert_eq!(result.get("b"), Some(&"2".to_string()));
+        assert!(
+            result.contains_key("flag"),
+            "Bare param 'flag' should be present in mixed query string"
+        );
+    }
+
+    #[test]
+    fn test_exists_query_bare_param() {
+        let fields: HashMap<String, serde_json::Value> =
+            [("query".to_string(), json!({"flag": true}))]
+                .into_iter()
+                .collect();
+
+        let pred = make_predicate(PredicateOperation::Exists(fields));
+
+        let result = predicate_matches(
+            &pred,
+            "GET",
+            "/test",
+            Some("flag"),
+            &empty_headers(),
+            None,
+            None,
+            None,
+            None,
+        );
+
+        assert!(
+            result,
+            "exists predicate should match bare query param '?flag'"
+        );
+    }
+
+    // =========================================================================
+    // deepEquals body structural comparison (Issue #85 - fixed)
+    // JSON objects are compared structurally, not by string representation
+    // =========================================================================
+
+    #[test]
+    fn test_deep_equals_body_json_key_order_independence() {
+        let fields: HashMap<String, serde_json::Value> =
+            [("body".to_string(), json!({"a": 1, "b": 2}))]
+                .into_iter()
+                .collect();
+
+        let pred = make_predicate(PredicateOperation::DeepEquals(fields));
+
+        let body = r#"{"b":2,"a":1}"#;
+
+        let result = predicate_matches(
+            &pred,
+            "GET",
+            "/test",
+            None,
+            &empty_headers(),
+            Some(body),
+            None,
+            None,
+            None,
+        );
+
+        assert!(
+            result,
+            "deepEquals should match JSON bodies regardless of key order"
+        );
+    }
+
+    #[test]
+    fn test_deep_equals_body_string_match() {
+        // deepEquals with matching string body should still work
+        let fields: HashMap<String, serde_json::Value> =
+            [("body".to_string(), json!("hello world"))]
+                .into_iter()
+                .collect();
+
+        let pred = make_predicate(PredicateOperation::DeepEquals(fields));
+
+        let result = predicate_matches(
+            &pred,
+            "GET",
+            "/test",
+            None,
+            &empty_headers(),
+            Some("hello world"),
+            None,
+            None,
+            None,
+        );
+
+        assert!(result, "deepEquals should match identical string bodies");
+    }
+
+    // =========================================================================
+    // keyCaseSensitive in exists predicate (Issue #86 - fixed)
+    // =========================================================================
+
+    #[test]
+    fn test_exists_query_key_case_sensitive_false() {
+        // With keyCaseSensitive: false (default), exists { query: { Key: true } }
+        // should match if query has "key" (case-insensitive key lookup)
+        let fields: HashMap<String, serde_json::Value> =
+            [("query".to_string(), json!({"Key": true}))]
+                .into_iter()
+                .collect();
+
+        let pred = make_predicate(PredicateOperation::Exists(fields));
+
+        let result = predicate_matches(
+            &pred,
+            "GET",
+            "/test",
+            Some("key=value"),
+            &empty_headers(),
+            None,
+            None,
+            None,
+            None,
+        );
+
+        assert!(
+            result,
+            "exists with keyCaseSensitive=false should match case-insensitively"
+        );
+    }
+
+    #[test]
+    fn test_exists_header_key_case_sensitive_true() {
+        // With keyCaseSensitive: true, exists { headers: { "Content-Type": true } }
+        // should match header "Content-Type" (exact case match)
+        let fields: HashMap<String, serde_json::Value> =
+            [("headers".to_string(), json!({"Content-Type": true}))]
+                .into_iter()
+                .collect();
+
+        let params = PredicateParameters {
+            key_case_sensitive: Some(true),
+            ..Default::default()
+        };
+
+        let pred = make_predicate_with_params(PredicateOperation::Exists(fields), params);
+
+        let mut headers = HashMap::new();
+        headers.insert("Content-Type".to_string(), "application/json".to_string());
+
+        let result = predicate_matches(
+            &pred, "GET", "/test", None, &headers, None, None, None, None,
+        );
+
+        assert!(
+            result,
+            "exists with keyCaseSensitive=true should match exact case header key"
+        );
+    }
+
+    #[test]
+    fn test_exists_form_key_case_sensitive() {
+        // exists { form: { Name: true } } with keyCaseSensitive: false (default)
+        // should match form with key "name"
+        let fields: HashMap<String, serde_json::Value> =
+            [("form".to_string(), json!({"Name": true}))]
+                .into_iter()
+                .collect();
+
+        let pred = make_predicate(PredicateOperation::Exists(fields));
+
+        let mut form = HashMap::new();
+        form.insert("name".to_string(), "John".to_string());
+
+        let result = predicate_matches(
+            &pred,
+            "POST",
+            "/test",
+            None,
+            &empty_headers(),
+            Some("name=John"),
+            None,
+            None,
+            Some(&form),
+        );
+
+        assert!(
+            result,
+            "exists with keyCaseSensitive=false should match form key case-insensitively"
+        );
+    }
+
+    // =========================================================================
+    // Header keys Title-Case normalization (Issue #87 - fixed)
+    // Headers are now Title-Case (Content-Type, not content-type)
+    // =========================================================================
+
+    #[test]
+    fn test_header_key_case_sensitive_true_with_title_case() {
+        // With keyCaseSensitive: true, equals { headers: { "Content-Type": "application/json" } }
+        // should match because headers are now Title-Case after fix #87
+        let fields: HashMap<String, serde_json::Value> = [(
+            "headers".to_string(),
+            json!({"Content-Type": "application/json"}),
+        )]
+        .into_iter()
+        .collect();
+
+        let params = PredicateParameters {
+            case_sensitive: Some(true),
+            key_case_sensitive: Some(true),
+            ..Default::default()
+        };
+
+        let pred = make_predicate_with_params(PredicateOperation::Equals(fields), params);
+
+        // After fix #87, header_map_to_hashmap() produces Title-Case keys
+        let mut headers = HashMap::new();
+        headers.insert("Content-Type".to_string(), "application/json".to_string());
+
+        let result = predicate_matches(
+            &pred, "GET", "/test", None, &headers, None, None, None, None,
+        );
+
+        assert!(
+            result,
+            "keyCaseSensitive=true with Title-Case header key should match"
+        );
+    }
+
+    #[test]
+    fn test_header_key_case_sensitive_false_default() {
+        // Default: keyCaseSensitive=false, header key matching should be case-insensitive
+        let fields: HashMap<String, serde_json::Value> = [(
+            "headers".to_string(),
+            json!({"Content-Type": "application/json"}),
+        )]
+        .into_iter()
+        .collect();
+
+        let pred = make_predicate(PredicateOperation::Equals(fields));
+
+        // Even with lowercase keys, keyCaseSensitive=false means case-insensitive matching
+        let mut headers = HashMap::new();
+        headers.insert("content-type".to_string(), "application/json".to_string());
+
+        let result = predicate_matches(
+            &pred,
+            "GET",
+            "/test",
+            None,
+            &headers,
+            Some(""),
+            None,
+            None,
+            None,
+        );
+
+        assert!(
+            result,
+            "Default keyCaseSensitive=false should match case-insensitively"
+        );
+    }
+
+    // =========================================================================
+    // Additional predicate tests (non-bug, for coverage)
+    // =========================================================================
+
+    #[test]
+    fn test_equals_method() {
+        let fields: HashMap<String, serde_json::Value> = [("method".to_string(), json!("POST"))]
+            .into_iter()
+            .collect();
+
+        let pred = make_predicate(PredicateOperation::Equals(fields));
+
+        assert!(predicate_matches(
+            &pred,
+            "POST",
+            "/test",
+            None,
+            &empty_headers(),
+            None,
+            None,
+            None,
+            None,
+        ));
+        // Default is case-insensitive
+        assert!(predicate_matches(
+            &pred,
+            "post",
+            "/test",
+            None,
+            &empty_headers(),
+            None,
+            None,
+            None,
+            None,
+        ));
+        assert!(!predicate_matches(
+            &pred,
+            "GET",
+            "/test",
+            None,
+            &empty_headers(),
+            None,
+            None,
+            None,
+            None,
+        ));
+    }
+
+    #[test]
+    fn test_equals_path() {
+        let fields: HashMap<String, serde_json::Value> =
+            [("path".to_string(), json!("/api/users"))]
+                .into_iter()
+                .collect();
+
+        let pred = make_predicate(PredicateOperation::Equals(fields));
+
+        assert!(predicate_matches(
+            &pred,
+            "GET",
+            "/api/users",
+            None,
+            &empty_headers(),
+            None,
+            None,
+            None,
+            None,
+        ));
+        assert!(!predicate_matches(
+            &pred,
+            "GET",
+            "/api/other",
+            None,
+            &empty_headers(),
+            None,
+            None,
+            None,
+            None,
+        ));
+    }
+
+    #[test]
+    fn test_contains_body() {
+        let fields: HashMap<String, serde_json::Value> =
+            [("body".to_string(), json!("hello"))].into_iter().collect();
+
+        let pred = make_predicate(PredicateOperation::Contains(fields));
+
+        assert!(predicate_matches(
+            &pred,
+            "POST",
+            "/",
+            None,
+            &empty_headers(),
+            Some("say hello world"),
+            None,
+            None,
+            None,
+        ));
+        assert!(!predicate_matches(
+            &pred,
+            "POST",
+            "/",
+            None,
+            &empty_headers(),
+            Some("goodbye"),
+            None,
+            None,
+            None,
+        ));
+    }
+
+    #[test]
+    fn test_starts_with_path() {
+        let fields: HashMap<String, serde_json::Value> =
+            [("path".to_string(), json!("/api/"))].into_iter().collect();
+
+        let pred = make_predicate(PredicateOperation::StartsWith(fields));
+
+        assert!(predicate_matches(
+            &pred,
+            "GET",
+            "/api/users",
+            None,
+            &empty_headers(),
+            None,
+            None,
+            None,
+            None,
+        ));
+        assert!(!predicate_matches(
+            &pred,
+            "GET",
+            "/web/page",
+            None,
+            &empty_headers(),
+            None,
+            None,
+            None,
+            None,
+        ));
+    }
+
+    #[test]
+    fn test_ends_with_path() {
+        let fields: HashMap<String, serde_json::Value> =
+            [("path".to_string(), json!(".json"))].into_iter().collect();
+
+        let pred = make_predicate(PredicateOperation::EndsWith(fields));
+
+        assert!(predicate_matches(
+            &pred,
+            "GET",
+            "/data/file.json",
+            None,
+            &empty_headers(),
+            None,
+            None,
+            None,
+            None,
+        ));
+        assert!(!predicate_matches(
+            &pred,
+            "GET",
+            "/data/file.xml",
+            None,
+            &empty_headers(),
+            None,
+            None,
+            None,
+            None,
+        ));
+    }
+
+    #[test]
+    fn test_matches_regex() {
+        let fields: HashMap<String, serde_json::Value> =
+            [("path".to_string(), json!("^/api/users/\\d+$"))]
+                .into_iter()
+                .collect();
+
+        let pred = make_predicate(PredicateOperation::Matches(fields));
+
+        assert!(predicate_matches(
+            &pred,
+            "GET",
+            "/api/users/123",
+            None,
+            &empty_headers(),
+            None,
+            None,
+            None,
+            None,
+        ));
+        assert!(!predicate_matches(
+            &pred,
+            "GET",
+            "/api/users/abc",
+            None,
+            &empty_headers(),
+            None,
+            None,
+            None,
+            None,
+        ));
+    }
+
+    #[test]
+    fn test_not_predicate() {
+        let inner_fields: HashMap<String, serde_json::Value> =
+            [("method".to_string(), json!("GET"))].into_iter().collect();
+
+        let inner = make_predicate(PredicateOperation::Equals(inner_fields));
+        let pred = make_predicate(PredicateOperation::Not(Box::new(inner)));
+
+        assert!(!predicate_matches(
+            &pred,
+            "GET",
+            "/",
+            None,
+            &empty_headers(),
+            None,
+            None,
+            None,
+            None,
+        ));
+        assert!(predicate_matches(
+            &pred,
+            "POST",
+            "/",
+            None,
+            &empty_headers(),
+            None,
+            None,
+            None,
+            None,
+        ));
+    }
+
+    #[test]
+    fn test_or_predicate() {
+        let eq_get: HashMap<String, serde_json::Value> =
+            [("method".to_string(), json!("GET"))].into_iter().collect();
+        let eq_post: HashMap<String, serde_json::Value> = [("method".to_string(), json!("POST"))]
+            .into_iter()
+            .collect();
+
+        let pred = make_predicate(PredicateOperation::Or(vec![
+            make_predicate(PredicateOperation::Equals(eq_get)),
+            make_predicate(PredicateOperation::Equals(eq_post)),
+        ]));
+
+        assert!(predicate_matches(
+            &pred,
+            "GET",
+            "/",
+            None,
+            &empty_headers(),
+            None,
+            None,
+            None,
+            None,
+        ));
+        assert!(predicate_matches(
+            &pred,
+            "POST",
+            "/",
+            None,
+            &empty_headers(),
+            None,
+            None,
+            None,
+            None,
+        ));
+        assert!(!predicate_matches(
+            &pred,
+            "DELETE",
+            "/",
+            None,
+            &empty_headers(),
+            None,
+            None,
+            None,
+            None,
+        ));
+    }
+
+    #[test]
+    fn test_and_predicate() {
+        let eq_get: HashMap<String, serde_json::Value> =
+            [("method".to_string(), json!("GET"))].into_iter().collect();
+        let eq_path: HashMap<String, serde_json::Value> =
+            [("path".to_string(), json!("/api"))].into_iter().collect();
+
+        let pred = make_predicate(PredicateOperation::And(vec![
+            make_predicate(PredicateOperation::Equals(eq_get)),
+            make_predicate(PredicateOperation::Equals(eq_path)),
+        ]));
+
+        assert!(predicate_matches(
+            &pred,
+            "GET",
+            "/api",
+            None,
+            &empty_headers(),
+            None,
+            None,
+            None,
+            None,
+        ));
+        assert!(!predicate_matches(
+            &pred,
+            "POST",
+            "/api",
+            None,
+            &empty_headers(),
+            None,
+            None,
+            None,
+            None,
+        ));
+        assert!(!predicate_matches(
+            &pred,
+            "GET",
+            "/other",
+            None,
+            &empty_headers(),
+            None,
+            None,
+            None,
+            None,
+        ));
+    }
+
+    #[test]
+    fn test_case_sensitive_equals() {
+        let fields: HashMap<String, serde_json::Value> = [("method".to_string(), json!("POST"))]
+            .into_iter()
+            .collect();
+
+        let params = PredicateParameters {
+            case_sensitive: Some(true),
+            ..Default::default()
+        };
+
+        let pred = make_predicate_with_params(PredicateOperation::Equals(fields), params);
+
+        assert!(predicate_matches(
+            &pred,
+            "POST",
+            "/",
+            None,
+            &empty_headers(),
+            None,
+            None,
+            None,
+            None,
+        ));
+        // With caseSensitive: true, "post" should NOT match "POST"
+        assert!(!predicate_matches(
+            &pred,
+            "post",
+            "/",
+            None,
+            &empty_headers(),
+            None,
+            None,
+            None,
+            None,
+        ));
+    }
+
+    #[test]
+    fn test_except_pattern() {
+        let fields: HashMap<String, serde_json::Value> =
+            [("path".to_string(), json!("/api/users"))]
+                .into_iter()
+                .collect();
+
+        let params = PredicateParameters {
+            except: "/api".to_string(),
+            ..Default::default()
+        };
+
+        let pred = make_predicate_with_params(PredicateOperation::Equals(fields), params);
+
+        // except removes "/api" from actual path, so "/api/users" becomes "/users"
+        // which doesn't match "/api/users"
+        assert!(!predicate_matches(
+            &pred,
+            "GET",
+            "/api/users",
+            None,
+            &empty_headers(),
+            None,
+            None,
+            None,
+            None,
+        ));
+    }
+
+    #[test]
+    fn test_exists_body() {
+        let fields_true: HashMap<String, serde_json::Value> =
+            [("body".to_string(), json!(true))].into_iter().collect();
+
+        let fields_false: HashMap<String, serde_json::Value> =
+            [("body".to_string(), json!(false))].into_iter().collect();
+
+        let pred_true = make_predicate(PredicateOperation::Exists(fields_true));
+        let pred_false = make_predicate(PredicateOperation::Exists(fields_false));
+
+        // Body exists
+        assert!(predicate_matches(
+            &pred_true,
+            "POST",
+            "/",
+            None,
+            &empty_headers(),
+            Some("content"),
+            None,
+            None,
+            None,
+        ));
+        // Body does not exist
+        assert!(!predicate_matches(
+            &pred_true,
+            "GET",
+            "/",
+            None,
+            &empty_headers(),
+            None,
+            None,
+            None,
+            None,
+        ));
+        // Body should NOT exist (false) - empty body
+        assert!(predicate_matches(
+            &pred_false,
+            "GET",
+            "/",
+            None,
+            &empty_headers(),
+            None,
+            None,
+            None,
+            None,
+        ));
+    }
+
+    #[test]
+    fn test_exists_header() {
+        let fields: HashMap<String, serde_json::Value> =
+            [("headers".to_string(), json!({"content-type": true}))]
+                .into_iter()
+                .collect();
+
+        let pred = make_predicate(PredicateOperation::Exists(fields));
+
+        let mut headers = HashMap::new();
+        headers.insert("content-type".to_string(), "application/json".to_string());
+
+        assert!(predicate_matches(
+            &pred, "GET", "/", None, &headers, None, None, None, None,
+        ));
+        assert!(!predicate_matches(
+            &pred,
+            "GET",
+            "/",
+            None,
+            &empty_headers(),
+            None,
+            None,
+            None,
+            None,
+        ));
+    }
+
+    #[test]
+    fn test_deep_equals_query_extra_params_mismatch() {
+        // deepEquals on query should fail if actual has extra params
+        let fields: HashMap<String, serde_json::Value> = [("query".to_string(), json!({"a": "1"}))]
+            .into_iter()
+            .collect();
+
+        let pred = make_predicate(PredicateOperation::DeepEquals(fields));
+
+        // Exact match - should pass
+        assert!(predicate_matches(
+            &pred,
+            "GET",
+            "/",
+            Some("a=1"),
+            &empty_headers(),
+            None,
+            None,
+            None,
+            None,
+        ));
+        // Extra param - should fail for deepEquals
+        assert!(!predicate_matches(
+            &pred,
+            "GET",
+            "/",
+            Some("a=1&b=2"),
+            &empty_headers(),
+            None,
+            None,
+            None,
+            None,
+        ));
+    }
+
+    #[test]
+    fn test_deep_equals_headers_extra_mismatch() {
+        // deepEquals on headers should fail if actual has extra headers
+        let fields: HashMap<String, serde_json::Value> =
+            [("headers".to_string(), json!({"x-custom": "value"}))]
+                .into_iter()
+                .collect();
+
+        let pred = make_predicate(PredicateOperation::DeepEquals(fields));
+
+        let mut exact_headers = HashMap::new();
+        exact_headers.insert("x-custom".to_string(), "value".to_string());
+
+        let mut extra_headers = HashMap::new();
+        extra_headers.insert("x-custom".to_string(), "value".to_string());
+        extra_headers.insert("x-other".to_string(), "other".to_string());
+
+        assert!(predicate_matches(
+            &pred,
+            "GET",
+            "/",
+            None,
+            &exact_headers,
+            None,
+            None,
+            None,
+            None,
+        ));
+        assert!(!predicate_matches(
+            &pred,
+            "GET",
+            "/",
+            None,
+            &extra_headers,
+            None,
+            None,
+            None,
+            None,
+        ));
+    }
+
+    #[test]
+    fn test_stub_matches_empty_predicates() {
+        // Empty predicates should match everything
+        assert!(stub_matches(
+            &[],
+            "GET",
+            "/anything",
+            None,
+            &empty_headers(),
+            None,
+            None,
+            None,
+            None,
+        ));
+    }
+
+    #[test]
+    fn test_stub_matches_all_must_match() {
+        // All predicates must match (implicit AND)
+        let predicates = vec![
+            make_predicate(PredicateOperation::Equals(
+                [("method".to_string(), json!("GET"))].into_iter().collect(),
+            )),
+            make_predicate(PredicateOperation::Equals(
+                [("path".to_string(), json!("/api"))].into_iter().collect(),
+            )),
+        ];
+
+        assert!(stub_matches(
+            &predicates,
+            "GET",
+            "/api",
+            None,
+            &empty_headers(),
+            None,
+            None,
+            None,
+            None,
+        ));
+        assert!(!stub_matches(
+            &predicates,
+            "POST",
+            "/api",
+            None,
+            &empty_headers(),
+            None,
+            None,
+            None,
+            None,
+        ));
+    }
+
+    #[test]
+    fn test_parse_query_string_url_encoded() {
+        // Already fixed in #70 - verify URL decoding works
+        let result = parse_query_string("key=hello%20world&name=caf%C3%A9");
+        assert_eq!(result.get("key"), Some(&"hello world".to_string()));
+        assert_eq!(result.get("name"), Some(&"café".to_string()));
+    }
+
+    #[test]
+    fn test_parse_query_string_empty() {
+        let result = parse_query_string("");
+        assert!(result.is_empty());
+    }
+}

@@ -24,6 +24,6 @@ pub use extensions::rule_index;
 pub use extensions::stub_analysis;
 pub use extensions::template;
 
-// Don't export internal modules
-mod backends;
+// Backends (pub for integration tests)
+pub mod backends;
 mod scripting;
