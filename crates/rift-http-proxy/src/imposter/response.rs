@@ -107,58 +107,6 @@ pub fn create_response_preview(response: &StubResponse) -> DebugResponsePreview 
     }
 }
 
-/// Execute a stub response and return (status, headers, body, behaviors, is_fault)
-#[allow(clippy::type_complexity)]
-pub fn execute_stub_response(
-    response: &StubResponse,
-) -> Option<(
-    u16,
-    HashMap<String, String>,
-    String,
-    Option<serde_json::Value>,
-    bool,
-)> {
-    match response {
-        StubResponse::Is { is, behaviors, .. } => {
-            let mut headers = is.headers.clone();
-
-            let body = is
-                .body
-                .as_ref()
-                .map(|b| {
-                    if b.is_string() {
-                        b.as_str().unwrap_or("").to_string()
-                    } else {
-                        // Set content-type for JSON
-                        if !headers.contains_key("content-type")
-                            && !headers.contains_key("Content-Type")
-                        {
-                            headers
-                                .insert("Content-Type".to_string(), "application/json".to_string());
-                        }
-                        serde_json::to_string(b).unwrap_or_default()
-                    }
-                })
-                .unwrap_or_default();
-
-            Some((is.status_code, headers, body, behaviors.clone(), false))
-        }
-        StubResponse::Fault { fault } => {
-            // Return special marker for fault - will be handled by caller
-            Some((
-                0,
-                HashMap::new(),
-                fault.clone(),
-                None,
-                true, // is_fault = true
-            ))
-        }
-        StubResponse::Proxy { .. } => None, // Handled separately in handle_imposter_request
-        StubResponse::Inject { .. } => None, // Inject handled via get_inject_response
-        StubResponse::RiftScript { .. } => None, // Handled via get_rift_script_response
-    }
-}
-
 /// Execute a stub response with Rift extensions
 /// Returns (status, headers, body, behaviors, rift_extension, response_mode, is_fault)
 #[allow(clippy::type_complexity)]
@@ -253,44 +201,19 @@ pub fn create_stub_from_proxy_response(
 ) -> super::types::Stub {
     // Convert to HashMap, comma-joining multi-valued headers (per HTTP spec).
     // Filter out hop-by-hop headers.
-    let mut response_headers = HashMap::new();
-    for (k, v) in headers {
-        let k_lower = k.to_lowercase();
-        if k_lower == "transfer-encoding" || k_lower == "connection" || k_lower == "keep-alive" {
-            continue;
-        }
-        response_headers
-            .entry(k.clone())
-            .and_modify(|existing: &mut String| {
-                existing.push_str(", ");
-                existing.push_str(v);
-            })
-            .or_insert_with(|| v.clone());
-    }
+    let response_headers: HashMap<String, String> = {
+        let merged = crate::util::merge_headers_to_map(headers);
+        merged
+            .into_iter()
+            .filter(|(k, _)| !crate::util::is_hop_by_hop_header(k))
+            .collect()
+    };
 
-    let (body_value, mode) = if body.is_empty() {
-        (None, ResponseMode::Text)
+    let (body_value, is_binary) = crate::util::encode_body_for_stub(body);
+    let mode = if is_binary {
+        ResponseMode::Binary
     } else {
-        match std::str::from_utf8(body) {
-            Ok(text) => {
-                // Valid UTF-8: try to parse as JSON, otherwise store as string
-                let val = if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(text) {
-                    json_val
-                } else {
-                    serde_json::Value::String(text.to_string())
-                };
-                (Some(val), ResponseMode::Text)
-            }
-            Err(_) => {
-                // Binary content: base64-encode and use binary mode
-                use base64::Engine;
-                let encoded = base64::engine::general_purpose::STANDARD.encode(body);
-                (
-                    Some(serde_json::Value::String(encoded)),
-                    ResponseMode::Binary,
-                )
-            }
-        }
+        ResponseMode::Text
     };
 
     let is_response = IsResponse {

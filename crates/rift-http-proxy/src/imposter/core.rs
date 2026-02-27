@@ -5,8 +5,8 @@
 
 use super::predicates::stub_matches;
 use super::response::{
-    create_response_preview, create_stub_from_proxy_response, execute_stub_response,
-    execute_stub_response_with_rift, get_rift_script_config,
+    create_response_preview, create_stub_from_proxy_response, execute_stub_response_with_rift,
+    get_rift_script_config,
 };
 use super::types::{
     DebugImposter, DebugResponsePreview, DebugStubInfo, ImposterConfig, ProxyResponse,
@@ -370,23 +370,6 @@ impl Imposter {
                 )
             })
             .collect()
-    }
-
-    /// Execute a stub and get the response with behaviors
-    /// Returns (status, headers, body, behaviors, is_fault)
-    #[allow(clippy::type_complexity)]
-    pub fn execute_stub(
-        &self,
-        stub_state: &StubState,
-    ) -> Option<(
-        u16,
-        HashMap<String, String>,
-        String,
-        Option<serde_json::Value>,
-        bool,
-    )> {
-        let response = stub_state.get_next_response()?;
-        execute_stub_response(response)
     }
 
     /// Execute a stub and get the response with behaviors and rift extensions
@@ -821,10 +804,7 @@ impl Imposter {
             } else {
                 None
             },
-            timestamp_secs: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
+            timestamp_secs: crate::util::unix_timestamp(),
         };
 
         self.recording_store.record(signature, recorded_response);

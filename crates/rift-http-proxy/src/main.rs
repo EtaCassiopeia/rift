@@ -32,6 +32,9 @@ mod recording;
 mod extensions;
 mod response;
 
+// Shared utilities
+mod util;
+
 // Internal modules
 mod scripting;
 
