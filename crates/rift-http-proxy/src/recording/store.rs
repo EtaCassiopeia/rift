@@ -3,8 +3,8 @@
 use super::mode::ProxyMode;
 use super::stub_generator::generate_stub;
 use super::types::{RecordedResponse, RequestSignature};
-use parking_lot::RwLock;
-use std::collections::HashMap;
+use parking_lot::{Mutex, RwLock};
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 use tracing::{debug, info};
@@ -19,6 +19,10 @@ const MAX_TOTAL_SIGNATURES: usize = 10_000;
 pub struct RecordingStore {
     /// Recorded responses by request signature
     responses: RwLock<HashMap<RequestSignature, Vec<RecordedResponse>>>,
+    /// Signatures currently being proxied (in-flight), used to prevent
+    /// TOCTOU races in proxyOnce mode where multiple concurrent requests
+    /// could all see "not yet recorded" and proxy simultaneously.
+    pending: Mutex<HashSet<RequestSignature>>,
     /// Mode-specific behavior
     mode: ProxyMode,
 }
@@ -27,6 +31,7 @@ impl RecordingStore {
     pub fn new(mode: ProxyMode) -> Self {
         Self {
             responses: RwLock::new(HashMap::new()),
+            pending: Mutex::new(HashSet::new()),
             mode,
         }
     }
@@ -40,16 +45,20 @@ impl RecordingStore {
     pub fn record(&self, signature: RequestSignature, response: RecordedResponse) {
         match self.mode {
             ProxyMode::ProxyOnce => {
-                // Only record if not already recorded
                 let mut store = self.responses.write();
                 if store.len() >= MAX_TOTAL_SIGNATURES && !store.contains_key(&signature) {
                     debug!(
                         "Recording store full ({} signatures), dropping new recording",
                         MAX_TOTAL_SIGNATURES
                     );
+                    self.pending.lock().remove(&signature);
                     return;
                 }
-                store.entry(signature).or_insert_with(|| vec![response]);
+                store
+                    .entry(signature.clone())
+                    .or_insert_with(|| vec![response]);
+                // Remove from pending set now that the response is recorded
+                self.pending.lock().remove(&signature);
             }
             ProxyMode::ProxyAlways => {
                 let mut store = self.responses.write();
@@ -84,12 +93,24 @@ impl RecordingStore {
             .and_then(|responses| responses.first().cloned())
     }
 
-    /// Check if should proxy or replay
+    /// Atomically check whether to proxy and claim the signature if so.
+    ///
+    /// For `proxyOnce` mode, this prevents TOCTOU races: if multiple concurrent
+    /// requests arrive for the same signature, only the first caller gets `true`.
+    /// Subsequent callers see the signature as "pending" and get `false`.
+    ///
+    /// Returns `true` if the caller should proxy the request.
+    /// Returns `false` if a recorded response exists or another request is already in-flight.
     pub fn should_proxy(&self, signature: &RequestSignature) -> bool {
         match self.mode {
             ProxyMode::ProxyOnce => {
-                // Proxy only if not recorded
-                !self.responses.read().contains_key(signature)
+                // Check if already recorded
+                if self.responses.read().contains_key(signature) {
+                    return false;
+                }
+                // Atomically claim the signature for proxying.
+                // Only the first thread to insert succeeds; others see it as pending.
+                self.pending.lock().insert(signature.clone())
             }
             ProxyMode::ProxyAlways => true,
             ProxyMode::ProxyTransparent => true,
@@ -106,6 +127,7 @@ impl RecordingStore {
     // Public API for future use (admin endpoints)
     pub fn clear(&self) {
         self.responses.write().clear();
+        self.pending.lock().clear();
     }
 
     /// Get number of recorded signatures

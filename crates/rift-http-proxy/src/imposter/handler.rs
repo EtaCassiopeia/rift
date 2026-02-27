@@ -168,7 +168,6 @@ pub async fn handle_imposter_request(
                     &uri,
                     &headers_clone,
                     body_string.as_deref(),
-                    stub_index,
                 )
                 .await
             {
