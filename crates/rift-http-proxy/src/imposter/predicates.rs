@@ -2003,10 +2003,9 @@ mod tests {
     fn test_matches_method_with_except_applied() {
         // matches { method: "^OST$" } with except="P" and method "POST"
         // After applying except: "POST" → "OST", regex "^OST$" matches "OST" → true
-        let fields: HashMap<String, serde_json::Value> =
-            [("method".to_string(), json!("^OST$"))]
-                .into_iter()
-                .collect();
+        let fields: HashMap<String, serde_json::Value> = [("method".to_string(), json!("^OST$"))]
+            .into_iter()
+            .collect();
 
         let params = PredicateParameters {
             except: "P".to_string(),
