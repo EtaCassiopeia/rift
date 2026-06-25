@@ -164,6 +164,7 @@ mod tests {
                 into: "${PATH}".to_string(),
                 extraction: ExtractionMethod::Regex {
                     selector: r"/users/(\d+)".to_string(),
+                    options: None,
                 },
             },
             CopyBehavior {
@@ -175,6 +176,7 @@ mod tests {
                 into: "${NAME}".to_string(),
                 extraction: ExtractionMethod::Regex {
                     selector: ".*".to_string(),
+                    options: None,
                 },
             },
         ];

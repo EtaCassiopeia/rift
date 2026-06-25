@@ -1,14 +1,30 @@
 //! Extraction methods: regex, JSONPath, XPath.
 
-use regex::Regex;
+use regex::RegexBuilder;
 use serde::{Deserialize, Serialize};
+
+/// Regex matching options (Mountebank-compatible)
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RegexOptions {
+    /// Case-insensitive matching
+    #[serde(default)]
+    pub ignore_case: bool,
+    /// Multiline mode (`^`/`$` match line boundaries)
+    #[serde(default)]
+    pub multiline: bool,
+}
 
 /// Method for extracting values from source
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "method", rename_all = "lowercase")]
 pub enum ExtractionMethod {
     /// Regular expression with capture groups
-    Regex { selector: String },
+    Regex {
+        selector: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        options: Option<RegexOptions>,
+    },
     /// JSONPath expression
     #[serde(rename = "jsonpath")]
     JsonPath { selector: String },
@@ -21,8 +37,13 @@ impl ExtractionMethod {
     /// Apply extraction to a value
     pub fn extract(&self, value: &str) -> Option<String> {
         match self {
-            ExtractionMethod::Regex { selector } => {
-                let re = Regex::new(selector).ok()?;
+            ExtractionMethod::Regex { selector, options } => {
+                let opts = options.as_ref();
+                let re = RegexBuilder::new(selector)
+                    .case_insensitive(opts.is_some_and(|o| o.ignore_case))
+                    .multi_line(opts.is_some_and(|o| o.multiline))
+                    .build()
+                    .ok()?;
                 if let Some(caps) = re.captures(value) {
                     // Return first capture group if exists, otherwise full match
                     caps.get(1)
@@ -84,6 +105,7 @@ mod tests {
     fn test_extraction_regex() {
         let method = ExtractionMethod::Regex {
             selector: r"/users/(\d+)".to_string(),
+            options: None,
         };
         assert_eq!(method.extract("/users/123"), Some("123".to_string()));
         assert_eq!(method.extract("/posts/456"), None);
@@ -93,6 +115,7 @@ mod tests {
     fn test_extraction_regex_full_match() {
         let method = ExtractionMethod::Regex {
             selector: r".*".to_string(),
+            options: None,
         };
         assert_eq!(
             method.extract("hello world"),
@@ -273,5 +296,49 @@ mod tests {
             extract_jsonpath(json, "$.items[1]"),
             Some("second".to_string())
         );
+    }
+
+    #[test]
+    fn test_extraction_regex_ignore_case() {
+        let method = ExtractionMethod::Regex {
+            selector: "hello".to_string(),
+            options: Some(RegexOptions {
+                ignore_case: true,
+                multiline: false,
+            }),
+        };
+        assert_eq!(method.extract("HELLO world"), Some("HELLO".to_string()));
+        assert_eq!(method.extract("nope"), None);
+    }
+
+    #[test]
+    fn test_extraction_regex_multiline() {
+        let method = ExtractionMethod::Regex {
+            selector: r"^line2".to_string(),
+            options: Some(RegexOptions {
+                ignore_case: false,
+                multiline: true,
+            }),
+        };
+        assert_eq!(
+            method.extract("line1\nline2\nline3"),
+            Some("line2".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extraction_regex_options_serde() {
+        let json = r#"{"method": "regex", "selector": ".*", "options": {"ignoreCase": true, "multiline": false}}"#;
+        let method: ExtractionMethod = serde_json::from_str(json).unwrap();
+        match method {
+            ExtractionMethod::Regex {
+                options: Some(opts),
+                ..
+            } => {
+                assert!(opts.ignore_case);
+                assert!(!opts.multiline);
+            }
+            _ => panic!("Expected Regex with options"),
+        }
     }
 }
