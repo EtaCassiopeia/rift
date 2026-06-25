@@ -637,3 +637,241 @@ impl App {
         rates
     }
 }
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+    use crate::api::{ApiClient, ImposterSummary, MetricsData};
+    use crate::theme::Theme;
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    /// Build a minimal App without hitting the network.
+    pub(crate) fn make_test_app() -> App {
+        App {
+            view: View::ImposterList,
+            view_stack: Vec::new(),
+            overlay: Overlay::None,
+            imposters: Vec::new(),
+            current_imposter: None,
+            metrics: MetricsData::default(),
+            metrics_history: VecDeque::new(),
+            imposter_list_state: ListState::default(),
+            stub_list_state: ListState::default(),
+            request_list_state: ListState::default(),
+            focus: FocusArea::Left,
+            status_message: None,
+            search_active: false,
+            search_query: String::new(),
+            stub_editor: None,
+            input_state: InputState {
+                protocol: "http".to_string(),
+                ..Default::default()
+            },
+            export_scroll_offset: 0,
+            validation_scroll_offset: 0,
+            help_scroll: 0,
+            help_max_scroll: 0,
+            server_config: None,
+            client: ApiClient::new("http://localhost:2525"),
+            admin_url: "http://localhost:2525".to_string(),
+            theme: Theme::default(),
+            should_quit: false,
+            is_loading: false,
+            is_connected: false,
+            last_refresh: Instant::now(),
+            start_time: Instant::now(),
+            refresh_interval: Duration::from_secs(5),
+        }
+    }
+
+    pub(crate) fn make_imposter(port: u16, name: Option<&str>, protocol: &str) -> ImposterSummary {
+        ImposterSummary {
+            port,
+            protocol: protocol.to_string(),
+            name: name.map(String::from),
+            number_of_requests: 0,
+            stub_count: 0,
+            enabled: true,
+            record_requests: false,
+        }
+    }
+
+    // ─── Navigation ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_navigate_pushes_current_view_to_stack() {
+        let mut app = make_test_app();
+        app.navigate(View::Metrics);
+        assert_eq!(app.view, View::Metrics);
+        assert_eq!(app.view_stack, vec![View::ImposterList]);
+    }
+
+    #[test]
+    fn test_navigate_clears_search() {
+        let mut app = make_test_app();
+        app.search_active = true;
+        app.search_query = "foo".to_string();
+        app.navigate(View::Metrics);
+        assert!(!app.search_active);
+        assert!(app.search_query.is_empty());
+    }
+
+    #[test]
+    fn test_go_back_pops_from_stack() {
+        let mut app = make_test_app();
+        app.navigate(View::Metrics);
+        app.go_back();
+        assert_eq!(app.view, View::ImposterList);
+        assert!(app.view_stack.is_empty());
+    }
+
+    #[test]
+    fn test_go_back_with_active_search_clears_search_without_popping() {
+        let mut app = make_test_app();
+        app.navigate(View::Metrics);
+        app.search_active = true;
+        app.search_query = "foo".to_string();
+        app.go_back();
+        // View stays at Metrics (search was cleared, not navigation popped)
+        assert_eq!(app.view, View::Metrics);
+        assert!(!app.search_active);
+        assert!(app.search_query.is_empty());
+        // Stack still has ImposterList — not consumed
+        assert_eq!(app.view_stack, vec![View::ImposterList]);
+    }
+
+    #[test]
+    fn test_go_back_from_imposter_list_with_empty_stack_sets_should_quit() {
+        let mut app = make_test_app();
+        assert!(app.view_stack.is_empty());
+        app.go_back();
+        assert!(app.should_quit);
+    }
+
+    // ─── Focus ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_toggle_focus_cycles_left_right() {
+        let mut app = make_test_app();
+        assert_eq!(app.focus, FocusArea::Left);
+        app.toggle_focus();
+        assert_eq!(app.focus, FocusArea::Right);
+        app.toggle_focus();
+        assert_eq!(app.focus, FocusArea::Left);
+    }
+
+    // ─── Imposter selection ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_selected_imposter_returns_none_when_list_empty() {
+        let app = make_test_app();
+        assert!(app.selected_imposter().is_none());
+    }
+
+    #[test]
+    fn test_selected_imposter_returns_correct_entry() {
+        let mut app = make_test_app();
+        app.imposters = vec![
+            make_imposter(4545, None, "http"),
+            make_imposter(4546, Some("api"), "http"),
+        ];
+        app.imposter_list_state.select(Some(1));
+        let sel = app.selected_imposter().expect("should have selection");
+        assert_eq!(sel.port, 4546);
+    }
+
+    // ─── InputState ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_input_state_proxy_mode_str() {
+        let cases = [
+            (0, "proxyOnce"),
+            (1, "proxyAlways"),
+            (2, "proxyTransparent"),
+            (99, "proxyOnce"),
+        ];
+        for (mode, expected) in cases {
+            let s = InputState {
+                proxy_mode: mode,
+                ..Default::default()
+            };
+            assert_eq!(s.proxy_mode_str(), expected);
+        }
+    }
+
+    // ─── StubEditor ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_stub_editor_validates_valid_json() {
+        let json = r#"{"predicates":[],"responses":[{"is":{"statusCode":200}}]}"#;
+        let editor = StubEditor::new(json);
+        assert!(editor.validation_error.is_none());
+    }
+
+    #[test]
+    fn test_stub_editor_validates_invalid_json() {
+        let editor = StubEditor::new("not json at all");
+        assert!(editor.validation_error.is_some());
+    }
+
+    #[test]
+    fn test_stub_editor_get_stub_returns_none_on_invalid_json() {
+        let editor = StubEditor::new("{bad json}");
+        assert!(editor.get_stub().is_none());
+    }
+
+    #[test]
+    fn test_stub_editor_get_stub_returns_some_on_valid_json() {
+        let json = r#"{"predicates":[],"responses":[]}"#;
+        let editor = StubEditor::new(json);
+        assert!(editor.get_stub().is_some());
+    }
+
+    #[test]
+    fn test_stub_editor_format_pretty_prints() {
+        let json = r#"{"predicates":[],"responses":[]}"#;
+        let mut editor = StubEditor::new(json);
+        editor.format();
+        let content = editor.editor.lines().join("\n");
+        // Pretty-printed JSON should be multi-line
+        assert!(content.lines().count() > 1);
+    }
+
+    // ─── crossterm_key_to_input ───────────────────────────────────────────────
+
+    #[test]
+    fn test_key_to_input_converts_char() {
+        let key = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
+        let input = crossterm_key_to_input(key);
+        assert!(matches!(input.key, ratatui_textarea::Key::Char('a')));
+        assert!(!input.ctrl);
+    }
+
+    #[test]
+    fn test_key_to_input_ctrl_modifier() {
+        let key = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL);
+        let input = crossterm_key_to_input(key);
+        assert!(input.ctrl);
+    }
+
+    #[test]
+    fn test_key_to_input_special_keys() {
+        use ratatui_textarea::Key;
+        let cases = [
+            (KeyCode::Enter, Key::Enter),
+            (KeyCode::Backspace, Key::Backspace),
+            (KeyCode::Esc, Key::Esc),
+            (KeyCode::Home, Key::Home),
+            (KeyCode::End, Key::End),
+        ];
+        for (code, expected) in cases {
+            let key = KeyEvent::new(code, KeyModifiers::NONE);
+            let input = crossterm_key_to_input(key);
+            assert_eq!(
+                std::mem::discriminant(&input.key),
+                std::mem::discriminant(&expected),
+                "Key {code:?} should map to {expected:?}"
+            );
+        }
+    }
+}
