@@ -274,6 +274,10 @@ impl From<ImposterError> for Response<Full<Bytes>> {
             ImposterError::StubIndexOutOfBounds(i) => {
                 error_response(StatusCode::NOT_FOUND, &format!("Stub index {i} not found"))
             }
+            ImposterError::PersistError(msg) => error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                &format!("Persistence error: {msg}"),
+            ),
         }
     }
 }

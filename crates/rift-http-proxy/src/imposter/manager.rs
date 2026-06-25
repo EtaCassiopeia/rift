@@ -226,7 +226,7 @@ impl ImposterManager {
     }
 
     /// Add stub to an imposter
-    pub fn add_stub(
+    pub async fn add_stub(
         &self,
         port: u16,
         stub: Stub,
@@ -234,36 +234,37 @@ impl ImposterManager {
     ) -> Result<(), ImposterError> {
         let imposter = self.get_imposter(port)?;
         imposter.add_stub(stub, index);
-        self.persist_imposter(&imposter);
-        Ok(())
+        self.persist_imposter_checked(&imposter).await
     }
 
     /// Replace a stub
-    pub fn replace_stub(&self, port: u16, index: usize, stub: Stub) -> Result<(), ImposterError> {
+    pub async fn replace_stub(
+        &self,
+        port: u16,
+        index: usize,
+        stub: Stub,
+    ) -> Result<(), ImposterError> {
         let imposter = self.get_imposter(port)?;
         imposter
             .replace_stub(index, stub)
             .map_err(|_| ImposterError::StubIndexOutOfBounds(index))?;
-        self.persist_imposter(&imposter);
-        Ok(())
+        self.persist_imposter_checked(&imposter).await
     }
 
     /// Delete a stub
-    pub fn delete_stub(&self, port: u16, index: usize) -> Result<(), ImposterError> {
+    pub async fn delete_stub(&self, port: u16, index: usize) -> Result<(), ImposterError> {
         let imposter = self.get_imposter(port)?;
         imposter
             .delete_stub(index)
             .map_err(|_| ImposterError::StubIndexOutOfBounds(index))?;
-        self.persist_imposter(&imposter);
-        Ok(())
+        self.persist_imposter_checked(&imposter).await
     }
 
     /// Replace all stubs for an imposter
-    pub fn replace_stubs(&self, port: u16, stubs: Vec<Stub>) -> Result<(), ImposterError> {
+    pub async fn replace_stubs(&self, port: u16, stubs: Vec<Stub>) -> Result<(), ImposterError> {
         let imposter = self.get_imposter(port)?;
         imposter.replace_stubs(stubs);
-        self.persist_imposter(&imposter);
-        Ok(())
+        self.persist_imposter_checked(&imposter).await
     }
 
     /// Get a specific stub by index
@@ -281,7 +282,31 @@ impl ImposterManager {
     }
 
     /// Persist an imposter's current config to datadir (if configured).
-    /// Spawns a background task; write failures are logged, not propagated.
+    /// Awaits the write and returns an error if it fails, so the caller can
+    /// surface a 503 to the API client instead of silently losing the change.
+    async fn persist_imposter_checked(&self, imposter: &Imposter) -> Result<(), ImposterError> {
+        let Some(ref datadir) = self.datadir else {
+            return Ok(());
+        };
+        let port = match imposter.config.port {
+            Some(p) => p,
+            None => return Ok(()),
+        };
+        let mut snapshot = imposter.config.clone();
+        snapshot.stubs = imposter.get_stubs();
+        let path = datadir.join(format!("{port}.json"));
+        let json = serde_json::to_string_pretty(&snapshot).map_err(|e| {
+            ImposterError::PersistError(format!("Failed to serialize imposter {port}: {e}"))
+        })?;
+        tokio::fs::write(&path, json).await.map_err(|e| {
+            ImposterError::PersistError(format!("Failed to write imposter {port} to {path:?}: {e}"))
+        })
+    }
+
+    /// Persist an imposter's current config to datadir (if configured).
+    /// Fire-and-forget: write failures are logged but not propagated.
+    /// Used by create_imposter where the imposter is already running and
+    /// a persistence failure should not roll back the in-memory state.
     fn persist_imposter(&self, imposter: &Imposter) {
         let Some(ref datadir) = self.datadir else {
             return;
@@ -400,8 +425,7 @@ mod tests {
         .unwrap();
 
         manager.create_imposter(config).await.expect("create");
-        // Wait for the initial write-through to complete before modifying stubs.
-        // Without this, the create and add_stub writes race and can corrupt the file.
+        // Wait for create_imposter's fire-and-forget persistence to land.
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         let stub: Stub = serde_json::from_value(serde_json::json!({
@@ -410,8 +434,7 @@ mod tests {
         }))
         .unwrap();
 
-        manager.add_stub(19503, stub, None).unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        manager.add_stub(19503, stub, None).await.unwrap();
 
         let file = dir.path().join("19503.json");
         let content = std::fs::read_to_string(&file).unwrap();
@@ -431,5 +454,45 @@ mod tests {
     fn test_with_datadir_sets_datadir() {
         let manager = ImposterManager::with_datadir(Some("/tmp/test".into()));
         assert!(manager.datadir.is_some());
+    }
+
+    // =========================================================================
+    // Issue #173: persistence failures must surface as errors, not silently drop
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_add_stub_returns_persist_error_on_write_failure() {
+        // Point the datadir at a path that cannot be written (a file, not a dir).
+        // The write will fail, and add_stub must propagate ImposterError::PersistError.
+        let fake_dir = tempfile::tempdir().expect("tempdir");
+        // Use a datadir sub-path that was never created, so fs::write fails.
+        let nonexistent_datadir = fake_dir.path().join("does_not_exist_subdir");
+
+        let manager = ImposterManager::with_datadir(Some(nonexistent_datadir));
+        let config: ImposterConfig = serde_json::from_value(serde_json::json!({
+            "protocol": "http",
+            "port": 19600,
+            "stubs": []
+        }))
+        .unwrap();
+
+        manager
+            .create_imposter(config)
+            .await
+            .expect("create should succeed in memory");
+
+        let stub: Stub = serde_json::from_value(serde_json::json!({
+            "predicates": [],
+            "responses": [{"is": {"statusCode": 200}}]
+        }))
+        .unwrap();
+
+        let result = manager.add_stub(19600, stub, None).await;
+        assert!(
+            matches!(result, Err(ImposterError::PersistError(_))),
+            "add_stub should return PersistError when datadir is not writable, got: {result:?}"
+        );
+
+        manager.delete_imposter(19600).await.unwrap();
     }
 }
