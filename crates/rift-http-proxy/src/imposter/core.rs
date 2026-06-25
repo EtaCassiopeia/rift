@@ -1212,6 +1212,37 @@ mod tests {
         assert_eq!(predicates.len(), 3);
     }
 
+    #[test]
+    fn test_record_request_cap_enforced() {
+        let config = ImposterConfig {
+            port: Some(0),
+            protocol: "http".to_string(),
+            record_requests: true,
+            ..Default::default()
+        };
+        let imposter = Imposter::new(config);
+        let req = RecordedRequest {
+            request_from: "127.0.0.1".to_string(),
+            method: "GET".to_string(),
+            path: "/".to_string(),
+            query: std::collections::HashMap::new(),
+            headers: std::collections::HashMap::new(),
+            body: None,
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
+        };
+
+        for _ in 0..MAX_RECORDED_REQUESTS + 10 {
+            imposter.record_request(&req);
+        }
+
+        let recorded = imposter.recorded_requests.read();
+        assert_eq!(
+            recorded.len(),
+            MAX_RECORDED_REQUESTS,
+            "Recorded requests must not exceed the cap"
+        );
+    }
+
     #[cfg(feature = "javascript")]
     #[test]
     fn test_generator_inject_bad_function_returns_empty() {

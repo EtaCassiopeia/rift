@@ -46,10 +46,6 @@ struct Args {
     #[arg(short = 'e', long)]
     errors_only: bool,
 
-    /// Verbose output
-    #[arg(short, long)]
-    verbose: bool,
-
     /// Strict mode - treat warnings as errors
     #[arg(short, long)]
     strict: bool,
