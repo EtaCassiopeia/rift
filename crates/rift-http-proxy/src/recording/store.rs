@@ -104,13 +104,18 @@ impl RecordingStore {
     pub fn should_proxy(&self, signature: &RequestSignature) -> bool {
         match self.mode {
             ProxyMode::ProxyOnce => {
-                // Check if already recorded
-                if self.responses.read().contains_key(signature) {
+                // Hold the read guard through the pending.insert() call so that
+                // record() (which needs responses.write()) cannot complete between
+                // the "not found" check and the pending claim, eliminating the TOCTOU.
+                let responses = self.responses.read();
+                if responses.contains_key(signature) {
                     return false;
                 }
-                // Atomically claim the signature for proxying.
-                // Only the first thread to insert succeeds; others see it as pending.
+                // pending.lock() is acquired while `responses` read guard is still held.
+                // record() cannot acquire responses.write() until we release the read
+                // guard, so the check-and-claim is atomic with respect to record().
                 self.pending.lock().insert(signature.clone())
+                // `responses` guard dropped here
             }
             ProxyMode::ProxyAlways => true,
             ProxyMode::ProxyTransparent => true,
@@ -580,6 +585,54 @@ mod tests {
         assert!(
             store.get_recorded(&new_sig).is_none(),
             "Overflow signature should not be recorded"
+        );
+    }
+
+    // =========================================================================
+    // Issue #171: TOCTOU fix — should_proxy must not race with record()
+    // =========================================================================
+
+    #[test]
+    fn test_proxy_once_no_toctou_after_concurrent_record() {
+        // Reproduce the TOCTOU: record() completes while should_proxy is between
+        // its two operations (check responses, insert pending). With the fix,
+        // should_proxy holds responses.read() across both operations, so record()
+        // cannot complete mid-check.  We verify the observable invariant: after
+        // record() has finished, should_proxy always returns false.
+        use std::sync::Arc;
+        use std::thread;
+
+        let store = Arc::new(RecordingStore::new(ProxyMode::ProxyOnce));
+        let sig = RequestSignature::new("GET", "/toctou-test", None, &[]);
+
+        // Pre-record the response so the store already has it.
+        store.should_proxy(&sig); // claim pending
+        store.record(
+            sig.clone(),
+            RecordedResponse {
+                status: 200,
+                headers: Vec::new(),
+                body: b"pre-recorded".to_vec(),
+                latency_ms: Some(10),
+                timestamp_secs: unix_timestamp(),
+            },
+        );
+
+        // Spin up concurrent threads — all must see false because the response exists.
+        let results: Vec<bool> = (0..20)
+            .map(|_| {
+                let store = Arc::clone(&store);
+                let sig = sig.clone();
+                thread::spawn(move || store.should_proxy(&sig))
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|h| h.join().unwrap())
+            .collect();
+
+        assert!(
+            results.iter().all(|&r| !r),
+            "All concurrent should_proxy calls after record() must return false"
         );
     }
 }

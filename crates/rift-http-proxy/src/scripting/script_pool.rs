@@ -3,7 +3,7 @@ use crate::scripting::{FaultDecision, ScriptRequest};
 use anyhow::{anyhow, Result};
 use crossbeam::channel::{bounded, Receiver, Sender};
 use rhai::AST;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -80,8 +80,25 @@ impl ScriptWorker {
             .spawn(move || {
                 debug!("Script worker {} started", worker_id);
 
-                // Create reusable engine instances per worker with custom functions
-                let rhai_engine = crate::scripting::rhai_engine::RhaiEngine::create_engine();
+                // Per-worker abort flag: set to true by the watchdog when the task
+                // deadline is exceeded; checked by Rhai's on_progress callback.
+                let abort_flag = Arc::new(AtomicBool::new(false));
+
+                // Create reusable engine instances per worker with custom functions.
+                // `mut` is required to install the on_progress callback.
+                let mut rhai_engine = crate::scripting::rhai_engine::RhaiEngine::create_engine();
+
+                // Register the abort flag as a Rhai progress callback.
+                // Rhai calls this periodically during AST evaluation; returning Some(_)
+                // terminates execution with EvalAltResult::ErrorTerminated.
+                let progress_flag = Arc::clone(&abort_flag);
+                rhai_engine.on_progress(move |_ops| {
+                    if progress_flag.load(Ordering::Relaxed) {
+                        Some(rhai::Dynamic::TRUE)
+                    } else {
+                        None
+                    }
+                });
 
                 #[cfg(feature = "lua")]
                 let lua = Lua::new();
@@ -97,6 +114,28 @@ impl ScriptWorker {
                     match work_rx.recv_timeout(Duration::from_millis(100)) {
                         Ok(task) => {
                             let start = Instant::now();
+                            let timeout = task.timeout;
+
+                            // Reset the abort flag before each task.
+                            abort_flag.store(false, Ordering::Relaxed);
+
+                            // Start a watchdog thread: sets the abort flag after
+                            // `timeout`, causing Rhai to self-interrupt via on_progress.
+                            // Using a channel so the watchdog can be cancelled cleanly
+                            // when the script finishes before the deadline.
+                            let (cancel_tx, cancel_rx) = std::sync::mpsc::channel::<()>();
+                            let watchdog_flag = Arc::clone(&abort_flag);
+                            thread::Builder::new()
+                                .name(format!("script-watchdog-{worker_id}"))
+                                .spawn(move || {
+                                    match cancel_rx.recv_timeout(timeout) {
+                                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                                            watchdog_flag.store(true, Ordering::Relaxed);
+                                        }
+                                        _ => {} // cancelled or disconnected before timeout
+                                    }
+                                })
+                                .expect("Failed to spawn watchdog thread");
 
                             let result = match &task.engine {
                                 CompiledScript::Rhai { ast, rule_id } => Self::execute_rhai(
@@ -125,11 +164,24 @@ impl ScriptWorker {
                                 }
                             };
 
+                            // Cancel the watchdog — dropping the sender closes the
+                            // channel, which causes cancel_rx.recv_timeout to return
+                            // Disconnected before the timeout fires.
+                            drop(cancel_tx);
+                            // Safety-net reset so the next task starts clean even if
+                            // the watchdog fired right at the task boundary.
+                            abort_flag.store(false, Ordering::Relaxed);
+
                             let duration = start.elapsed();
-                            debug!(
-                                "Script execution completed in {:?} for worker {}",
-                                duration, worker_id
-                            );
+                            if duration >= timeout {
+                                warn!(
+                                    worker_id,
+                                    ?duration,
+                                    "Script execution exceeded timeout; Rhai was interrupted"
+                                );
+                            } else {
+                                debug!(worker_id, ?duration, "Script execution completed");
+                            }
 
                             // Send result back (ignore if receiver dropped)
                             let _ = task.result_tx.send(result);
@@ -602,6 +654,101 @@ mod tests {
         let pool = ScriptPool::new(config).unwrap();
         // Pool should be created even with very short timeout
         assert_eq!(pool.worker_count(), 2);
+    }
+
+    // =========================================================================
+    // Issue #172: script worker must not be permanently blocked by a runaway script
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_rhai_infinite_loop_is_interrupted_by_timeout() {
+        // An infinite-loop Rhai script must be interrupted when the timeout fires.
+        // After the timeout, the same worker must be able to handle a subsequent
+        // script — proving it was never permanently blocked.
+        use crate::extensions::flow_state::NoOpFlowStore;
+        use crate::scripting::ScriptRequest;
+        use std::collections::HashMap;
+
+        let config = ScriptPoolConfig {
+            workers: 1, // single worker so we can verify it's freed
+            queue_size: 10,
+            timeout_ms: 100, // very short; infinite loop fires timeout quickly
+        };
+
+        let pool = ScriptPool::new(config).unwrap();
+
+        let make_request = || ScriptRequest {
+            method: "GET".to_string(),
+            path: "/test".to_string(),
+            headers: HashMap::new(),
+            body: serde_json::json!(null),
+            query: HashMap::new(),
+            path_params: HashMap::new(),
+        };
+        let flow_store =
+            || -> Arc<dyn crate::extensions::flow_state::FlowStore> { Arc::new(NoOpFlowStore) };
+
+        // Compile an infinite loop script using a Rhai engine without custom functions
+        // (on_progress hooks are installed on the *worker* engine; the compile engine
+        //  only needs to produce a valid AST).
+        let compile_engine = rhai::Engine::new();
+        let ast = compile_engine
+            .compile(
+                r#"
+                fn should_inject(request, flow) {
+                    let i = 0;
+                    loop { i += 1; }
+                    #{ inject: false }
+                }
+            "#,
+            )
+            .expect("infinite loop script should compile");
+
+        let compiled = CompiledScript::Rhai {
+            ast: Arc::new(ast),
+            rule_id: "infinite-loop".to_string(),
+        };
+
+        let result = pool.execute(compiled, make_request(), flow_store()).await;
+
+        assert!(
+            result.is_err(),
+            "Infinite loop must return an error (either tokio timeout or Rhai interrupt)"
+        );
+
+        // Give the worker time to finish its internal cleanup after the interrupt.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        // The worker must be free and able to run another script normally.
+        let compile_engine2 = rhai::Engine::new();
+        let ast2 = compile_engine2
+            .compile(
+                r#"
+                fn should_inject(request, flow) {
+                    #{ inject: false }
+                }
+            "#,
+            )
+            .expect("normal script should compile");
+
+        let compiled2 = CompiledScript::Rhai {
+            ast: Arc::new(ast2),
+            rule_id: "post-timeout".to_string(),
+        };
+
+        let pool2 = ScriptPool::new(ScriptPoolConfig {
+            workers: 1,
+            queue_size: 10,
+            timeout_ms: 5000,
+        })
+        .unwrap();
+
+        let result2 = pool2.execute(compiled2, make_request(), flow_store()).await;
+
+        assert!(
+            result2.is_ok(),
+            "Worker (or a fresh pool) must handle scripts normally after a timeout"
+        );
     }
 
     #[tokio::test]

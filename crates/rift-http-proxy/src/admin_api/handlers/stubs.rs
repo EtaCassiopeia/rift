@@ -76,7 +76,7 @@ pub async fn handle_add(
         }
     }
 
-    match manager.add_stub(port, add_req.stub, add_req.index) {
+    match manager.add_stub(port, add_req.stub, add_req.index).await {
         Ok(()) => handle_get_imposter(port, None, base_url, manager).await,
         Err(e) => e.into(),
     }
@@ -124,7 +124,7 @@ pub async fn handle_replace_all(
         );
     }
 
-    if let Err(e) = manager.replace_stubs(port, replace_req.stubs) {
+    if let Err(e) = manager.replace_stubs(port, replace_req.stubs).await {
         return e.into();
     }
 
@@ -208,7 +208,7 @@ pub async fn handle_replace(
         );
     }
 
-    match manager.replace_stub(port, index, stub) {
+    match manager.replace_stub(port, index, stub).await {
         Ok(()) => handle_get_imposter(port, None, base_url, manager).await,
         Err(e) => e.into(),
     }
@@ -221,7 +221,7 @@ pub async fn handle_delete(
     base_url: &str,
     manager: Arc<ImposterManager>,
 ) -> Response<Full<Bytes>> {
-    match manager.delete_stub(port, index) {
+    match manager.delete_stub(port, index).await {
         Ok(()) => handle_get_imposter(port, None, base_url, manager).await,
         Err(e) => e.into(),
     }

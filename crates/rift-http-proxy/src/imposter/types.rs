@@ -993,6 +993,8 @@ pub enum ImposterError {
     InvalidProtocol(String),
     #[error("Stub index {0} out of bounds")]
     StubIndexOutOfBounds(usize),
+    #[error("Failed to persist imposter: {0}")]
+    PersistError(String),
 }
 
 #[cfg(test)]
