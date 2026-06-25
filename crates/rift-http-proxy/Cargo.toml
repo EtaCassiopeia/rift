@@ -48,6 +48,7 @@ r2d2 = { version = "0.8", optional = true }
 # Logging & Observability
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
 prometheus = "0.13"
 lazy_static = "1.4"
 
