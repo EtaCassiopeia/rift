@@ -296,3 +296,182 @@ impl App {
         self.search_query.clear();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::api::ImposterDetail;
+    use crate::app::tests::{make_imposter, make_test_app};
+
+    // ─── filtered_imposters ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_filtered_imposters_no_query_returns_all() {
+        let mut app = make_test_app();
+        app.imposters = vec![
+            make_imposter(4545, None, "http"),
+            make_imposter(4546, Some("api"), "http"),
+        ];
+        assert_eq!(app.filtered_imposters().len(), 2);
+    }
+
+    #[test]
+    fn test_filtered_imposters_matches_by_port() {
+        let mut app = make_test_app();
+        app.imposters = vec![
+            make_imposter(4545, None, "http"),
+            make_imposter(9000, None, "http"),
+        ];
+        app.search_query = "9000".to_string();
+        let filtered = app.filtered_imposters();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].port, 9000);
+    }
+
+    #[test]
+    fn test_filtered_imposters_matches_by_name() {
+        let mut app = make_test_app();
+        app.imposters = vec![
+            make_imposter(4545, Some("payment-service"), "http"),
+            make_imposter(4546, Some("auth-service"), "http"),
+        ];
+        app.search_query = "auth".to_string();
+        let filtered = app.filtered_imposters();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].port, 4546);
+    }
+
+    #[test]
+    fn test_filtered_imposters_no_match_returns_empty() {
+        let mut app = make_test_app();
+        app.imposters = vec![make_imposter(4545, None, "http")];
+        app.search_query = "zzznomatch".to_string();
+        assert!(app.filtered_imposters().is_empty());
+    }
+
+    #[test]
+    fn test_filtered_imposters_matches_by_protocol() {
+        let mut app = make_test_app();
+        app.imposters = vec![
+            make_imposter(4545, None, "http"),
+            make_imposter(4546, None, "tcp"),
+        ];
+        app.search_query = "tcp".to_string();
+        let filtered = app.filtered_imposters();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].port, 4546);
+    }
+
+    // ─── filtered_stubs ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_filtered_stubs_no_imposter_returns_empty() {
+        let app = make_test_app();
+        assert!(app.filtered_stubs().is_empty());
+    }
+
+    #[test]
+    fn test_filtered_stubs_no_query_returns_all_indices() {
+        let mut app = make_test_app();
+        app.current_imposter = Some(ImposterDetail {
+            port: 4545,
+            protocol: "http".to_string(),
+            name: None,
+            number_of_requests: 0,
+            enabled: true,
+            record_requests: false,
+            stubs: vec![
+                crate::api::Stub {
+                    id: None,
+                    scenario_name: None,
+                    recorded_from: None,
+                    predicates: vec![],
+                    responses: vec![],
+                },
+                crate::api::Stub {
+                    id: None,
+                    scenario_name: None,
+                    recorded_from: None,
+                    predicates: vec![],
+                    responses: vec![],
+                },
+            ],
+            requests: vec![],
+        });
+        let indices = app.filtered_stubs();
+        assert_eq!(indices, vec![0, 1]);
+    }
+
+    // ─── imposter_matches_search ──────────────────────────────────────────────
+
+    #[test]
+    fn test_imposter_matches_search_empty_query_always_true() {
+        let app = make_test_app();
+        let imp = make_imposter(4545, None, "http");
+        assert!(app.imposter_matches_search(&imp));
+    }
+
+    #[test]
+    fn test_imposter_matches_search_by_protocol() {
+        let mut app = make_test_app();
+        app.search_query = "tcp".to_string();
+        let http_imp = make_imposter(4545, None, "http");
+        let tcp_imp = make_imposter(4546, None, "tcp");
+        assert!(!app.imposter_matches_search(&http_imp));
+        assert!(app.imposter_matches_search(&tcp_imp));
+    }
+
+    // ─── select_next / select_previous ───────────────────────────────────────
+
+    #[test]
+    fn test_select_next_empty_list_does_not_panic() {
+        let mut app = make_test_app();
+        app.select_next(); // must not panic
+    }
+
+    #[test]
+    fn test_select_next_advances_selection() {
+        let mut app = make_test_app();
+        app.imposters = vec![
+            make_imposter(4545, None, "http"),
+            make_imposter(4546, None, "http"),
+            make_imposter(4547, None, "http"),
+        ];
+        app.imposter_list_state.select(Some(0));
+        app.select_next();
+        assert_eq!(app.imposter_list_state.selected(), Some(1));
+    }
+
+    #[test]
+    fn test_select_next_wraps_to_first() {
+        let mut app = make_test_app();
+        app.imposters = vec![
+            make_imposter(4545, None, "http"),
+            make_imposter(4546, None, "http"),
+        ];
+        app.imposter_list_state.select(Some(1));
+        app.select_next();
+        assert_eq!(app.imposter_list_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn test_select_previous_wraps_to_last() {
+        let mut app = make_test_app();
+        app.imposters = vec![
+            make_imposter(4545, None, "http"),
+            make_imposter(4546, None, "http"),
+        ];
+        app.imposter_list_state.select(Some(0));
+        app.select_previous();
+        assert_eq!(app.imposter_list_state.selected(), Some(1));
+    }
+
+    #[test]
+    fn test_clear_search_resets_state() {
+        let mut app = make_test_app();
+        app.search_active = true;
+        app.search_query = "foo".to_string();
+        app.clear_search();
+        assert!(!app.search_active);
+        assert!(app.search_query.is_empty());
+    }
+}

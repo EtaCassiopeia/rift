@@ -369,3 +369,142 @@ pub fn format_uptime(duration: std::time::Duration) -> String {
         format!("{}s", secs)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::tests::{make_imposter, make_test_app};
+    use ratatui::{backend::TestBackend, Terminal};
+
+    // ─── format_number ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_format_number_zero() {
+        assert_eq!(format_number(0), "0");
+    }
+
+    #[test]
+    fn test_format_number_no_separator_below_1000() {
+        assert_eq!(format_number(999), "999");
+    }
+
+    #[test]
+    fn test_format_number_thousands_separator() {
+        assert_eq!(format_number(1_000), "1,000");
+        assert_eq!(format_number(1_234_567), "1,234,567");
+    }
+
+    // ─── format_uptime ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_format_uptime_seconds() {
+        assert_eq!(format_uptime(std::time::Duration::from_secs(42)), "42s");
+    }
+
+    #[test]
+    fn test_format_uptime_minutes() {
+        assert_eq!(format_uptime(std::time::Duration::from_secs(90)), "1m 30s");
+    }
+
+    #[test]
+    fn test_format_uptime_hours() {
+        assert_eq!(
+            format_uptime(std::time::Duration::from_secs(3661)),
+            "1h 1m 1s"
+        );
+    }
+
+    // ─── UI smoke tests (render must not panic) ───────────────────────────────
+
+    fn make_terminal() -> Terminal<TestBackend> {
+        Terminal::new(TestBackend::new(120, 40)).expect("test terminal")
+    }
+
+    #[test]
+    fn test_draw_imposter_list_view_does_not_panic() {
+        let mut terminal = make_terminal();
+        let mut app = make_test_app();
+        app.imposters = vec![
+            make_imposter(4545, Some("my-service"), "http"),
+            make_imposter(4546, None, "http"),
+        ];
+        app.imposter_list_state.select(Some(0));
+        terminal
+            .draw(|f| draw(f, &app))
+            .expect("draw must not fail");
+    }
+
+    #[test]
+    fn test_draw_disconnected_state_does_not_panic() {
+        let mut terminal = make_terminal();
+        let mut app = make_test_app();
+        app.is_connected = false;
+        app.is_loading = true;
+        terminal
+            .draw(|f| draw(f, &app))
+            .expect("draw must not fail");
+    }
+
+    #[test]
+    fn test_draw_with_status_message_does_not_panic() {
+        let mut terminal = make_terminal();
+        let mut app = make_test_app();
+        app.set_status("Test status".to_string(), crate::app::StatusLevel::Error);
+        terminal
+            .draw(|f| draw(f, &app))
+            .expect("draw must not fail");
+    }
+
+    #[test]
+    fn test_draw_metrics_view_does_not_panic() {
+        let mut terminal = make_terminal();
+        let mut app = make_test_app();
+        app.view = crate::app::View::Metrics;
+        terminal
+            .draw(|f| draw(f, &app))
+            .expect("draw must not fail");
+    }
+
+    #[test]
+    fn test_draw_config_view_does_not_panic() {
+        let mut terminal = make_terminal();
+        let mut app = make_test_app();
+        app.view = crate::app::View::Config;
+        terminal
+            .draw(|f| draw(f, &app))
+            .expect("draw must not fail");
+    }
+
+    #[test]
+    fn test_draw_search_active_does_not_panic() {
+        let mut terminal = make_terminal();
+        let mut app = make_test_app();
+        app.search_active = true;
+        app.search_query = "payment".to_string();
+        terminal
+            .draw(|f| draw(f, &app))
+            .expect("draw must not fail");
+    }
+
+    #[test]
+    fn test_draw_help_overlay_does_not_panic() {
+        let mut terminal = make_terminal();
+        let mut app = make_test_app();
+        app.overlay = crate::app::Overlay::Help;
+        terminal
+            .draw(|f| draw(f, &app))
+            .expect("draw must not fail");
+    }
+
+    #[test]
+    fn test_draw_error_overlay_does_not_panic() {
+        let mut terminal = make_terminal();
+        let mut app = make_test_app();
+        app.overlay = crate::app::Overlay::Error {
+            message: "Connection failed".to_string(),
+        };
+        terminal
+            .draw(|f| draw(f, &app))
+            .expect("draw must not fail");
+    }
+}
