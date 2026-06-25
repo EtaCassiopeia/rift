@@ -26,7 +26,7 @@ impl AdminApiServer {
         Self {
             addr,
             manager,
-            api_key: api_key.map(|k| Arc::new(k)),
+            api_key: api_key.map(Arc::new),
         }
     }
 
