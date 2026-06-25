@@ -380,7 +380,7 @@ async fn load_imposters_from_file(
 ///
 /// Any other `<%= expr %>` token is replaced with an empty string and logged as a warning.
 /// `<% expr %>` (without `=`) statements (e.g., `<% for (...) %>`) are removed and logged.
-fn preprocess_ejs(content: &str, config_path: &PathBuf) -> Result<String, anyhow::Error> {
+fn preprocess_ejs(content: &str, config_path: &std::path::Path) -> Result<String, anyhow::Error> {
     if !content.contains("<%") {
         return Ok(content.to_string());
     }
