@@ -869,6 +869,81 @@ pub fn execute_predicate_inject(
     result.to_boolean()
 }
 
+/// Execute a `predicateGenerators.inject` function during proxy recording.
+///
+/// The function receives `(config, logger, predicates)` where `config.request` is the
+/// proxied request and `predicates` is the array built so far by `matches`-based generators.
+/// It returns an array of predicate objects that are appended to the final predicate list.
+pub fn execute_predicate_generator_inject(
+    inject_fn: &str,
+    request: &MountebankRequest,
+    existing_predicates: &[serde_json::Value],
+) -> Vec<serde_json::Value> {
+    let mut context = Context::default();
+
+    let request_obj = match create_mountebank_request_object(&mut context, request) {
+        Ok(obj) => obj,
+        Err(e) => {
+            tracing::warn!("predicateGenerator inject: failed to build request object: {e}");
+            return Vec::new();
+        }
+    };
+
+    let predicates_val = match json_to_js(&mut context, &Value::Array(existing_predicates.to_vec()))
+    {
+        Ok(obj) => obj,
+        Err(e) => {
+            tracing::warn!("predicateGenerator inject: failed to build predicates array: {e}");
+            return Vec::new();
+        }
+    };
+
+    let global = context.global_object();
+    let _ = global.set(js_string!("__request"), request_obj, false, &mut context);
+    let _ = global.set(
+        js_string!("__predicates"),
+        predicates_val,
+        false,
+        &mut context,
+    );
+
+    let wrapper_script = format!(
+        r#"
+        var __injectFn = {inject_fn};
+        var __config = {{ request: __request }};
+        var __logger = {{ debug: function() {{}}, info: function() {{}}, warn: function() {{}}, error: function(){{}} }};
+        var __result = __injectFn(__config, __logger, __predicates);
+        JSON.stringify(__result);
+        "#
+    );
+
+    let result = match context.eval(Source::from_bytes(wrapper_script.as_bytes())) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("predicateGenerator inject: script execution error: {e}");
+            return Vec::new();
+        }
+    };
+
+    let json_str = match result.as_string() {
+        Some(s) => s.to_std_string_lossy(),
+        None => {
+            tracing::warn!(
+                "predicateGenerator inject: function did not return a stringifiable value"
+            );
+            return Vec::new();
+        }
+    };
+
+    match serde_json::from_str::<Vec<serde_json::Value>>(&json_str) {
+        Ok(preds) => preds,
+        Err(e) => {
+            tracing::warn!("predicateGenerator inject: failed to parse returned predicates: {e}");
+            Vec::new()
+        }
+    }
+}
+
 /// Request structure for Mountebank inject functions
 #[derive(Debug, Clone)]
 pub struct MountebankRequest {

@@ -198,6 +198,7 @@ pub fn create_stub_from_proxy_response(
     body: &[u8],
     latency_ms: Option<u64>,
     decorate_fn: Option<String>,
+    recorded_from: Option<String>,
 ) -> super::types::Stub {
     // Convert to HashMap, comma-joining multi-valued headers (per HTTP spec).
     // Filter out hop-by-hop headers.
@@ -260,7 +261,7 @@ pub fn create_stub_from_proxy_response(
             rift: None,
         }],
         scenario_name: None,
-        recorded_from: None,
+        recorded_from,
     }
 }
 
@@ -338,7 +339,7 @@ mod tests {
             ("Content-Type".to_string(), "text/html".to_string()),
         ];
 
-        let stub = create_stub_from_proxy_response(vec![], 200, &headers, b"OK", None, None);
+        let stub = create_stub_from_proxy_response(vec![], 200, &headers, b"OK", None, None, None);
 
         match &stub.responses[0] {
             StubResponse::Is { is, .. } => {
@@ -362,7 +363,7 @@ mod tests {
             ("Keep-Alive".to_string(), "timeout=5".to_string()),
         ];
 
-        let stub = create_stub_from_proxy_response(vec![], 200, &headers, b"OK", None, None);
+        let stub = create_stub_from_proxy_response(vec![], 200, &headers, b"OK", None, None, None);
 
         match &stub.responses[0] {
             StubResponse::Is { is, .. } => {
@@ -393,7 +394,8 @@ mod tests {
         // Non-UTF-8 bytes should be base64-encoded with binary mode
         let binary_body: Vec<u8> = vec![0x00, 0xFF, 0xFE, 0xFD, 0x89, 0x50, 0x4E, 0x47];
 
-        let stub = create_stub_from_proxy_response(vec![], 200, &[], &binary_body, None, None);
+        let stub =
+            create_stub_from_proxy_response(vec![], 200, &[], &binary_body, None, None, None);
 
         match &stub.responses[0] {
             StubResponse::Is { is, .. } => {
@@ -414,7 +416,8 @@ mod tests {
 
     #[test]
     fn test_create_stub_text_body_not_base64() {
-        let stub = create_stub_from_proxy_response(vec![], 200, &[], b"Hello, World!", None, None);
+        let stub =
+            create_stub_from_proxy_response(vec![], 200, &[], b"Hello, World!", None, None, None);
 
         match &stub.responses[0] {
             StubResponse::Is { is, .. } => {
@@ -431,8 +434,15 @@ mod tests {
 
     #[test]
     fn test_create_stub_json_body_parsed() {
-        let stub =
-            create_stub_from_proxy_response(vec![], 200, &[], br#"{"key": "value"}"#, None, None);
+        let stub = create_stub_from_proxy_response(
+            vec![],
+            200,
+            &[],
+            br#"{"key": "value"}"#,
+            None,
+            None,
+            None,
+        );
 
         match &stub.responses[0] {
             StubResponse::Is { is, .. } => {
@@ -448,7 +458,7 @@ mod tests {
 
     #[test]
     fn test_create_stub_empty_body() {
-        let stub = create_stub_from_proxy_response(vec![], 204, &[], b"", None, None);
+        let stub = create_stub_from_proxy_response(vec![], 204, &[], b"", None, None, None);
 
         match &stub.responses[0] {
             StubResponse::Is { is, .. } => {
@@ -468,6 +478,7 @@ mod tests {
             b"OK",
             Some(150),
             Some("function(request, response) {}".to_string()),
+            None,
         );
 
         match &stub.responses[0] {
@@ -554,6 +565,7 @@ mod tests {
             b"OK",
             None,
             None,
+            None,
         );
 
         // The malformed predicate should be silently skipped
@@ -566,8 +578,29 @@ mod tests {
         let bad1 = serde_json::json!({"garbage": 123});
         let bad2 = serde_json::json!("just a string");
 
-        let stub = create_stub_from_proxy_response(vec![bad1, bad2], 200, &[], b"OK", None, None);
+        let stub =
+            create_stub_from_proxy_response(vec![bad1, bad2], 200, &[], b"OK", None, None, None);
 
         assert!(stub.predicates.is_empty());
+    }
+
+    #[test]
+    fn test_create_stub_recorded_from_populated() {
+        let stub = create_stub_from_proxy_response(
+            vec![],
+            200,
+            &[],
+            b"OK",
+            None,
+            None,
+            Some("http://upstream:8080".to_string()),
+        );
+        assert_eq!(stub.recorded_from.as_deref(), Some("http://upstream:8080"));
+    }
+
+    #[test]
+    fn test_create_stub_recorded_from_none_when_not_provided() {
+        let stub = create_stub_from_proxy_response(vec![], 200, &[], b"OK", None, None, None);
+        assert!(stub.recorded_from.is_none());
     }
 }

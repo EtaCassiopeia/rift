@@ -460,6 +460,34 @@ impl Imposter {
                 None => continue,
             };
 
+            // Handle inject predicateGenerator — calls a JS function with the request and
+            // predicates built so far; the function returns additional predicate objects.
+            if let Some(inject_fn) = gen_obj.get("inject").and_then(|v| v.as_str()) {
+                #[cfg(feature = "javascript")]
+                {
+                    use crate::scripting::{execute_predicate_generator_inject, MountebankRequest};
+                    let query_map = query
+                        .map(crate::imposter::parse_query_string)
+                        .unwrap_or_default();
+                    let mb_request = MountebankRequest {
+                        method: method.to_string(),
+                        path: path.to_string(),
+                        query: query_map,
+                        headers: headers.clone(),
+                        body: body.map(|b| b.to_string()),
+                    };
+                    let inject_preds =
+                        execute_predicate_generator_inject(inject_fn, &mb_request, &predicates);
+                    predicates.extend(inject_preds);
+                }
+                #[cfg(not(feature = "javascript"))]
+                {
+                    tracing::warn!("predicateGenerator inject requires the 'javascript' feature; generator ignored");
+                    let _ = inject_fn;
+                }
+                continue;
+            }
+
             // Get the matches config
             let matches = match gen_obj.get("matches").and_then(|m| m.as_object()) {
                 Some(m) => m,
@@ -848,6 +876,7 @@ impl Imposter {
                 &body_bytes,
                 latency_for_stub,
                 proxy_config.add_decorate_behavior.clone(),
+                Some(proxy_config.to.clone()),
             );
 
             // Insert or append the stub based on proxy mode
@@ -1108,5 +1137,86 @@ mod tests {
         let query_obj = equals_obj["query"].as_object().unwrap();
         assert_eq!(query_obj["q"].as_str().unwrap(), "hello");
         assert_eq!(query_obj["page"].as_str().unwrap(), "1");
+    }
+
+    // =========================================================================
+    // Gap 5.2: predicateGenerators.inject — JS function produces predicates
+    // =========================================================================
+
+    #[cfg(feature = "javascript")]
+    #[test]
+    fn test_generator_inject_produces_predicates() {
+        let imposter = make_test_imposter();
+
+        let inject_fn = r#"function(config, logger, predicates) {
+            return [{ equals: { path: config.request.path } }];
+        }"#;
+
+        let generators = vec![json!({ "inject": inject_fn })];
+        let headers = HashMap::new();
+
+        let predicates = imposter.generate_predicates_from_request(
+            &generators,
+            "GET",
+            "/api/users",
+            &headers,
+            None,
+            None,
+        );
+
+        assert_eq!(predicates.len(), 1);
+        let equals = predicates[0].get("equals").expect("should have equals key");
+        assert_eq!(equals["path"], "/api/users");
+    }
+
+    #[cfg(feature = "javascript")]
+    #[test]
+    fn test_generator_inject_receives_existing_predicates() {
+        let imposter = make_test_imposter();
+
+        // First generator builds a "method" predicate via matches, second via inject
+        let inject_fn = r#"function(config, logger, predicates) {
+            var result = predicates.slice();
+            result.push({ equals: { path: config.request.path } });
+            return result;
+        }"#;
+
+        let generators = vec![
+            json!({ "matches": { "method": true } }),
+            json!({ "inject": inject_fn }),
+        ];
+        let headers = HashMap::new();
+
+        let predicates = imposter.generate_predicates_from_request(
+            &generators,
+            "POST",
+            "/orders",
+            &headers,
+            None,
+            None,
+        );
+
+        // matches generator produces 1, inject generator returns 2 (original + new path)
+        assert_eq!(predicates.len(), 3);
+    }
+
+    #[cfg(feature = "javascript")]
+    #[test]
+    fn test_generator_inject_bad_function_returns_empty() {
+        let imposter = make_test_imposter();
+
+        let generators = vec![json!({ "inject": "not a function" })];
+        let headers = HashMap::new();
+
+        let predicates = imposter.generate_predicates_from_request(
+            &generators,
+            "GET",
+            "/test",
+            &headers,
+            None,
+            None,
+        );
+
+        assert!(predicates.is_empty());
     }
 }
