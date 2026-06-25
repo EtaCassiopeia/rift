@@ -115,7 +115,7 @@ pub struct DebugStubInfo {
 /// Stub definition (Mountebank-compatible with Rift extensions)
 /// Field ordering matches Mountebank output: scenarioName, predicates, responses, _links
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", from = "StubRaw")]
 pub struct Stub {
     /// Optional scenario name for documentation/organization (Mountebank compatible)
     /// Placed first to match Mountebank output ordering
@@ -129,6 +129,126 @@ pub struct Stub {
     pub predicates: Vec<Predicate>,
     #[serde(default)]
     pub responses: Vec<StubResponse>,
+    /// Upstream URL recorded from during proxy recording (Mountebank compatible)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recorded_from: Option<String>,
+}
+
+/// Raw deserialization type for Stub — handles alternative field names and format conversions:
+/// - `rules` as Mimeo Solo alias for `predicates`
+/// - `delayRange` array (Mimeo Solo stub-level latency) converted to per-response `wait` behavior
+/// - `recordedFrom` URL from Mountebank proxy recording
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StubRaw {
+    #[serde(default)]
+    scenario_name: Option<String>,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    predicates: Vec<Predicate>,
+    /// Mimeo Solo recorded format uses "rules" instead of "predicates"
+    #[serde(default)]
+    rules: Vec<Predicate>,
+    #[serde(default)]
+    responses: Vec<StubResponse>,
+    #[serde(default)]
+    recorded_from: Option<String>,
+    /// Mimeo Solo stub-level latency: `[{ "min": "50", "max": "100" }]`
+    #[serde(default)]
+    delay_range: Vec<DelayRange>,
+}
+
+/// A `delayRange` entry as emitted by the Mimeo Solo recorder.
+/// Both `min` and `max` may be numbers or numeric strings.
+#[derive(Debug, Clone, Deserialize)]
+struct DelayRange {
+    #[serde(deserialize_with = "de_u64_or_string")]
+    min: u64,
+    #[serde(deserialize_with = "de_u64_or_string")]
+    max: u64,
+}
+
+fn de_u64_or_string<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
+    use serde::de::Error;
+    let v = serde_json::Value::deserialize(d)?;
+    match v {
+        serde_json::Value::Number(n) => n
+            .as_u64()
+            .ok_or_else(|| D::Error::custom("expected non-negative integer")),
+        serde_json::Value::String(s) => s
+            .parse::<u64>()
+            .map_err(|_| D::Error::custom(format!("cannot parse '{s}' as integer"))),
+        _ => Err(D::Error::custom("expected number or numeric string")),
+    }
+}
+
+impl From<StubRaw> for Stub {
+    fn from(raw: StubRaw) -> Self {
+        // "rules" is the Mimeo Solo alias for "predicates"; prefer "predicates" when both present
+        let predicates = if !raw.predicates.is_empty() {
+            raw.predicates
+        } else {
+            raw.rules
+        };
+
+        // Convert stub-level delayRange to a wait behavior injected into each response
+        let responses = if raw.delay_range.is_empty() {
+            raw.responses
+        } else {
+            let wait_val = build_wait_from_delay_range(&raw.delay_range);
+            raw.responses
+                .into_iter()
+                .map(|r| inject_wait_behavior(r, wait_val.clone()))
+                .collect()
+        };
+
+        Stub {
+            scenario_name: raw.scenario_name,
+            id: raw.id,
+            predicates,
+            responses,
+            recorded_from: raw.recorded_from,
+        }
+    }
+}
+
+/// Build a wait value from a delayRange array (uses first entry).
+/// Emits a fixed value when min == max, otherwise a range object.
+fn build_wait_from_delay_range(ranges: &[DelayRange]) -> serde_json::Value {
+    let first = &ranges[0];
+    if first.min == first.max {
+        serde_json::Value::Number(first.min.into())
+    } else {
+        serde_json::json!({ "min": first.min, "max": first.max })
+    }
+}
+
+/// Inject a `wait` value into a stub response's `_behaviors`, but only when
+/// the response does not already have an explicit wait configured.
+fn inject_wait_behavior(response: StubResponse, wait_val: serde_json::Value) -> StubResponse {
+    match response {
+        StubResponse::Is {
+            is,
+            behaviors,
+            rift,
+        } => {
+            let behaviors = Some(match behaviors {
+                Some(serde_json::Value::Object(mut obj)) => {
+                    obj.entry("wait").or_insert(wait_val);
+                    serde_json::Value::Object(obj)
+                }
+                Some(other) => other,
+                None => serde_json::json!({ "wait": wait_val }),
+            });
+            StubResponse::Is {
+                is,
+                behaviors,
+                rift,
+            }
+        }
+        other => other,
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -894,5 +1014,74 @@ mod tests {
             "Stub without responses field should deserialize with empty responses vec"
         );
         assert!(result.unwrap().responses.is_empty());
+    }
+
+    #[test]
+    fn test_stub_rules_alias_for_predicates() {
+        let stub_json = json!({
+            "rules": [{ "equals": { "path": "/test" } }],
+            "responses": [{ "is": { "statusCode": 200 } }]
+        });
+        let stub: Stub = serde_json::from_value(stub_json).unwrap();
+        assert_eq!(stub.predicates.len(), 1);
+    }
+
+    #[test]
+    fn test_stub_predicates_takes_precedence_over_rules() {
+        let stub_json = json!({
+            "predicates": [{ "equals": { "path": "/a" } }],
+            "rules": [{ "equals": { "path": "/b" } }, { "equals": { "path": "/c" } }],
+            "responses": []
+        });
+        let stub: Stub = serde_json::from_value(stub_json).unwrap();
+        assert_eq!(stub.predicates.len(), 1);
+    }
+
+    #[test]
+    fn test_stub_delay_range_injected_as_wait() {
+        let stub_json = json!({
+            "predicates": [],
+            "delayRange": [{ "min": "50", "max": "100" }],
+            "responses": [{ "is": { "statusCode": 200 } }]
+        });
+        let stub: Stub = serde_json::from_value(stub_json).unwrap();
+        assert_eq!(stub.responses.len(), 1);
+        if let StubResponse::Is { behaviors, .. } = &stub.responses[0] {
+            let wait = behaviors.as_ref().unwrap().get("wait").unwrap();
+            // min != max → range object
+            assert_eq!(wait.get("min").unwrap(), &json!(50u64));
+            assert_eq!(wait.get("max").unwrap(), &json!(100u64));
+        } else {
+            panic!("expected Is response");
+        }
+    }
+
+    #[test]
+    fn test_stub_delay_range_fixed_when_min_equals_max() {
+        let stub_json = json!({
+            "predicates": [],
+            "delayRange": [{ "min": 0, "max": 0 }],
+            "responses": [{ "is": { "statusCode": 200 } }]
+        });
+        let stub: Stub = serde_json::from_value(stub_json).unwrap();
+        if let StubResponse::Is { behaviors, .. } = &stub.responses[0] {
+            let wait = behaviors.as_ref().unwrap().get("wait").unwrap();
+            assert_eq!(wait, &json!(0u64));
+        } else {
+            panic!("expected Is response");
+        }
+    }
+
+    #[test]
+    fn test_stub_recorded_from_roundtrip() {
+        let stub_json = json!({
+            "predicates": [],
+            "responses": [],
+            "recordedFrom": "http://upstream:8080"
+        });
+        let stub: Stub = serde_json::from_value(stub_json).unwrap();
+        assert_eq!(stub.recorded_from.as_deref(), Some("http://upstream:8080"));
+        let serialized = serde_json::to_value(&stub).unwrap();
+        assert_eq!(serialized["recordedFrom"], json!("http://upstream:8080"));
     }
 }
