@@ -354,6 +354,7 @@ fn filter_proxy_stubs(stubs: Vec<crate::imposter::Stub>) -> Vec<crate::imposter:
                     predicates: stub.predicates,
                     responses: non_proxy_responses,
                     scenario_name: stub.scenario_name,
+                    recorded_from: stub.recorded_from,
                 })
             }
         })
