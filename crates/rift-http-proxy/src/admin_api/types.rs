@@ -119,6 +119,7 @@ pub struct ReplaceStubsRequest {
 pub struct ImposterQueryParams {
     pub replayable: bool,
     pub remove_proxies: bool,
+    pub list: bool,
 }
 
 impl ImposterQueryParams {
@@ -128,9 +129,23 @@ impl ImposterQueryParams {
         if let Some(q) = query {
             params.replayable = q.contains("replayable=true");
             params.remove_proxies = q.contains("removeProxies=true");
+            params.list = q.contains("list=true");
         }
         params
     }
+}
+
+/// Minimal imposter listing entry (Mountebank ?list=true response shape)
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImposterListEntry {
+    pub protocol: String,
+    pub port: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub number_of_requests: u64,
+    #[serde(rename = "_links")]
+    pub links: ImposterLinks,
 }
 
 // =============================================================================
@@ -284,14 +299,44 @@ mod tests {
         let params = ImposterQueryParams::parse(Some("replayable=true&removeProxies=true"));
         assert!(params.replayable);
         assert!(params.remove_proxies);
+        assert!(!params.list);
 
         let params = ImposterQueryParams::parse(Some("replayable=false"));
         assert!(!params.replayable);
         assert!(!params.remove_proxies);
+        assert!(!params.list);
 
         let params = ImposterQueryParams::parse(None);
         assert!(!params.replayable);
         assert!(!params.remove_proxies);
+        assert!(!params.list);
+
+        let params = ImposterQueryParams::parse(Some("list=true"));
+        assert!(!params.replayable);
+        assert!(!params.remove_proxies);
+        assert!(params.list);
+
+        let params = ImposterQueryParams::parse(Some("list=true&replayable=true"));
+        assert!(params.replayable);
+        assert!(params.list);
+    }
+
+    #[test]
+    fn test_imposter_list_entry_excludes_enabled() {
+        let entry = ImposterListEntry {
+            protocol: "http".to_string(),
+            port: 8080,
+            name: None,
+            number_of_requests: 0,
+            links: make_imposter_links("http://localhost:2525", 8080),
+        };
+        let json = serde_json::to_value(&entry).unwrap();
+        assert!(
+            json.get("enabled").is_none(),
+            "list entry must not include 'enabled'"
+        );
+        assert!(json.get("numberOfRequests").is_some());
+        assert!(json.get("_links").is_some());
     }
 
     #[test]

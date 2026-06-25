@@ -2,7 +2,7 @@
 
 use crate::admin_api::types::{
     collect_body, error_response, json_response, make_imposter_links, make_stub_links,
-    ImposterDetail, ImposterQueryParams, ImposterSummary, ListImpostersResponse,
+    ImposterDetail, ImposterListEntry, ImposterQueryParams, ImposterSummary, ListImpostersResponse,
     RiftImposterExtensions, StubWithLinks,
 };
 use crate::extensions::stub_analysis::analyze_stubs;
@@ -85,6 +85,21 @@ pub async fn handle_list(
             .collect();
         let body = serde_json::json!({ "imposters": configs });
         json_response(StatusCode::OK, &body)
+    } else if params.list {
+        // Mountebank-compatible abbreviated listing: port, protocol, name, numberOfRequests, _links
+        let entries: Vec<ImposterListEntry> = imposters
+            .iter()
+            .filter_map(|i| {
+                i.config.port.map(|port| ImposterListEntry {
+                    protocol: i.config.protocol.clone(),
+                    port,
+                    name: i.config.name.clone(),
+                    number_of_requests: i.get_request_count(),
+                    links: make_imposter_links(base_url, port),
+                })
+            })
+            .collect();
+        json_response(StatusCode::OK, &serde_json::json!({ "imposters": entries }))
     } else {
         let summaries: Vec<ImposterSummary> = imposters
             .iter()
