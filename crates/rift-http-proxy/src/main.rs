@@ -48,7 +48,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{error, info};
-use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+use tracing_subscriber::{fmt, prelude::*, EnvFilter, Layer};
 
 /// Rift - A Mountebank-compatible HTTP chaos engineering proxy
 ///
@@ -196,10 +196,27 @@ fn main() -> Result<(), anyhow::Error> {
     };
 
     let filter = if cli.debug { "debug" } else { log_level };
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(filter));
+
+    // Build optional file log layer when --log is set and --nologfile is not
+    let file_layer: Option<Box<dyn Layer<_> + Send + Sync>> = if !cli.nologfile {
+        cli.log.as_ref().and_then(|log_path| {
+            let dir = log_path.parent().unwrap_or(std::path::Path::new("."));
+            let filename = log_path.file_name()?.to_string_lossy().into_owned();
+            let file_appender = tracing_appender::rolling::never(dir, filename);
+            let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+            // Leak the guard so it lives for the process lifetime
+            Box::leak(Box::new(guard));
+            Some(fmt::layer().with_writer(non_blocking).boxed())
+        })
+    } else {
+        None
+    };
 
     tracing_subscriber::registry()
         .with(fmt::layer())
-        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(filter)))
+        .with(env_filter)
+        .with(file_layer)
         .init();
 
     // Write PID file if requested
@@ -499,5 +516,26 @@ mod tests {
             cli.protofile.as_deref(),
             Some(std::path::Path::new("protocols.json"))
         );
+    }
+
+    #[test]
+    fn test_log_flag_parsed() {
+        let cli = Cli::try_parse_from(["rift", "--log", "/tmp/test.log"])
+            .expect("--log should be accepted");
+        assert_eq!(cli.log, Some(std::path::PathBuf::from("/tmp/test.log")));
+    }
+
+    #[test]
+    fn test_nologfile_flag_parsed() {
+        let cli =
+            Cli::try_parse_from(["rift", "--nologfile"]).expect("--nologfile should be accepted");
+        assert!(cli.nologfile);
+    }
+
+    #[test]
+    fn test_nologfile_default_is_false() {
+        let cli = Cli::try_parse_from(["rift"]).expect("default parse");
+        assert!(!cli.nologfile);
+        assert!(cli.log.is_none());
     }
 }
