@@ -3,7 +3,7 @@
 use ratatui::style::Color;
 
 /// Available theme presets
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ThemePreset {
     #[default]
     Default,
@@ -180,5 +180,46 @@ impl Theme {
     /// Cycle to the next theme
     pub fn next(&mut self) {
         *self = Self::from_preset(self.preset.next());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_all_presets_have_names() {
+        for preset in ThemePreset::ALL {
+            assert!(
+                !preset.name().is_empty(),
+                "preset {:?} has empty name",
+                preset
+            );
+        }
+    }
+
+    #[test]
+    fn test_theme_cycles_through_all_presets() {
+        let mut theme = Theme::default();
+        let start = theme.preset;
+        let count = ThemePreset::ALL.len();
+        for _ in 0..count {
+            theme.next();
+        }
+        assert_eq!(
+            theme.preset, start,
+            "cycling through all presets should return to start"
+        );
+    }
+
+    #[test]
+    fn test_all_presets_are_reachable() {
+        let mut seen = std::collections::HashSet::new();
+        let mut current = ThemePreset::Default;
+        for _ in 0..ThemePreset::ALL.len() {
+            seen.insert(current);
+            current = current.next();
+        }
+        assert_eq!(seen.len(), ThemePreset::ALL.len());
     }
 }

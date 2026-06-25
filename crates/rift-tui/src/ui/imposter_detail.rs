@@ -219,6 +219,10 @@ fn draw_stubs_panel(frame: &mut Frame, app: &App, area: Rect) {
 
             let fg_color = if dim { app.theme.muted } else { app.theme.fg };
 
+            let pred_count = stub.predicates.len();
+            let resp_count = stub.responses.len();
+            let counts = format!(" {}p {}r", pred_count, resp_count);
+
             let line = Line::from(vec![
                 Span::styled(
                     if is_selected && is_focused {
@@ -232,12 +236,16 @@ fn draw_stubs_panel(frame: &mut Frame, app: &App, area: Rect) {
                         app.theme.highlight_bg
                     }),
                 ),
-                Span::styled(format!("#{:<2}", i), Style::default().fg(app.theme.muted)),
+                Span::styled(
+                    format!("#{:<2}", i + 1),
+                    Style::default().fg(app.theme.muted),
+                ),
                 Span::styled(format!(" {} ", display_name), Style::default().fg(fg_color)),
                 Span::styled(
                     format!("[{}]", response_type),
                     Style::default().fg(response_color),
                 ),
+                Span::styled(counts, Style::default().fg(app.theme.muted)),
             ]);
 
             ListItem::new(line)

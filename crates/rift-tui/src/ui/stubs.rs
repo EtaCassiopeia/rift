@@ -16,7 +16,18 @@ pub fn draw_detail(frame: &mut Frame, app: &App, port: u16, index: usize, area: 
         .as_ref()
         .and_then(|i| i.stubs.get(index));
 
-    let title = format!(" Stub #{} (Port :{}) ", index, port);
+    let recorded_from = stub.and_then(|s| s.recorded_from.as_deref());
+
+    let title = if let Some(origin) = recorded_from {
+        format!(
+            " Stub #{} (:{}) [recorded from: {}] ",
+            index + 1,
+            port,
+            origin
+        )
+    } else {
+        format!(" Stub #{} (Port :{}) ", index + 1, port)
+    };
 
     let content = if let Some(stub) = stub {
         serde_json::to_string_pretty(stub).unwrap_or_else(|_| "Error formatting stub".to_string())
@@ -48,22 +59,8 @@ pub fn draw_editor(frame: &mut Frame, app: &App, area: Rect) {
 
     // Editor
     if let Some(editor) = &app.stub_editor {
-        let title = if matches!(app.view, crate::app::View::StubEdit { index: None, .. }) {
-            " New Stub "
-        } else {
-            " Edit Stub "
-        };
-
-        let block = Block::default()
-            .title(title)
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(app.theme.highlight_bg));
-
-        let inner = block.inner(chunks[0]);
-        frame.render_widget(block, chunks[0]);
-
-        // Render the text editor
-        frame.render_widget(&editor.editor, inner);
+        // Render the text editor (block/borders set on TextArea directly)
+        frame.render_widget(&editor.editor, chunks[0]);
 
         // Validation status and shortcuts
         let validation_block = Block::default()
