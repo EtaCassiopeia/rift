@@ -1036,11 +1036,15 @@ pub fn execute_mountebank_decorate(
         )
         .map_err(|e| anyhow!("Failed to set response: {e}"))?;
 
-    // Wrap the decorate function to call it with our arguments
+    // Wrap the decorate function to call it with our arguments.
+    // Provide a no-op logger (Mountebank's 3rd arg) and empty state (4th arg) so
+    // scripts that reference logger.info(...) or state.counter don't throw ReferenceError.
     let wrapper_script = format!(
         r#"
         var __decorateFn = {decorate_fn};
-        __decorateFn(__request, __response);
+        var __logger = {{ debug: function() {{}}, info: function() {{}}, warn: function() {{}}, error: function() {{}} }};
+        var __state = {{}};
+        __decorateFn(__request, __response, __logger, __state);
         __response;
         "#
     );
@@ -1600,5 +1604,49 @@ function should_inject(request, flow_store) {
             }
             _ => panic!("Expected error fault decision with path params"),
         }
+    }
+
+    #[test]
+    fn test_decorate_with_logger_arg() {
+        let request = MountebankRequest {
+            method: "GET".to_string(),
+            path: "/test".to_string(),
+            query: HashMap::new(),
+            headers: HashMap::new(),
+            body: None,
+        };
+        let headers = HashMap::new();
+
+        // Script that uses logger as 3rd argument — must not throw ReferenceError
+        let script = r#"function(request, response, logger) { logger.info("decorating"); response.body = "logged"; }"#;
+        let result = execute_mountebank_decorate(script, &request, "original", 200, &headers);
+        assert!(
+            result.is_ok(),
+            "logger arg should not throw: {:?}",
+            result.err()
+        );
+        assert_eq!(result.unwrap().body, "logged");
+    }
+
+    #[test]
+    fn test_decorate_with_state_arg() {
+        let request = MountebankRequest {
+            method: "GET".to_string(),
+            path: "/test".to_string(),
+            query: HashMap::new(),
+            headers: HashMap::new(),
+            body: None,
+        };
+        let headers = HashMap::new();
+
+        // Script that uses state as 4th argument — must not throw ReferenceError
+        let script = r#"function(request, response, logger, state) { state.count = 1; response.body = "state ok"; }"#;
+        let result = execute_mountebank_decorate(script, &request, "original", 200, &headers);
+        assert!(
+            result.is_ok(),
+            "state arg should not throw: {:?}",
+            result.err()
+        );
+        assert_eq!(result.unwrap().body, "state ok");
     }
 }
