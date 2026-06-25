@@ -62,6 +62,8 @@ pub struct Stub {
     pub scenario_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recorded_from: Option<String>,
     #[serde(default)]
     pub predicates: Vec<serde_json::Value>,
     #[serde(default)]
@@ -470,6 +472,29 @@ impl ApiClient {
         Ok(serde_json::to_string_pretty(&json).unwrap_or_default())
     }
 
+    /// Replace all stubs for an imposter (used for reordering)
+    pub async fn update_stubs(&self, port: u16, stubs: Vec<Stub>) -> Result<(), ApiError> {
+        let url = format!("{}/imposters/{}/stubs", self.base_url, port);
+        let body = serde_json::json!({ "stubs": stubs });
+        let resp = self.client.put(&url).json(&body).send().await?;
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            self.handle_error(resp).await
+        }
+    }
+
+    /// Get server configuration
+    pub async fn get_config(&self) -> Result<serde_json::Value, ApiError> {
+        let url = format!("{}/config", self.base_url);
+        let resp = self.client.get(&url).send().await?;
+        if resp.status().is_success() {
+            Ok(resp.json().await?)
+        } else {
+            self.handle_error(resp).await
+        }
+    }
+
     /// Get metrics data
     pub async fn get_metrics(&self) -> Result<MetricsData, ApiError> {
         let url = format!("{}/metrics", self.base_url);
@@ -547,6 +572,49 @@ fn parse_prometheus_metrics(text: &str) -> MetricsData {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_api_client_strips_trailing_slash() {
+        let client = ApiClient::new("http://localhost:2525/");
+        assert_eq!(client.base_url(), "http://localhost:2525");
+    }
+
+    #[test]
+    fn test_api_client_no_trailing_slash() {
+        let client = ApiClient::new("http://localhost:2525");
+        assert_eq!(client.base_url(), "http://localhost:2525");
+    }
+
+    #[test]
+    fn test_stub_deserialize_recorded_from() {
+        let json = r#"{"predicates":[],"responses":[],"recordedFrom":"https://api.example.com"}"#;
+        let stub: Stub = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            stub.recorded_from.as_deref(),
+            Some("https://api.example.com")
+        );
+    }
+
+    #[test]
+    fn test_stub_deserialize_no_recorded_from() {
+        let json = r#"{"predicates":[],"responses":[]}"#;
+        let stub: Stub = serde_json::from_str(json).unwrap();
+        assert!(stub.recorded_from.is_none());
+    }
+
+    #[test]
+    fn test_stub_serialize_omits_none_fields() {
+        let stub = Stub {
+            scenario_name: None,
+            id: None,
+            recorded_from: None,
+            predicates: vec![],
+            responses: vec![],
+        };
+        let json = serde_json::to_string(&stub).unwrap();
+        assert!(!json.contains("recordedFrom"));
+        assert!(!json.contains("scenarioName"));
+    }
 
     #[test]
     fn test_parse_prometheus_metrics() {

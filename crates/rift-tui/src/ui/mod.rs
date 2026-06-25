@@ -1,10 +1,12 @@
 //! UI rendering for the TUI
 
+mod config;
 mod dialogs;
 mod help;
 mod imposter_detail;
 mod imposters;
 mod metrics;
+mod request_detail;
 mod stubs;
 
 use crate::app::{App, Overlay, StatusLevel, View};
@@ -36,6 +38,10 @@ pub fn draw(frame: &mut Frame, app: &App) {
             stubs::draw_detail(frame, app, *port, *index, chunks[1])
         }
         View::StubEdit { .. } => stubs::draw_editor(frame, app, chunks[1]),
+        View::RequestDetail { port, index } => {
+            request_detail::draw(frame, app, *port, *index, chunks[1])
+        }
+        View::Config => config::draw(frame, app, chunks[1]),
         View::Metrics => metrics::draw(frame, app, chunks[1]),
     }
 
@@ -192,6 +198,7 @@ fn get_commands(view: &View) -> (Vec<Command>, Option<Vec<Command>>) {
                 ("d", "Del"),
                 ("t", "Toggle"),
                 ("m", "Metrics"),
+                ("C", "Config"),
                 ("/", "Search"),
                 ("T", "Theme"),
                 ("?", "Help"),
@@ -209,6 +216,9 @@ fn get_commands(view: &View) -> (Vec<Command>, Option<Vec<Command>>) {
                 ("a", "Add"),
                 ("e", "Edit"),
                 ("d", "Del"),
+                ("D", "Dup"),
+                ("[", "MoveUp"),
+                ("]", "MoveDown"),
                 ("y", "Curl"),
                 ("t", "Toggle"),
                 ("/", "Search"),
@@ -226,6 +236,7 @@ fn get_commands(view: &View) -> (Vec<Command>, Option<Vec<Command>>) {
             vec![
                 ("e", "Edit"),
                 ("d", "Delete"),
+                ("D", "Dup"),
                 ("y", "Curl"),
                 ("Esc", "Back"),
                 ("?", "Help"),
@@ -245,6 +256,8 @@ fn get_commands(view: &View) -> (Vec<Command>, Option<Vec<Command>>) {
             ],
             None,
         ),
+        View::RequestDetail { .. } => (vec![("Esc", "Back"), ("?", "Help")], None),
+        View::Config => (vec![("r", "Refresh"), ("Esc", "Back")], None),
         View::Metrics => (vec![("r", "Refresh"), ("Esc", "Back"), ("?", "Help")], None),
     }
 }

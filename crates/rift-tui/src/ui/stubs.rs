@@ -16,7 +16,18 @@ pub fn draw_detail(frame: &mut Frame, app: &App, port: u16, index: usize, area: 
         .as_ref()
         .and_then(|i| i.stubs.get(index));
 
-    let title = format!(" Stub #{} (Port :{}) ", index, port);
+    let recorded_from = stub.and_then(|s| s.recorded_from.as_deref());
+
+    let title = if let Some(origin) = recorded_from {
+        format!(
+            " Stub #{} (:{}) [recorded from: {}] ",
+            index + 1,
+            port,
+            origin
+        )
+    } else {
+        format!(" Stub #{} (Port :{}) ", index + 1, port)
+    };
 
     let content = if let Some(stub) = stub {
         serde_json::to_string_pretty(stub).unwrap_or_else(|_| "Error formatting stub".to_string())

@@ -100,9 +100,9 @@ pub fn draw_list(frame: &mut Frame, app: &App, area: Rect) {
     // Show empty state message
     if app.imposters.is_empty() {
         let msg = if app.is_connected {
-            "No imposters found. Press 'n' to create one."
+            "No imposters. Press [n] to create one, [i] to import, or [p] for a proxy."
         } else {
-            "Not connected. Check if Rift is running."
+            "Not connected to Rift. Press [r] to retry, or check that Rift is running."
         };
 
         let inner = Block::default().borders(Borders::ALL).inner(area);
