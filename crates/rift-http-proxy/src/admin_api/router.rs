@@ -37,7 +37,7 @@ impl ImposterRoute {
             [] => Some(ImposterRoute::Root),
             ["stubs"] => Some(ImposterRoute::Stubs),
             ["stubs", index_str] => index_str.parse().ok().map(ImposterRoute::StubByIndex),
-            ["savedRequests"] => Some(ImposterRoute::SavedRequests),
+            ["savedRequests"] | ["requests"] => Some(ImposterRoute::SavedRequests),
             ["savedProxyResponses"] => Some(ImposterRoute::SavedProxyResponses),
             ["enable"] => Some(ImposterRoute::Enable),
             ["disable"] => Some(ImposterRoute::Disable),
@@ -203,6 +203,10 @@ mod tests {
         ));
         assert!(matches!(
             ImposterRoute::parse(&["savedRequests"]),
+            Some(ImposterRoute::SavedRequests)
+        ));
+        assert!(matches!(
+            ImposterRoute::parse(&["requests"]),
             Some(ImposterRoute::SavedRequests)
         ));
         assert!(matches!(
