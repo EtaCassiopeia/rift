@@ -784,15 +784,19 @@ pub(crate) mod tests {
 
     #[test]
     fn test_input_state_proxy_mode_str() {
-        let mut s = InputState::default();
-        s.proxy_mode = 0;
-        assert_eq!(s.proxy_mode_str(), "proxyOnce");
-        s.proxy_mode = 1;
-        assert_eq!(s.proxy_mode_str(), "proxyAlways");
-        s.proxy_mode = 2;
-        assert_eq!(s.proxy_mode_str(), "proxyTransparent");
-        s.proxy_mode = 99;
-        assert_eq!(s.proxy_mode_str(), "proxyOnce");
+        let cases = [
+            (0, "proxyOnce"),
+            (1, "proxyAlways"),
+            (2, "proxyTransparent"),
+            (99, "proxyOnce"),
+        ];
+        for (mode, expected) in cases {
+            let s = InputState {
+                proxy_mode: mode,
+                ..Default::default()
+            };
+            assert_eq!(s.proxy_mode_str(), expected);
+        }
     }
 
     // ─── StubEditor ───────────────────────────────────────────────────────────
