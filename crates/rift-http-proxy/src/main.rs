@@ -228,8 +228,8 @@ fn run_mountebank_mode(cli: Cli) -> Result<(), anyhow::Error> {
         .build()?;
 
     runtime.block_on(async move {
-        // Create imposter manager
-        let manager = Arc::new(ImposterManager::new());
+        // Create imposter manager (with write-through if --datadir is set)
+        let manager = Arc::new(ImposterManager::with_datadir(cli.datadir.clone()));
 
         // Load imposters from configfile if provided
         if let Some(ref configfile) = cli.configfile {

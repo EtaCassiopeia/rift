@@ -112,12 +112,9 @@ pub async fn handle_replace_all(
         );
     }
 
-    let imposter = match manager.get_imposter(port) {
-        Ok(i) => i,
-        Err(e) => return e.into(),
-    };
-
-    imposter.replace_stubs(replace_req.stubs);
+    if let Err(e) = manager.replace_stubs(port, replace_req.stubs) {
+        return e.into();
+    }
 
     handle_get_imposter(port, None, base_url, manager).await
 }
