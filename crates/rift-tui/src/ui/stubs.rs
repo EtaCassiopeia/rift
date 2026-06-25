@@ -48,22 +48,8 @@ pub fn draw_editor(frame: &mut Frame, app: &App, area: Rect) {
 
     // Editor
     if let Some(editor) = &app.stub_editor {
-        let title = if matches!(app.view, crate::app::View::StubEdit { index: None, .. }) {
-            " New Stub "
-        } else {
-            " Edit Stub "
-        };
-
-        let block = Block::default()
-            .title(title)
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(app.theme.highlight_bg));
-
-        let inner = block.inner(chunks[0]);
-        frame.render_widget(block, chunks[0]);
-
-        // Render the text editor
-        frame.render_widget(&editor.editor, inner);
+        // Render the text editor (block/borders set on TextArea directly)
+        frame.render_widget(&editor.editor, chunks[0]);
 
         // Validation status and shortcuts
         let validation_block = Block::default()

@@ -3,7 +3,6 @@
 use crate::api::{
     ApiClient, CreateImposterRequest, ImposterDetail, ImposterSummary, MetricsData, Stub,
 };
-use crate::components::{EditorAction, TextEditor};
 use crate::theme::Theme;
 use crate::validation::{validate_imposter_json, validate_stub_json, ValidationReport};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -142,9 +141,17 @@ pub enum FocusArea {
     Right,
 }
 
-/// Editor state for stub editing
+/// Actions that the editor may request (clipboard operations)
+#[derive(Debug, Clone)]
+pub enum EditorAction {
+    Copy(String),
+    Cut(String),
+    PasteRequest,
+}
+
+/// Stub JSON editor backed by ratatui-textarea
 pub struct StubEditor {
-    pub editor: TextEditor,
+    pub editor: ratatui_textarea::TextArea<'static>,
     pub validation_error: Option<String>,
     pub validation_report: Option<ValidationReport>,
     pub original_json: String,
@@ -152,44 +159,44 @@ pub struct StubEditor {
 
 impl StubEditor {
     pub fn new(json: &str) -> Self {
-        let formatted = if let Ok(v) = serde_json::from_str::<serde_json::Value>(json) {
-            serde_json::to_string_pretty(&v).unwrap_or_else(|_| json.to_string())
-        } else {
-            json.to_string()
-        };
-
-        let editor = TextEditor::new(&formatted);
-
-        Self {
+        let lines: Vec<String> = json.lines().map(String::from).collect();
+        let mut editor = ratatui_textarea::TextArea::new(lines);
+        editor.set_line_number_style(
+            ratatui::style::Style::default().fg(ratatui::style::Color::DarkGray),
+        );
+        editor.set_cursor_line_style(ratatui::style::Style::default());
+        editor.set_block(
+            ratatui::widgets::Block::default()
+                .borders(ratatui::widgets::Borders::ALL)
+                .title(" Edit Stub (Ctrl+S save, Ctrl+F format, Ctrl+L lint, Esc cancel) "),
+        );
+        let original_json = json.to_string();
+        let mut stub_editor = Self {
             editor,
             validation_error: None,
             validation_report: None,
-            original_json: json.to_string(),
-        }
+            original_json,
+        };
+        stub_editor.validate();
+        stub_editor
     }
 
     /// Validate the JSON content using rift-lint
     pub fn validate(&mut self) -> bool {
-        let content = self.editor.content();
-
-        // First check if it's valid JSON that can be parsed as a Stub
-        match serde_json::from_str::<Stub>(&content) {
-            Ok(_) => {
-                // Valid JSON, now run lint validation
-                let report = validate_stub_json(&content);
-                let is_valid = !report.has_errors();
-
+        let content = self.editor.lines().join("\n");
+        match serde_json::from_str::<serde_json::Value>(&content) {
+            Ok(val) => {
+                self.validation_error = None;
+                let json_str = serde_json::to_string_pretty(&val).unwrap_or(content);
+                let report = validate_stub_json(&json_str);
                 if report.has_issues() {
                     self.validation_error = Some(report.summary());
-                } else {
-                    self.validation_error = None;
                 }
                 self.validation_report = Some(report);
-
-                is_valid
+                true
             }
             Err(e) => {
-                self.validation_error = Some(format!("Invalid JSON: {}", e));
+                self.validation_error = Some(format!("JSON error: {}", e));
                 self.validation_report = None;
                 false
             }
@@ -197,26 +204,103 @@ impl StubEditor {
     }
 
     /// Get the stub if valid
-    pub fn get_stub(&self) -> Option<Stub> {
-        let content = self.editor.content();
+    pub fn get_stub(&self) -> Option<crate::api::Stub> {
+        let content = self.editor.lines().join("\n");
         serde_json::from_str(&content).ok()
     }
 
     /// Format the JSON content
     pub fn format(&mut self) {
-        let content = self.editor.content();
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
-            if let Ok(formatted) = serde_json::to_string_pretty(&v) {
-                self.editor.set_content(&formatted);
-                self.validation_error = None;
-                self.validation_report = None;
+        let content = self.editor.lines().join("\n");
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
+            if let Ok(pretty) = serde_json::to_string_pretty(&val) {
+                let lines: Vec<String> = pretty.lines().map(String::from).collect();
+                self.editor = ratatui_textarea::TextArea::new(lines);
+                self.editor.set_line_number_style(
+                    ratatui::style::Style::default().fg(ratatui::style::Color::DarkGray),
+                );
+                self.editor
+                    .set_cursor_line_style(ratatui::style::Style::default());
+                self.editor.set_block(
+                    ratatui::widgets::Block::default()
+                        .borders(ratatui::widgets::Borders::ALL)
+                        .title(" Edit Stub (Ctrl+S save, Ctrl+F format, Ctrl+L lint, Esc cancel) "),
+                );
             }
         }
     }
 
-    /// Handle key input
+    /// Handle a key event. Returns Some(EditorAction) for clipboard operations, None otherwise.
+    /// Ctrl+S, Ctrl+F, Ctrl+L must be intercepted by the caller BEFORE calling this.
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<EditorAction> {
-        self.editor.handle_key(key)
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            match key.code {
+                KeyCode::Char('c') => {
+                    let yanked = self.editor.yank_text();
+                    if !yanked.is_empty() {
+                        return Some(EditorAction::Copy(yanked));
+                    }
+                    return None;
+                }
+                KeyCode::Char('x') => {
+                    let yanked = self.editor.yank_text();
+                    if !yanked.is_empty() {
+                        self.editor.input(crossterm_key_to_input(key));
+                        return Some(EditorAction::Cut(yanked));
+                    }
+                    return None;
+                }
+                KeyCode::Char('v') => {
+                    return Some(EditorAction::PasteRequest);
+                }
+                _ => {}
+            }
+        }
+        self.editor.input(crossterm_key_to_input(key));
+        None
+    }
+}
+
+/// Convert a `crossterm::event::KeyEvent` to `ratatui_textarea::Input`.
+///
+/// ratatui-textarea uses its own re-exported crossterm types which differ from
+/// the standalone `crossterm` crate used by the rest of the app.
+fn crossterm_key_to_input(key: KeyEvent) -> ratatui_textarea::Input {
+    use ratatui_textarea::{Input, Key};
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
+    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+    let k = match key.code {
+        KeyCode::Char(c) => Key::Char(c),
+        KeyCode::Backspace => Key::Backspace,
+        KeyCode::Enter => Key::Enter,
+        KeyCode::Left => Key::Left,
+        KeyCode::Right => Key::Right,
+        KeyCode::Up => Key::Up,
+        KeyCode::Down => Key::Down,
+        KeyCode::Tab => Key::Tab,
+        KeyCode::BackTab => {
+            return Input {
+                key: Key::Tab,
+                ctrl,
+                alt,
+                shift: true,
+            }
+        }
+        KeyCode::Delete => Key::Delete,
+        KeyCode::Home => Key::Home,
+        KeyCode::End => Key::End,
+        KeyCode::PageUp => Key::PageUp,
+        KeyCode::PageDown => Key::PageDown,
+        KeyCode::Esc => Key::Esc,
+        KeyCode::F(n) => Key::F(n),
+        _ => Key::Null,
+    };
+    Input {
+        key: k,
+        ctrl,
+        alt,
+        shift,
     }
 }
 
@@ -2175,7 +2259,13 @@ impl App {
                     Some(EditorAction::PasteRequest) => {
                         if let Some(text) = self.paste_from_clipboard() {
                             if let Some(editor) = &mut self.stub_editor {
-                                editor.editor.paste(&text);
+                                editor.editor.set_yank_text(text.clone());
+                                editor.editor.input(ratatui_textarea::Input {
+                                    key: ratatui_textarea::Key::Char('y'),
+                                    ctrl: true,
+                                    alt: false,
+                                    shift: false,
+                                });
                             }
                         }
                     }

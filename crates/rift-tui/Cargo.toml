@@ -16,13 +16,12 @@ categories = ["command-line-interface", "development-tools::testing"]
 
 [dependencies]
 # TUI framework
-ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
+ratatui-textarea = { version = "0.9", features = ["crossterm"] }
 crossterm = { version = "0.28", features = ["event-stream"] }
 
 # UI widgets
 tui-popup = "0.7"
-tui-prompts = "0.6.1"
-
 # Clipboard support
 arboard = "3.4"
 
