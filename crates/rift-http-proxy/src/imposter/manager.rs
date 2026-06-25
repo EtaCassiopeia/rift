@@ -11,6 +11,7 @@ use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use parking_lot::RwLock;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
@@ -22,15 +23,23 @@ pub struct ImposterManager {
     imposters: RwLock<HashMap<u16, Arc<Imposter>>>,
     /// Global shutdown signal (for future graceful shutdown)
     shutdown_tx: broadcast::Sender<()>,
+    /// Optional data directory for persistence write-through
+    datadir: Option<Arc<PathBuf>>,
 }
 
 impl ImposterManager {
-    /// Create a new imposter manager
+    /// Create a new imposter manager without persistence
     pub fn new() -> Self {
+        Self::with_datadir(None)
+    }
+
+    /// Create a new imposter manager with optional filesystem persistence
+    pub fn with_datadir(datadir: Option<PathBuf>) -> Self {
         let (shutdown_tx, _) = broadcast::channel(16);
         Self {
             imposters: RwLock::new(HashMap::new()),
             shutdown_tx,
+            datadir: datadir.map(Arc::new),
         }
     }
 
@@ -113,14 +122,13 @@ impl ImposterManager {
             }
         });
 
-        // Store task handle (we need to work around the Arc)
-        // Since we can't modify the Arc'd imposter, we'll track handles separately
-
         // Store imposter
         {
             let mut imposters = self.imposters.write();
-            imposters.insert(port, imposter);
+            imposters.insert(port, Arc::clone(&imposter));
         }
+
+        self.persist_imposter(&imposter);
 
         Ok(port)
     }
@@ -176,6 +184,7 @@ impl ImposterManager {
         crate::scripting::clear_imposter_state(port);
 
         info!("Imposter on port {} deleted", port);
+        self.remove_persisted_imposter(port);
         Ok(imposter.config.clone())
     }
 
@@ -225,6 +234,7 @@ impl ImposterManager {
     ) -> Result<(), ImposterError> {
         let imposter = self.get_imposter(port)?;
         imposter.add_stub(stub, index);
+        self.persist_imposter(&imposter);
         Ok(())
     }
 
@@ -233,7 +243,9 @@ impl ImposterManager {
         let imposter = self.get_imposter(port)?;
         imposter
             .replace_stub(index, stub)
-            .map_err(|_| ImposterError::StubIndexOutOfBounds(index))
+            .map_err(|_| ImposterError::StubIndexOutOfBounds(index))?;
+        self.persist_imposter(&imposter);
+        Ok(())
     }
 
     /// Delete a stub
@@ -241,7 +253,17 @@ impl ImposterManager {
         let imposter = self.get_imposter(port)?;
         imposter
             .delete_stub(index)
-            .map_err(|_| ImposterError::StubIndexOutOfBounds(index))
+            .map_err(|_| ImposterError::StubIndexOutOfBounds(index))?;
+        self.persist_imposter(&imposter);
+        Ok(())
+    }
+
+    /// Replace all stubs for an imposter
+    pub fn replace_stubs(&self, port: u16, stubs: Vec<Stub>) -> Result<(), ImposterError> {
+        let imposter = self.get_imposter(port)?;
+        imposter.replace_stubs(stubs);
+        self.persist_imposter(&imposter);
+        Ok(())
     }
 
     /// Get a specific stub by index
@@ -257,10 +279,154 @@ impl ImposterManager {
         let _ = self.shutdown_tx.send(());
         self.delete_all().await;
     }
+
+    /// Persist an imposter's current config to datadir (if configured).
+    /// Spawns a background task; write failures are logged, not propagated.
+    fn persist_imposter(&self, imposter: &Imposter) {
+        let Some(ref datadir) = self.datadir else {
+            return;
+        };
+        let port = match imposter.config.port {
+            Some(p) => p,
+            None => return,
+        };
+        let mut snapshot = imposter.config.clone();
+        snapshot.stubs = imposter.get_stubs();
+        let path = datadir.join(format!("{port}.json"));
+        tokio::spawn(async move {
+            match serde_json::to_string_pretty(&snapshot) {
+                Ok(json) => {
+                    if let Err(e) = tokio::fs::write(&path, json).await {
+                        error!("Failed to persist imposter {} to {:?}: {}", port, path, e);
+                    }
+                }
+                Err(e) => error!(
+                    "Failed to serialize imposter {} for persistence: {}",
+                    port, e
+                ),
+            }
+        });
+    }
+
+    /// Remove an imposter's file from datadir (if configured).
+    fn remove_persisted_imposter(&self, port: u16) {
+        let Some(ref datadir) = self.datadir else {
+            return;
+        };
+        let path = datadir.join(format!("{port}.json"));
+        tokio::spawn(async move {
+            if path.exists() {
+                if let Err(e) = tokio::fs::remove_file(&path).await {
+                    error!(
+                        "Failed to remove persisted imposter {} at {:?}: {}",
+                        port, path, e
+                    );
+                }
+            }
+        });
+    }
 }
 
 impl Default for ImposterManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_create_imposter_writes_to_datadir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manager = ImposterManager::with_datadir(Some(dir.path().to_path_buf()));
+
+        let config = serde_json::from_value(serde_json::json!({
+            "protocol": "http",
+            "port": 19501,
+            "stubs": []
+        }))
+        .unwrap();
+
+        manager.create_imposter(config).await.expect("create");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let file = dir.path().join("19501.json");
+        assert!(file.exists(), "imposter file should be written to datadir");
+
+        let content = std::fs::read_to_string(&file).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(json["port"], 19501);
+        assert_eq!(json["protocol"], "http");
+
+        manager.delete_imposter(19501).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_delete_imposter_removes_from_datadir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manager = ImposterManager::with_datadir(Some(dir.path().to_path_buf()));
+
+        let config = serde_json::from_value(serde_json::json!({
+            "protocol": "http",
+            "port": 19502,
+            "stubs": []
+        }))
+        .unwrap();
+
+        manager.create_imposter(config).await.expect("create");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let file = dir.path().join("19502.json");
+        assert!(file.exists(), "file should exist after create");
+
+        manager.delete_imposter(19502).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        assert!(!file.exists(), "file should be removed after delete");
+    }
+
+    #[tokio::test]
+    async fn test_add_stub_updates_datadir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manager = ImposterManager::with_datadir(Some(dir.path().to_path_buf()));
+
+        let config = serde_json::from_value(serde_json::json!({
+            "protocol": "http",
+            "port": 19503,
+            "stubs": []
+        }))
+        .unwrap();
+
+        manager.create_imposter(config).await.expect("create");
+
+        let stub: Stub = serde_json::from_value(serde_json::json!({
+            "predicates": [],
+            "responses": [{"is": {"statusCode": 200, "body": "hello"}}]
+        }))
+        .unwrap();
+
+        manager.add_stub(19503, stub, None).unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let file = dir.path().join("19503.json");
+        let content = std::fs::read_to_string(&file).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(json["stubs"].as_array().unwrap().len(), 1);
+
+        manager.delete_imposter(19503).await.unwrap();
+    }
+
+    #[test]
+    fn test_new_has_no_datadir() {
+        let manager = ImposterManager::new();
+        assert!(manager.datadir.is_none());
+    }
+
+    #[test]
+    fn test_with_datadir_sets_datadir() {
+        let manager = ImposterManager::with_datadir(Some("/tmp/test".into()));
+        assert!(manager.datadir.is_some());
     }
 }
