@@ -369,36 +369,88 @@ mod tests {
         assert!(app.filtered_stubs().is_empty());
     }
 
-    #[test]
-    fn test_filtered_stubs_no_query_returns_all_indices() {
-        let mut app = make_test_app();
-        app.current_imposter = Some(ImposterDetail {
+    fn make_detail_with_stubs(stubs: Vec<crate::api::Stub>) -> ImposterDetail {
+        ImposterDetail {
             port: 4545,
             protocol: "http".to_string(),
             name: None,
             number_of_requests: 0,
             enabled: true,
             record_requests: false,
-            stubs: vec![
-                crate::api::Stub {
-                    id: None,
-                    scenario_name: None,
-                    recorded_from: None,
-                    predicates: vec![],
-                    responses: vec![],
-                },
-                crate::api::Stub {
-                    id: None,
-                    scenario_name: None,
-                    recorded_from: None,
-                    predicates: vec![],
-                    responses: vec![],
-                },
-            ],
+            stubs,
             requests: vec![],
-        });
+        }
+    }
+
+    fn make_stub(scenario: Option<&str>) -> crate::api::Stub {
+        crate::api::Stub {
+            id: None,
+            scenario_name: scenario.map(String::from),
+            recorded_from: None,
+            predicates: vec![],
+            responses: vec![],
+        }
+    }
+
+    #[test]
+    fn test_filtered_stubs_no_query_returns_all_indices() {
+        let mut app = make_test_app();
+        app.current_imposter = Some(make_detail_with_stubs(vec![
+            make_stub(None),
+            make_stub(None),
+        ]));
         let indices = app.filtered_stubs();
         assert_eq!(indices, vec![0, 1]);
+    }
+
+    #[test]
+    fn test_filtered_stubs_matches_scenario_name() {
+        let mut app = make_test_app();
+        app.current_imposter = Some(make_detail_with_stubs(vec![
+            make_stub(Some("payment-flow")),
+            make_stub(Some("auth-flow")),
+            make_stub(None),
+        ]));
+        app.search_query = "auth".to_string();
+        let indices = app.filtered_stubs();
+        assert_eq!(indices, vec![1], "only the auth-flow stub should match");
+    }
+
+    #[test]
+    fn test_filtered_stubs_no_match_returns_empty() {
+        let mut app = make_test_app();
+        app.current_imposter = Some(make_detail_with_stubs(vec![make_stub(Some(
+            "payment-flow",
+        ))]));
+        app.search_query = "zzznomatch".to_string();
+        assert!(app.filtered_stubs().is_empty());
+    }
+
+    // ─── stub_matches_search ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_stub_matches_search_empty_query_always_true() {
+        let mut app = make_test_app();
+        app.current_imposter = Some(make_detail_with_stubs(vec![make_stub(None)]));
+        assert!(app.stub_matches_search(0));
+    }
+
+    #[test]
+    fn test_stub_matches_search_scenario_name_hit() {
+        let mut app = make_test_app();
+        app.current_imposter = Some(make_detail_with_stubs(vec![
+            make_stub(Some("payment-flow")),
+            make_stub(None),
+        ]));
+        app.search_query = "payment".to_string();
+        assert!(
+            app.stub_matches_search(0),
+            "index 0 (payment-flow) should match"
+        );
+        assert!(
+            !app.stub_matches_search(1),
+            "index 1 (no scenario) should not match"
+        );
     }
 
     // ─── imposter_matches_search ──────────────────────────────────────────────
