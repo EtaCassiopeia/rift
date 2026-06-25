@@ -650,6 +650,88 @@ fn e033_lookup_missing_into() {
     assert!(has_code(&r, "E033"));
 }
 
+// ─── _behaviors dispatch integration tests ────────────────────────────────────
+// These exercise validate_behavior through validate_response using the primary
+// Rift format (_behaviors: object) to confirm dispatch is not a dead path.
+
+#[test]
+fn e025_via_response_underscore_behaviors_object() {
+    let resp = json!({
+        "is": { "statusCode": 200 },
+        "_behaviors": { "wait": true }
+    });
+    let mut r = LintResult::new();
+    validate_response(path(), &resp, "loc", &mut r, &opts());
+    assert!(
+        has_code(&r, "E025"),
+        "E025 must fire through _behaviors dispatch, got {:?}",
+        codes(&r)
+    );
+}
+
+#[test]
+fn e025_not_fired_via_response_for_valid_wait_range() {
+    let resp = json!({
+        "is": { "statusCode": 200 },
+        "_behaviors": { "wait": { "min": 100, "max": 500 } }
+    });
+    let mut r = LintResult::new();
+    validate_response(path(), &resp, "loc", &mut r, &opts());
+    assert!(
+        !has_code(&r, "E025"),
+        "E025 must not fire for {{min,max}} via _behaviors, got {:?}",
+        codes(&r)
+    );
+}
+
+#[test]
+fn e035_via_response_underscore_behaviors_object() {
+    let resp = json!({
+        "is": { "statusCode": 200 },
+        "_behaviors": { "repeat": 0 }
+    });
+    let mut r = LintResult::new();
+    validate_response(path(), &resp, "loc", &mut r, &opts());
+    assert!(
+        has_code(&r, "E035"),
+        "E035 must fire through _behaviors dispatch, got {:?}",
+        codes(&r)
+    );
+}
+
+#[test]
+fn behaviors_array_format_still_dispatches() {
+    // Rift also serializes responses with `behaviors: [...]` (array, no underscore)
+    let resp = json!({
+        "is": { "statusCode": 200 },
+        "behaviors": [{ "wait": true }]
+    });
+    let mut r = LintResult::new();
+    validate_response(path(), &resp, "loc", &mut r, &opts());
+    assert!(
+        has_code(&r, "E025"),
+        "E025 must fire through behaviors array dispatch, got {:?}",
+        codes(&r)
+    );
+}
+
+#[test]
+fn underscore_behaviors_takes_priority_over_behaviors_array() {
+    // When both forms are present, _behaviors wins (matches proxy behaviour)
+    let resp = json!({
+        "is": { "statusCode": 200 },
+        "_behaviors": { "wait": 100 },
+        "behaviors": [{ "wait": true }]  // invalid, but should not be reached
+    });
+    let mut r = LintResult::new();
+    validate_response(path(), &resp, "loc", &mut r, &opts());
+    assert!(
+        !has_code(&r, "E025"),
+        "_behaviors (valid) should shadow behaviors array, got {:?}",
+        codes(&r)
+    );
+}
+
 // ─── Public API tests ─────────────────────────────────────────────────────────
 
 #[test]

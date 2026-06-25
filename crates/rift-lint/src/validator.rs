@@ -432,7 +432,14 @@ pub fn validate_response(
         }
     }
 
-    if let Some(behaviors) = response.get("behaviors").and_then(|v| v.as_array()) {
+    // Rift/Mountebank write behaviors as `_behaviors: { wait, repeat, ... }` (object).
+    // Rift also accepts and serializes `behaviors: [...]` (array) for MB compatibility.
+    // Validate whichever form is present.
+    if let Some(b) = response.get("_behaviors") {
+        if b.is_object() {
+            validate_behavior(file, b, &format!("{location}._behaviors"), result, options);
+        }
+    } else if let Some(behaviors) = response.get("behaviors").and_then(|v| v.as_array()) {
         for (idx, behavior) in behaviors.iter().enumerate() {
             validate_behavior(
                 file,
