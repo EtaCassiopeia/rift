@@ -36,6 +36,33 @@ pub async fn handle_imposter_request(
     imposter: Arc<Imposter>,
     client_addr: SocketAddr,
 ) -> Result<Response<Full<Bytes>>, Infallible> {
+    let allow_cors = imposter.config.allow_cors;
+    let mut response = handle_request_inner(req, imposter, client_addr).await?;
+    if allow_cors {
+        inject_cors_headers(response.headers_mut());
+    }
+    Ok(response)
+}
+
+fn inject_cors_headers(headers: &mut hyper::HeaderMap) {
+    use hyper::header::{HeaderName, HeaderValue};
+    for (name, value) in [
+        ("access-control-allow-origin", "*"),
+        ("access-control-allow-headers", "*"),
+        ("access-control-allow-methods", "*"),
+    ] {
+        let header_name = HeaderName::from_static(name);
+        if !headers.contains_key(&header_name) {
+            headers.insert(header_name, HeaderValue::from_static(value));
+        }
+    }
+}
+
+async fn handle_request_inner(
+    req: Request<Incoming>,
+    imposter: Arc<Imposter>,
+    client_addr: SocketAddr,
+) -> Result<Response<Full<Bytes>>, Infallible> {
     // Check if enabled
     if !imposter.is_enabled() {
         return Ok(build_response_with_headers(
@@ -63,6 +90,14 @@ pub async fn handle_imposter_request(
         .collect();
     let path = uri.path().to_string();
     let query_str = uri.query().unwrap_or("").to_string();
+
+    if method.eq_ignore_ascii_case("OPTIONS") && imposter.config.allow_cors {
+        return Ok(build_response_with_headers(
+            StatusCode::OK,
+            [("x-rift-imposter", "true")],
+            Bytes::new(),
+        ));
+    }
 
     // Collect request body with size limit to prevent memory exhaustion
     let limited_body = Limited::new(req.into_body(), MAX_REQUEST_BODY_SIZE);
