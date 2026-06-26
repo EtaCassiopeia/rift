@@ -183,7 +183,20 @@ enum Commands {
     },
 }
 
+/// Bridge `MBPORT` → `MB_PORT` so Mimeo Solo Dockerfiles that use `ENV MBPORT`
+/// are picked up by clap's `env = "MB_PORT"` without any Dockerfile changes.
+/// `MB_PORT` always wins when both vars are set.
+fn apply_mbport_alias() {
+    if std::env::var_os("MB_PORT").is_none() {
+        if let Some(v) = std::env::var_os("MBPORT") {
+            // Safety: called before any threads are spawned.
+            unsafe { std::env::set_var("MB_PORT", v) };
+        }
+    }
+}
+
 fn main() -> Result<(), anyhow::Error> {
+    apply_mbport_alias();
     let mut cli = Cli::parse();
 
     // Apply rcfile defaults before using CLI values (only for fields at their clap defaults)
@@ -790,5 +803,31 @@ mod tests {
             msg.contains("nonexistent.json"),
             "error message should name the missing file"
         );
+    }
+
+    // =========================================================================
+    // Issue #192: MBPORT env var alias
+    // =========================================================================
+
+    #[test]
+    #[serial_test::serial]
+    fn test_mbport_sets_mb_port_when_unset() {
+        std::env::remove_var("MB_PORT");
+        std::env::set_var("MBPORT", "9000");
+        apply_mbport_alias();
+        assert_eq!(std::env::var("MB_PORT").unwrap(), "9000");
+        std::env::remove_var("MB_PORT");
+        std::env::remove_var("MBPORT");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_mb_port_wins_over_mbport() {
+        std::env::set_var("MB_PORT", "8000");
+        std::env::set_var("MBPORT", "9000");
+        apply_mbport_alias();
+        assert_eq!(std::env::var("MB_PORT").unwrap(), "8000");
+        std::env::remove_var("MB_PORT");
+        std::env::remove_var("MBPORT");
     }
 }
