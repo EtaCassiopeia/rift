@@ -2369,3 +2369,123 @@ fn test_multi_valued_query_param_contains() {
         0
     ));
 }
+
+// =============================================================================
+// Issue #189: allowCORS — OPTIONS preflight and CORS header injection
+// =============================================================================
+
+/// Assert that a response header equals `expected` (`None` asserts absence).
+fn assert_cors_header(response: &reqwest::Response, name: &str, expected: Option<&str>) {
+    let actual = response.headers().get(name).map(|v| v.to_str().unwrap());
+    assert_eq!(actual, expected);
+}
+
+#[tokio::test]
+async fn test_cors_options_preflight() {
+    let manager = ImposterManager::new();
+    let config = ImposterConfig {
+        port: None,
+        protocol: "http".to_string(),
+        allow_cors: true,
+        stubs: vec![],
+        ..Default::default()
+    };
+    let port = manager
+        .create_imposter(config)
+        .await
+        .expect("failed to create CORS imposter");
+
+    let client = reqwest::Client::new();
+    let response = client
+        .request(
+            reqwest::Method::OPTIONS,
+            format!("http://127.0.0.1:{port}/any/path"),
+        )
+        .send()
+        .await
+        .expect("OPTIONS request failed");
+
+    assert_eq!(response.status(), 200);
+    assert_cors_header(&response, "access-control-allow-origin", Some("*"));
+    assert_cors_header(&response, "access-control-allow-headers", Some("*"));
+    assert_cors_header(&response, "access-control-allow-methods", Some("*"));
+
+    let _ = manager.delete_imposter(port).await;
+}
+
+#[tokio::test]
+async fn test_cors_headers_on_stub_response() {
+    let manager = ImposterManager::new();
+    let stub = Stub {
+        id: None,
+        predicates: predicates_from_jsons(vec![serde_json::json!({
+            "equals": {"method": "GET", "path": "/test"}
+        })]),
+        responses: vec![StubResponse::Is {
+            is: IsResponse {
+                status_code: 200,
+                headers: HashMap::new(),
+                body: Some(serde_json::json!("ok")),
+                ..Default::default()
+            },
+            behaviors: None,
+            rift: None,
+        }],
+        scenario_name: None,
+        recorded_from: None,
+    };
+    let config = ImposterConfig {
+        port: None,
+        protocol: "http".to_string(),
+        allow_cors: true,
+        stubs: vec![stub],
+        ..Default::default()
+    };
+    let port = manager
+        .create_imposter(config)
+        .await
+        .expect("failed to create CORS imposter with stub");
+
+    let client = reqwest::Client::new();
+    let response = client
+        .get(format!("http://127.0.0.1:{port}/test"))
+        .send()
+        .await
+        .expect("GET request failed");
+
+    assert_eq!(response.status(), 200);
+    assert_cors_header(&response, "access-control-allow-origin", Some("*"));
+    assert_cors_header(&response, "access-control-allow-headers", Some("*"));
+    assert_cors_header(&response, "access-control-allow-methods", Some("*"));
+
+    let _ = manager.delete_imposter(port).await;
+}
+
+#[tokio::test]
+async fn test_cors_disabled_no_cors_headers() {
+    let manager = ImposterManager::new();
+    let config = ImposterConfig {
+        port: None,
+        protocol: "http".to_string(),
+        allow_cors: false,
+        stubs: vec![],
+        ..Default::default()
+    };
+    let port = manager
+        .create_imposter(config)
+        .await
+        .expect("failed to create imposter without CORS");
+
+    let client = reqwest::Client::new();
+    let response = client
+        .get(format!("http://127.0.0.1:{port}/"))
+        .send()
+        .await
+        .expect("GET request failed");
+
+    assert_cors_header(&response, "access-control-allow-origin", None);
+    assert_cors_header(&response, "access-control-allow-headers", None);
+    assert_cors_header(&response, "access-control-allow-methods", None);
+
+    let _ = manager.delete_imposter(port).await;
+}
