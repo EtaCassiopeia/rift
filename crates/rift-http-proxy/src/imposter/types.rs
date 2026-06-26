@@ -135,8 +135,8 @@ pub struct Stub {
 }
 
 /// Raw deserialization type for Stub — handles alternative field names and format conversions:
-/// - `rules` as Mimeo Solo alias for `predicates`
-/// - `delayRange` array (Mimeo Solo stub-level latency) converted to per-response `wait` behavior
+/// - `rules` as an alias for `predicates`
+/// - `delayRange` array (stub-level latency) converted to per-response `wait` behavior
 /// - `recordedFrom` URL from Mountebank proxy recording
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -147,19 +147,19 @@ struct StubRaw {
     id: Option<String>,
     #[serde(default)]
     predicates: Vec<Predicate>,
-    /// Mimeo Solo recorded format uses "rules" instead of "predicates"
+    /// Alternative field name "rules" used instead of "predicates" in some recorded formats
     #[serde(default)]
     rules: Vec<Predicate>,
     #[serde(default)]
     responses: Vec<StubResponse>,
     #[serde(default)]
     recorded_from: Option<String>,
-    /// Mimeo Solo stub-level latency: `[{ "min": "50", "max": "100" }]`
+    /// Stub-level latency range: `[{ "min": "50", "max": "100" }]`
     #[serde(default)]
     delay_range: Vec<DelayRange>,
 }
 
-/// A `delayRange` entry as emitted by the Mimeo Solo recorder.
+/// A `delayRange` entry for stub-level latency configuration.
 /// Both `min` and `max` may be numbers or numeric strings.
 #[derive(Debug, Clone, Deserialize)]
 struct DelayRange {
@@ -185,7 +185,7 @@ fn de_u64_or_string<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u64, D::Er
 
 impl From<StubRaw> for Stub {
     fn from(raw: StubRaw) -> Self {
-        // "rules" is the Mimeo Solo alias for "predicates"; prefer "predicates" when both present
+        // "rules" is an alias for "predicates"; prefer "predicates" when both present
         let predicates = if !raw.predicates.is_empty() {
             raw.predicates
         } else {
