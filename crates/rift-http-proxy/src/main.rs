@@ -388,7 +388,7 @@ async fn load_imposters_from_file(
 
 /// Pre-process EJS tokens in a config file before JSON/YAML parsing.
 ///
-/// Handles the patterns emitted by Mountebank and Mimeo Solo tooling:
+/// Handles the patterns emitted by Mountebank and compatible tooling:
 /// - `<% include 'path' %>` — inline the referenced file (relative to the config file)
 /// - `<%= process.env.VAR %>` — substitute with the env var value (empty string if unset)
 /// - `<%= process.env.VAR || 'default' %>` — substitute with env var or the literal default
