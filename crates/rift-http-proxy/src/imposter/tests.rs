@@ -2489,3 +2489,73 @@ async fn test_cors_disabled_no_cors_headers() {
 
     let _ = manager.delete_imposter(port).await;
 }
+
+// Issue #213: the `lookup` behavior must apply to direct imposter `is` responses,
+// not only to proxied responses. Tokens `${into}[column]` should be replaced from
+// the CSV data source.
+#[tokio::test]
+async fn test_lookup_behavior_applied_on_is_response() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let csv_path = dir.path().join("products.csv");
+    std::fs::write(&csv_path, "id,name,price\n456,Gadget,19.99\n").expect("write csv");
+    let csv_path = csv_path.to_str().expect("csv path utf8");
+
+    let config: ImposterConfig = serde_json::from_value(serde_json::json!({
+        "port": 19710,
+        "protocol": "http",
+        "stubs": [{
+            "predicates": [{ "matches": { "path": "^/catalog/\\d+$" } }],
+            "responses": [{
+                "is": {
+                    "statusCode": 200,
+                    "headers": { "Content-Type": "application/json", "X-Product": "${row}[name]" },
+                    "body": { "name": "${row}[name]", "price": "${row}[price]" }
+                },
+                "_behaviors": {
+                    "lookup": {
+                        "key": { "from": "path", "using": { "method": "regex", "selector": "/catalog/(\\d+)" } },
+                        "fromDataSource": { "csv": { "path": csv_path, "keyColumn": "id" } },
+                        "into": "${row}"
+                    }
+                }
+            }]
+        }]
+    }))
+    .expect("config");
+
+    let manager = ImposterManager::new();
+    manager
+        .create_imposter(config)
+        .await
+        .expect("create imposter");
+
+    let response = reqwest::Client::new()
+        .get("http://127.0.0.1:19710/catalog/456")
+        .send()
+        .await
+        .expect("GET failed");
+    let status = response.status();
+    let product_header = response
+        .headers()
+        .get("X-Product")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    let body = response.text().await.expect("body");
+
+    let _ = manager.delete_imposter(19710).await;
+
+    assert_eq!(status, 200, "lookup response should be 200");
+    assert!(
+        body.contains("Gadget") && body.contains("19.99"),
+        "lookup must replace body tokens with CSV values, got: {body}"
+    );
+    assert!(
+        !body.contains("${row}"),
+        "no lookup tokens should remain after replacement, got: {body}"
+    );
+    assert_eq!(
+        product_header.as_deref(),
+        Some("Gadget"),
+        "lookup must replace tokens in response headers too"
+    );
+}

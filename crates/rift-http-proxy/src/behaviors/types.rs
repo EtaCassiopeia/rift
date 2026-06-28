@@ -27,7 +27,11 @@ pub struct ResponseBehaviors {
     pub copy: Vec<CopyBehavior>,
 
     /// Lookup from external data source
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_lookup_behaviors",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub lookup: Vec<LookupBehavior>,
 
     /// Shell transform - external program(s) transform response.
@@ -122,6 +126,46 @@ where
     deserializer.deserialize_any(CopyBehaviorsVisitor)
 }
 
+/// Accept either a single `lookup` object or an array, mirroring `copy`.
+/// Mountebank and the docs use the single-object form (`"lookup": { ... }`).
+fn deserialize_lookup_behaviors<'de, D>(deserializer: D) -> Result<Vec<LookupBehavior>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::{self, Visitor};
+
+    struct LookupBehaviorsVisitor;
+
+    impl<'de> Visitor<'de> for LookupBehaviorsVisitor {
+        type Value = Vec<LookupBehavior>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a lookup behavior object or array of lookup behaviors")
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: de::SeqAccess<'de>,
+        {
+            let mut behaviors = Vec::new();
+            while let Some(behavior) = seq.next_element()? {
+                behaviors.push(behavior);
+            }
+            Ok(behaviors)
+        }
+
+        fn visit_map<M>(self, map: M) -> Result<Self::Value, M::Error>
+        where
+            M: de::MapAccess<'de>,
+        {
+            let behavior = LookupBehavior::deserialize(de::value::MapAccessDeserializer::new(map))?;
+            Ok(vec![behavior])
+        }
+    }
+
+    deserializer.deserialize_any(LookupBehaviorsVisitor)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -142,6 +186,30 @@ copy:
         assert!(matches!(behaviors.wait, Some(WaitBehavior::Fixed(500))));
         assert_eq!(behaviors.repeat, Some(3));
         assert_eq!(behaviors.copy.len(), 1);
+    }
+
+    // The `lookup` field accepts both a single object (Mountebank/docs form) and
+    // an array, mirroring `copy`.
+    #[test]
+    fn test_lookup_behaviors_single_object_and_array() {
+        let lookup = serde_json::json!({
+            "key": { "from": "path", "using": { "method": "regex", "selector": "/c/(\\d+)" } },
+            "fromDataSource": { "csv": { "path": "x.csv", "keyColumn": "id" } },
+            "into": "${row}"
+        });
+
+        let single: ResponseBehaviors =
+            serde_json::from_value(serde_json::json!({ "lookup": lookup.clone() })).unwrap();
+        assert_eq!(
+            single.lookup.len(),
+            1,
+            "single object should yield one behavior"
+        );
+
+        let array: ResponseBehaviors =
+            serde_json::from_value(serde_json::json!({ "lookup": [lookup.clone(), lookup] }))
+                .unwrap();
+        assert_eq!(array.lookup.len(), 2, "array should yield two behaviors");
     }
 
     #[test]
