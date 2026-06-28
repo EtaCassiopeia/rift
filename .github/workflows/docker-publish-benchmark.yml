@@ -29,7 +29,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up QEMU (for multi-arch builds)
         uses: docker/setup-qemu-action@v3
@@ -124,7 +124,7 @@ jobs:
       # Disabled: GHCR attestation
       # - name: Generate artifact attestation
       #   if: github.event_name != 'pull_request'
-      #   uses: actions/attest-build-provenance@v1
+      #   uses: actions/attest-build-provenance@v3
       #   with:
       #     subject-name: ${{ env.REGISTRY_GHCR }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}
       #     subject-digest: ${{ steps.build.outputs.digest }}
