@@ -85,8 +85,16 @@ impl CsvCache {
             }
         }
 
-        // Load from file
-        let data = CsvData::load(path, delimiter).ok()?;
+        // Load from file. A failure here means a misconfigured data source
+        // (missing/unreadable/malformed CSV); surface it instead of silently
+        // serving the response with the lookup tokens left unreplaced.
+        let data = match CsvData::load(path, delimiter) {
+            Ok(data) => data,
+            Err(e) => {
+                tracing::warn!("lookup behavior: failed to load CSV data source '{path}': {e}");
+                return None;
+            }
+        };
         let data = Arc::new(data);
 
         // Cache it

@@ -9,7 +9,8 @@ use super::response::apply_js_or_rhai_decorate;
 use super::types::{DebugMatchResult, DebugRequest, DebugResponse, RecordedRequest, ResponseMode};
 use crate::admin_api::types::{build_response, build_response_with_headers};
 use crate::behaviors::{
-    apply_copy_behaviors, header_to_title_case, RequestContext, ResponseBehaviors,
+    apply_copy_behaviors, apply_lookup_behaviors, header_to_title_case, CsvCache, RequestContext,
+    ResponseBehaviors,
 };
 #[cfg(feature = "javascript")]
 use crate::scripting::{execute_mountebank_inject, MountebankRequest};
@@ -20,8 +21,6 @@ use http_body_util::{BodyExt, Full, Limited};
 use hyper::body::Incoming;
 use hyper::{Request, Response, StatusCode};
 
-/// Maximum allowed request body size (10 MB)
-const MAX_REQUEST_BODY_SIZE: usize = 10 * 1024 * 1024;
 use rand::Rng;
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -29,6 +28,16 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, warn};
+
+/// Maximum allowed request body size (10 MB)
+const MAX_REQUEST_BODY_SIZE: usize = 10 * 1024 * 1024;
+
+/// Process-wide cache for `lookup` behavior CSV data sources, shared across all
+/// imposters so a file is parsed once and reused on subsequent requests.
+fn csv_cache() -> &'static CsvCache {
+    static CSV_CACHE: std::sync::OnceLock<CsvCache> = std::sync::OnceLock::new();
+    CSV_CACHE.get_or_init(CsvCache::new)
+}
 
 /// Handle a request to an imposter
 pub async fn handle_imposter_request(
@@ -446,6 +455,17 @@ async fn handle_request_inner(
                             &mut headers,
                             &parsed_behaviors.copy,
                             &request_context,
+                        );
+                    }
+
+                    // Apply lookup behaviors (CSV-backed token replacement)
+                    if !parsed_behaviors.lookup.is_empty() {
+                        body = apply_lookup_behaviors(
+                            &body,
+                            &mut headers,
+                            &parsed_behaviors.lookup,
+                            &request_context,
+                            csv_cache(),
                         );
                     }
 
