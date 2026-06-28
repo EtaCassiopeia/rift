@@ -1,9 +1,10 @@
 name: Build and Publish Docker Images
 
 on:
-  push:
-    tags:
-      - 'v*'
+  # Note: intentionally NOT triggered by `push: tags`. This workflow downloads
+  # the release binaries from the GitHub Release, which do not exist at tag-push
+  # time. It is invoked by release.yml (workflow_call) after the release job has
+  # uploaded the assets, or manually via workflow_dispatch.
   workflow_dispatch:
     inputs:
       tag:
