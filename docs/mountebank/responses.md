@@ -291,7 +291,7 @@ With standard cycling, if User A triggers the first failure, User B gets the sec
       "_rift": {
         "script": {
           "engine": "rhai",
-          "code": "fn should_inject(request, flow_store) { let user_id = request.headers.get(\"x-user-id\"); if user_id == () { user_id = \"anonymous\"; }; let attempts = flow_store.increment(user_id, \"attempts\"); if attempts <= 2 { #{inject: true, fault: \"error\", status: 503, body: `{\"error\":\"Temporary failure\",\"attempt\":${attempts},\"user\":\"${user_id}\"}`, headers: #{\"Content-Type\": \"application/json\", \"Retry-After\": \"1\"}} } else { #{inject: false} } }"
+          "code": "fn should_inject(request, flow_store) { let user_id = request.headers[\"x-user-id\"]; if user_id == () { user_id = \"anonymous\"; }; let attempts = flow_store.increment(user_id, \"attempts\"); if attempts <= 2 { #{inject: true, fault: \"error\", status: 503, body: `{\"error\":\"Temporary failure\",\"attempt\":${attempts},\"user\":\"${user_id}\"}`, headers: #{\"Content-Type\": \"application/json\", \"Retry-After\": \"1\"}} } else { #{inject: false} } }"
         }
       },
       "is": { "statusCode": 200, "body": "{\"status\": \"success\"}" }
@@ -356,7 +356,7 @@ Features not possible with Mountebank:
         "_rift": {
           "script": {
             "engine": "rhai",
-            "code": "fn should_inject(request, flow_store) { let api_key = request.headers.get(\"x-api-key\"); if api_key == () { return #{inject: true, fault: \"error\", status: 401, body: \"{\\\"error\\\":\\\"API key required\\\"}\", headers: #{\"Content-Type\": \"application/json\"}}; }; let used = flow_store.get(api_key, \"quota_used\"); if used == () { used = 0; }; let limit = 1000; if used >= limit { #{inject: true, fault: \"error\", status: 402, body: `{\"error\":\"Quota exceeded\",\"used\":${used},\"limit\":${limit}}`, headers: #{\"Content-Type\": \"application/json\"}} } else { flow_store.set(api_key, \"quota_used\", used + 1); #{inject: false} } }"
+            "code": "fn should_inject(request, flow_store) { let api_key = request.headers[\"x-api-key\"]; if api_key == () { return #{inject: true, fault: \"error\", status: 401, body: \"{\\\"error\\\":\\\"API key required\\\"}\", headers: #{\"Content-Type\": \"application/json\"}}; }; let used = flow_store.get(api_key, \"quota_used\"); if used == () { used = 0; }; let limit = 1000; if used >= limit { #{inject: true, fault: \"error\", status: 402, body: `{\"error\":\"Quota exceeded\",\"used\":${used},\"limit\":${limit}}`, headers: #{\"Content-Type\": \"application/json\"}} } else { flow_store.set(api_key, \"quota_used\", used + 1); #{inject: false} } }"
           }
         },
         "is": { "statusCode": 200, "body": "{\"result\": \"expensive computation\"}" }
@@ -368,7 +368,7 @@ Features not possible with Mountebank:
         "_rift": {
           "script": {
             "engine": "rhai",
-            "code": "fn should_inject(request, flow_store) { let api_key = request.headers.get(\"x-api-key\"); if api_key == () { api_key = \"default\"; }; flow_store.delete(api_key, \"quota_used\"); #{inject: true, fault: \"error\", status: 200, body: \"{\\\"message\\\":\\\"Quota reset\\\"}\", headers: #{\"Content-Type\": \"application/json\"}} }"
+            "code": "fn should_inject(request, flow_store) { let api_key = request.headers[\"x-api-key\"]; if api_key == () { api_key = \"default\"; }; flow_store.delete(api_key, \"quota_used\"); #{inject: true, fault: \"error\", status: 200, body: \"{\\\"message\\\":\\\"Quota reset\\\"}\", headers: #{\"Content-Type\": \"application/json\"}} }"
           }
         }
       }]

@@ -313,11 +313,16 @@ async fn handle_request_inner(
                 script_config.engine
             );
 
-            // Build script request
+            // Build script request. Expose headers with lowercase keys so scripts can read
+            // them case-insensitively (e.g. `request.headers["x-flow-id"]`) regardless of the
+            // wire casing; this matches the engine docs and HTTP header semantics.
             let script_request = ScriptRequest {
                 method: method.clone(),
                 path: path.clone(),
-                headers: headers_clone.clone(),
+                headers: headers_clone
+                    .iter()
+                    .map(|(k, v)| (k.to_ascii_lowercase(), v.clone()))
+                    .collect(),
                 body: body_string
                     .as_ref()
                     .and_then(|s| serde_json::from_str(s).ok())

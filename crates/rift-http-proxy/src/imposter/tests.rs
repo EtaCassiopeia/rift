@@ -2559,3 +2559,46 @@ async fn test_lookup_behavior_applied_on_is_response() {
         "lookup must replace tokens in response headers too"
     );
 }
+
+// Issue #215: scripts must access request headers case-insensitively. A request sent
+// with `X-Flow-Id: demo` must be readable as `request.headers["x-flow-id"]` (lowercase),
+// matching the engine docs/tests and HTTP's case-insensitive header semantics.
+#[tokio::test]
+async fn test_script_header_access_is_case_insensitive() {
+    let script = "fn should_inject(request, flow_store) { \
+         let f = request.headers[\"x-flow-id\"]; if f == () { f = \"MISS\"; }; \
+         #{ inject: true, fault: \"error\", status: 200, body: f } }";
+
+    let config: ImposterConfig = serde_json::from_value(serde_json::json!({
+        "port": 19720,
+        "protocol": "http",
+        "stubs": [{
+            "predicates": [{ "equals": { "path": "/whoami" } }],
+            "responses": [{ "_rift": { "script": { "engine": "rhai", "code": script } } }]
+        }]
+    }))
+    .expect("config");
+
+    let manager = ImposterManager::new();
+    manager
+        .create_imposter(config)
+        .await
+        .expect("create imposter");
+
+    let body = reqwest::Client::new()
+        .get("http://127.0.0.1:19720/whoami")
+        .header("X-Flow-Id", "demo")
+        .send()
+        .await
+        .expect("GET failed")
+        .text()
+        .await
+        .expect("body");
+
+    let _ = manager.delete_imposter(19720).await;
+
+    assert_eq!(
+        body, "demo",
+        "script must read the Title-Cased wire header via a lowercase key, got: {body}"
+    );
+}
