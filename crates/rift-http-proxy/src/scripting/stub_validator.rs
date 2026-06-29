@@ -271,6 +271,8 @@ mod tests {
                 },
             }],
             scenario_name: None,
+            required_scenario_state: None,
+            new_scenario_state: None,
             recorded_from: None,
         }
     }
@@ -283,6 +285,8 @@ mod tests {
                 inject: code.to_string(),
             }],
             scenario_name: None,
+            required_scenario_state: None,
+            new_scenario_state: None,
             recorded_from: None,
         }
     }
@@ -368,6 +372,8 @@ mod tests {
                     },
                 }],
                 scenario_name: None,
+                required_scenario_state: None,
+                new_scenario_state: None,
                 recorded_from: None,
             },
             Stub {
@@ -384,6 +390,8 @@ mod tests {
                     },
                 }],
                 scenario_name: None,
+                required_scenario_state: None,
+                new_scenario_state: None,
                 recorded_from: None,
             },
         ];

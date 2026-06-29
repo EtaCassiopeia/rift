@@ -57,6 +57,8 @@ fn test_predicate_matching() {
             rift: None,
         }],
         scenario_name: None,
+        required_scenario_state: None,
+        new_scenario_state: None,
         recorded_from: None,
     };
 
@@ -146,6 +148,8 @@ fn test_execute_stub() {
             rift: None,
         }],
         scenario_name: None,
+        required_scenario_state: None,
+        new_scenario_state: None,
         recorded_from: None,
     };
 
@@ -2432,6 +2436,8 @@ async fn test_cors_headers_on_stub_response() {
             rift: None,
         }],
         scenario_name: None,
+        required_scenario_state: None,
+        new_scenario_state: None,
         recorded_from: None,
     };
     let config = ImposterConfig {
@@ -2601,4 +2607,334 @@ async fn test_script_header_access_is_case_insensitive() {
         body, "demo",
         "script must read the Title-Cased wire header via a lowercase key, got: {body}"
     );
+}
+
+// Issue #190: declarative stateful scenarios (whenState/thenState), flow_id-keyed.
+#[cfg(test)]
+mod scenario_fsm_tests {
+    use super::*;
+
+    async fn get(client: &reqwest::Client, port: u16, path: &str, space: Option<&str>) -> String {
+        let mut req = client.get(format!("http://127.0.0.1:{port}{path}"));
+        if let Some(s) = space {
+            req = req.header("X-Mock-Space", s);
+        }
+        req.send().await.expect("send").text().await.expect("body")
+    }
+
+    fn order_fsm(port: u16, flow_id_source: Option<&str>) -> serde_json::Value {
+        let mut flow_state = serde_json::json!({ "backend": "inmemory", "ttlSeconds": 300 });
+        if let Some(src) = flow_id_source {
+            flow_state["mountebankStateMapping"] = serde_json::json!({ "flowIdSource": src });
+        }
+        serde_json::json!({
+            "port": port, "protocol": "http",
+            "_rift": { "flowState": flow_state },
+            "stubs": [
+                { "scenarioName": "order", "requiredScenarioState": "Started",
+                  "predicates": [{ "equals": { "path": "/status" } }],
+                  "responses": [{ "is": { "statusCode": 200, "body": "unpaid" } }] },
+                { "scenarioName": "order", "requiredScenarioState": "Started", "newScenarioState": "paid",
+                  "predicates": [{ "equals": { "path": "/pay" } }],
+                  "responses": [{ "is": { "statusCode": 200, "body": "ok" } }] },
+                { "scenarioName": "order", "requiredScenarioState": "paid",
+                  "predicates": [{ "equals": { "path": "/status" } }],
+                  "responses": [{ "is": { "statusCode": 200, "body": "paid" } }] }
+            ]
+        })
+    }
+
+    #[tokio::test]
+    async fn scenario_auto_provisions_store_without_explicit_flow_state() {
+        // No `_rift.flowState` at all: declaring scenario stubs must auto-provision an in-memory
+        // store so the FSM works out of the box (otherwise transitions silently no-op on NoOp).
+        let manager = ImposterManager::new();
+        let config = serde_json::from_value(serde_json::json!({
+            "port": 19764, "protocol": "http",
+            "stubs": [
+                { "scenarioName": "order", "requiredScenarioState": "Started",
+                  "predicates": [{ "equals": { "path": "/status" } }],
+                  "responses": [{ "is": { "statusCode": 200, "body": "unpaid" } }] },
+                { "scenarioName": "order", "requiredScenarioState": "Started", "newScenarioState": "paid",
+                  "predicates": [{ "equals": { "path": "/pay" } }],
+                  "responses": [{ "is": { "statusCode": 200, "body": "ok" } }] },
+                { "scenarioName": "order", "requiredScenarioState": "paid",
+                  "predicates": [{ "equals": { "path": "/status" } }],
+                  "responses": [{ "is": { "statusCode": 200, "body": "paid" } }] }
+            ]
+        }))
+        .unwrap();
+        manager.create_imposter(config).await.expect("create");
+        let c = reqwest::Client::new();
+
+        assert_eq!(get(&c, 19764, "/status", None).await, "unpaid");
+        assert_eq!(get(&c, 19764, "/pay", None).await, "ok");
+        assert_eq!(
+            get(&c, 19764, "/status", None).await,
+            "paid",
+            "FSM works without _rift.flowState"
+        );
+
+        let _ = manager.delete_imposter(19764).await;
+    }
+
+    #[tokio::test]
+    async fn scenario_transition_advances_state() {
+        let manager = ImposterManager::new();
+        let config = serde_json::from_value(order_fsm(19760, None)).unwrap();
+        manager.create_imposter(config).await.expect("create");
+        let c = reqwest::Client::new();
+
+        assert_eq!(
+            get(&c, 19760, "/status", None).await,
+            "unpaid",
+            "initial state"
+        );
+        assert_eq!(
+            get(&c, 19760, "/pay", None).await,
+            "ok",
+            "pay transitions to paid"
+        );
+        assert_eq!(
+            get(&c, 19760, "/status", None).await,
+            "paid",
+            "state advanced after pay"
+        );
+
+        let _ = manager.delete_imposter(19760).await;
+    }
+
+    #[tokio::test]
+    async fn scenario_unmatched_in_state_keeps_state() {
+        let manager = ImposterManager::new();
+        let config = serde_json::from_value(order_fsm(19761, None)).unwrap();
+        manager.create_imposter(config).await.expect("create");
+        let c = reqwest::Client::new();
+
+        // /status only reads; it never carries newScenarioState, so it must not advance.
+        assert_eq!(get(&c, 19761, "/status", None).await, "unpaid");
+        assert_eq!(
+            get(&c, 19761, "/status", None).await,
+            "unpaid",
+            "read-only stub keeps state"
+        );
+
+        let _ = manager.delete_imposter(19761).await;
+    }
+
+    #[tokio::test]
+    async fn scenario_flow_ids_are_isolated() {
+        let manager = ImposterManager::new();
+        let config = serde_json::from_value(order_fsm(19762, Some("header:X-Mock-Space"))).unwrap();
+        manager.create_imposter(config).await.expect("create");
+        let c = reqwest::Client::new();
+
+        // Advance only space "alpha"; "beta" stays at the initial state on the same imposter.
+        assert_eq!(get(&c, 19762, "/pay", Some("alpha")).await, "ok");
+        assert_eq!(
+            get(&c, 19762, "/status", Some("alpha")).await,
+            "paid",
+            "alpha advanced"
+        );
+        assert_eq!(
+            get(&c, 19762, "/status", Some("beta")).await,
+            "unpaid",
+            "beta isolated"
+        );
+
+        let _ = manager.delete_imposter(19762).await;
+    }
+
+    fn imposter_with_source(port: u16, src: Option<&str>) -> Imposter {
+        let mut flow_state = serde_json::json!({ "backend": "inmemory", "ttlSeconds": 300 });
+        if let Some(s) = src {
+            flow_state["mountebankStateMapping"] = serde_json::json!({ "flowIdSource": s });
+        }
+        let cfg = serde_json::from_value(serde_json::json!({
+            "port": port, "protocol": "http",
+            "_rift": { "flowState": flow_state }, "stubs": []
+        }))
+        .unwrap();
+        Imposter::new(cfg)
+    }
+
+    #[test]
+    fn resolve_flow_id_modes() {
+        // default flow_id_source = imposter_port
+        let by_port = imposter_with_source(7000, None);
+        assert_eq!(by_port.resolve_flow_id(&HashMap::new()), "7000");
+
+        // header source: present → header value; absent → port fallback
+        let by_header = imposter_with_source(7000, Some("header:X-Mock-Space"));
+        let mut h = HashMap::new();
+        h.insert("X-Mock-Space".to_string(), "abc".to_string());
+        assert_eq!(by_header.resolve_flow_id(&h), "abc");
+        assert_eq!(by_header.resolve_flow_id(&HashMap::new()), "7000");
+    }
+
+    #[test]
+    fn scenario_gate_selects_stub_by_state() {
+        let cfg = serde_json::from_value(serde_json::json!({
+            "port": 7001, "protocol": "http",
+            "_rift": { "flowState": { "backend": "inmemory", "ttlSeconds": 300 } },
+            "stubs": [
+                { "scenarioName": "order", "requiredScenarioState": "Started",
+                  "predicates": [{ "equals": { "path": "/s" } }],
+                  "responses": [{ "is": { "statusCode": 200, "body": "a" } }] },
+                { "scenarioName": "order", "requiredScenarioState": "paid",
+                  "predicates": [{ "equals": { "path": "/s" } }],
+                  "responses": [{ "is": { "statusCode": 200, "body": "b" } }] }
+            ]
+        }))
+        .unwrap();
+        let imp = Imposter::new(cfg);
+        let hdrs = hyper::HeaderMap::new();
+
+        // Started ⇒ first eligible (index 0)
+        let (_, idx) = imp
+            .find_matching_stub("GET", "/s", &hdrs, None, None)
+            .expect("match in Started");
+        assert_eq!(idx, 0);
+
+        // After paid ⇒ the Started stub is gated out, so index 1 wins
+        imp.set_scenario_state("7001", "order", "paid").unwrap();
+        let (_, idx) = imp
+            .find_matching_stub("GET", "/s", &hdrs, None, None)
+            .expect("match in paid");
+        assert_eq!(idx, 1);
+    }
+
+    async fn text(c: &reqwest::Client, url: String) -> String {
+        c.get(url)
+            .send()
+            .await
+            .expect("send")
+            .text()
+            .await
+            .expect("text")
+    }
+
+    async fn json(c: &reqwest::Client, url: String) -> serde_json::Value {
+        serde_json::from_str(&text(c, url).await).expect("json")
+    }
+
+    #[tokio::test]
+    async fn scenario_admin_endpoints_arrange_inspect_reset() {
+        let manager = std::sync::Arc::new(ImposterManager::new());
+        let config = serde_json::from_value(order_fsm(19763, None)).unwrap();
+        manager.create_imposter(config).await.expect("create");
+
+        let admin_addr = "127.0.0.1:12590".parse().unwrap();
+        let server = crate::admin_api::AdminApiServer::new(admin_addr, manager.clone(), None);
+        tokio::spawn(server.run());
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        let c = reqwest::Client::new();
+        let admin = "http://127.0.0.1:12590";
+
+        // GET scenarios → initial "Started"
+        let v = json(&c, format!("{admin}/imposters/19763/scenarios")).await;
+        assert_eq!(v["scenarios"][0]["name"], "order");
+        assert_eq!(v["scenarios"][0]["state"], "Started");
+
+        // PUT state=paid → a subsequent request observes it
+        let r = c
+            .put(format!("{admin}/imposters/19763/scenarios/order/state"))
+            .header("content-type", "application/json")
+            .body(r#"{"state":"paid"}"#)
+            .send()
+            .await
+            .expect("put");
+        assert_eq!(r.status(), 200);
+        assert_eq!(
+            text(&c, "http://127.0.0.1:19763/status".to_string()).await,
+            "paid"
+        );
+
+        // GET reflects the transition
+        let v = json(&c, format!("{admin}/imposters/19763/scenarios")).await;
+        assert_eq!(v["scenarios"][0]["state"], "paid");
+
+        // reset → back to initial
+        let r = c
+            .post(format!("{admin}/imposters/19763/scenarios/reset"))
+            .send()
+            .await
+            .expect("reset");
+        assert_eq!(r.status(), 200);
+        assert_eq!(
+            text(&c, "http://127.0.0.1:19763/status".to_string()).await,
+            "unpaid"
+        );
+
+        // flow-state KV: PUT / GET / DELETE (default flow_id = imposter_port = "19763")
+        let kv = format!("{admin}/admin/imposters/19763/flow-state/19763/mykey");
+        let r = c
+            .put(&kv)
+            .header("content-type", "application/json")
+            .body(r#"{"value":42}"#)
+            .send()
+            .await
+            .expect("put kv");
+        assert_eq!(r.status(), 200);
+        assert_eq!(json(&c, kv.clone()).await["value"], 42);
+        let r = c.delete(&kv).send().await.expect("del kv");
+        assert_eq!(r.status(), 200);
+        let r = c.get(&kv).send().await.expect("get kv");
+        assert_eq!(r.status(), 404, "deleted key → 404");
+
+        let _ = manager.delete_imposter(19763).await;
+    }
+
+    #[tokio::test]
+    async fn scenario_admin_reset_is_per_flow_with_explicit_flow_id() {
+        let manager = std::sync::Arc::new(ImposterManager::new());
+        let config = serde_json::from_value(order_fsm(19765, Some("header:X-Mock-Space"))).unwrap();
+        manager.create_imposter(config).await.expect("create");
+
+        let admin_addr = "127.0.0.1:12591".parse().unwrap();
+        let server = crate::admin_api::AdminApiServer::new(admin_addr, manager.clone(), None);
+        tokio::spawn(server.run());
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        let c = reqwest::Client::new();
+        let admin = "http://127.0.0.1:12591";
+        let set_state = |flow: &str| {
+            c.put(format!("{admin}/imposters/19765/scenarios/order/state"))
+                .header("content-type", "application/json")
+                .body(format!(r#"{{"state":"paid","flowId":"{flow}"}}"#))
+                .send()
+        };
+        // Arrange both flows to "paid" via explicit flowId
+        assert_eq!(set_state("alpha").await.expect("a").status(), 200);
+        assert_eq!(set_state("beta").await.expect("b").status(), 200);
+
+        // Reset ONLY alpha
+        let r = c
+            .post(format!("{admin}/imposters/19765/scenarios/reset"))
+            .header("content-type", "application/json")
+            .body(r#"{"flowId":"alpha"}"#)
+            .send()
+            .await
+            .expect("reset");
+        assert_eq!(r.status(), 200);
+
+        // alpha back to initial; beta untouched — via GET ?flowId=
+        let a = json(
+            &c,
+            format!("{admin}/imposters/19765/scenarios?flowId=alpha"),
+        )
+        .await;
+        let b = json(&c, format!("{admin}/imposters/19765/scenarios?flowId=beta")).await;
+        assert_eq!(
+            a["scenarios"][0]["state"], "Started",
+            "alpha reset to initial"
+        );
+        assert_eq!(
+            b["scenarios"][0]["state"], "paid",
+            "beta untouched by alpha reset"
+        );
+
+        let _ = manager.delete_imposter(19765).await;
+    }
 }

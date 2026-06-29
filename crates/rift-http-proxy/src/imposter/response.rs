@@ -261,6 +261,8 @@ pub fn create_stub_from_proxy_response(
             rift: None,
         }],
         scenario_name: None,
+        required_scenario_state: None,
+        new_scenario_state: None,
         recorded_from,
     }
 }

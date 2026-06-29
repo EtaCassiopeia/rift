@@ -2,7 +2,7 @@
 //!
 //! This module provides routing
 
-use crate::admin_api::handlers::{imposters, stubs, system};
+use crate::admin_api::handlers::{imposters, scenarios, stubs, system};
 use crate::admin_api::types::{error_response, get_base_url, not_found};
 use crate::imposter::ImposterManager;
 use bytes::Bytes;
@@ -28,6 +28,12 @@ enum ImposterRoute {
     Enable,
     /// POST /imposters/:port/disable
     Disable,
+    /// GET /imposters/:port/scenarios
+    Scenarios,
+    /// PUT /imposters/:port/scenarios/:name/state
+    ScenarioState(String),
+    /// POST /imposters/:port/scenarios/reset
+    ScenariosReset,
 }
 
 impl ImposterRoute {
@@ -41,6 +47,9 @@ impl ImposterRoute {
             ["savedProxyResponses"] => Some(ImposterRoute::SavedProxyResponses),
             ["enable"] => Some(ImposterRoute::Enable),
             ["disable"] => Some(ImposterRoute::Disable),
+            ["scenarios"] => Some(ImposterRoute::Scenarios),
+            ["scenarios", "reset"] => Some(ImposterRoute::ScenariosReset),
+            ["scenarios", name, "state"] => Some(ImposterRoute::ScenarioState((*name).to_string())),
             _ => None,
         }
     }
@@ -93,12 +102,45 @@ async fn route_by_path(
         };
     }
 
+    // Admin flow-state inspection routes: /admin/imposters/:port/flow-state/:flow_id[/:key]
+    if let Some(rest) = path.strip_prefix("/admin/imposters/") {
+        return route_admin_flow_state(method, rest, req, manager).await;
+    }
+
     // Individual imposter routes
     if let Some(rest) = path.strip_prefix("/imposters/") {
         return route_imposter(method, rest, query, req, base_url, manager).await;
     }
 
     not_found()
+}
+
+/// Route `/admin/imposters/:port/flow-state/:flow_id/:key` (issue #190 StateInspection).
+async fn route_admin_flow_state(
+    method: &Method,
+    rest: &str,
+    req: Request<Incoming>,
+    manager: Arc<ImposterManager>,
+) -> Response<Full<Bytes>> {
+    let segments: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
+    match segments.as_slice() {
+        [port_str, "flow-state", flow_id, key] => {
+            let Ok(port) = port_str.parse::<u16>() else {
+                return not_found();
+            };
+            match *method {
+                Method::GET => scenarios::handle_get_flow_state(port, flow_id, key, manager).await,
+                Method::PUT => {
+                    scenarios::handle_put_flow_state(port, flow_id, key, req, manager).await
+                }
+                Method::DELETE => {
+                    scenarios::handle_delete_flow_state(port, flow_id, key, manager).await
+                }
+                _ => not_found(),
+            }
+        }
+        _ => not_found(),
+    }
 }
 
 /// Route imposter-specific requests
@@ -177,6 +219,17 @@ async fn route_imposter(
         // /imposters/:port/enable, /imposters/:port/disable
         (&Method::POST, ImposterRoute::Enable) => imposters::handle_enable(port, manager).await,
         (&Method::POST, ImposterRoute::Disable) => imposters::handle_disable(port, manager).await,
+
+        // /imposters/:port/scenarios — declarative FSM state inspection/arrangement
+        (&Method::GET, ImposterRoute::Scenarios) => {
+            scenarios::handle_list_scenarios(port, query, manager).await
+        }
+        (&Method::PUT, ImposterRoute::ScenarioState(name)) => {
+            scenarios::handle_set_scenario_state(port, &name, req, manager).await
+        }
+        (&Method::POST, ImposterRoute::ScenariosReset) => {
+            scenarios::handle_reset_scenarios(port, req, manager).await
+        }
 
         _ => not_found(),
     }
