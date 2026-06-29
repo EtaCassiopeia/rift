@@ -39,6 +39,9 @@ serde = { version = "1.0", features = ["derive"] }
 serde_yaml = "0.9"
 serde_json = "1.0"
 
+# Shared workspace types
+rift-types = { path = "../rift-types" }
+
 # Scripting engines
 rhai = { version = "=1.21.0", features = ["sync", "serde"] }
 mlua = { version = "0.10", features = ["luajit", "serialize"], optional = true }
