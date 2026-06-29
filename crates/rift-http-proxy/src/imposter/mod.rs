@@ -31,10 +31,11 @@ mod tests;
 pub use types::{
     DebugImposter, DebugMatchResult, DebugRequest, DebugResponse, DebugResponsePreview,
     DebugStubInfo, ImposterConfig, ImposterError, IsResponse, MountebankStateMapping, PathRewrite,
-    Predicate, PredicateOperation, ProxyResponse, RecordedRequest, ResponseMode, RiftConfig,
-    RiftConnectionPoolConfig, RiftErrorFault, RiftFaultConfig, RiftFlowStateConfig,
-    RiftLatencyFault, RiftMetricsConfig, RiftProxyConfig, RiftRedisConfig, RiftResponseExtension,
-    RiftScriptConfig, RiftScriptEngineConfig, RiftUpstreamConfig, Stub, StubResponse,
+    Predicate, PredicateOperation, PredicateParameters, PredicateSelector, ProxyResponse,
+    RecordedRequest, ResponseMode, RiftConfig, RiftConnectionPoolConfig, RiftErrorFault,
+    RiftFaultConfig, RiftFlowStateConfig, RiftLatencyFault, RiftMetricsConfig, RiftProxyConfig,
+    RiftRedisConfig, RiftResponseExtension, RiftScriptConfig, RiftScriptEngineConfig,
+    RiftUpstreamConfig, Stub, StubResponse,
 };
 
 // Re-export core imposter
