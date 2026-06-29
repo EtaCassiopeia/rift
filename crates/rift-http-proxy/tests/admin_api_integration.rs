@@ -492,3 +492,134 @@ async fn stub_by_id_admin_endpoints() {
 
     let _ = manager.delete_imposter(19776).await;
 }
+
+// Issue #238: multi-value header support on the served response and the recorded request.
+mod multi_value_headers {
+    use super::*;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    async fn serve(config: serde_json::Value) -> Arc<ImposterManager> {
+        let manager = Arc::new(ImposterManager::new());
+        manager
+            .create_imposter(serde_json::from_value(config).unwrap())
+            .await
+            .expect("create imposter");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        manager
+    }
+
+    #[tokio::test]
+    async fn serves_both_values_of_a_response_header() {
+        let manager = serve(serde_json::json!({
+            "port": 19820, "protocol": "http",
+            "stubs": [{"responses": [{"is": {"statusCode": 200,
+                "headers": {"Set-Cookie": ["a=1", "b=2"]}, "body": "ok"}}]}]
+        }))
+        .await;
+
+        let resp = reqwest::get("http://127.0.0.1:19820/x").await.unwrap();
+        let cookies: Vec<String> = resp
+            .headers()
+            .get_all("set-cookie")
+            .iter()
+            .map(|v| v.to_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            cookies.len(),
+            2,
+            "both Set-Cookie lines served, got {cookies:?}"
+        );
+        assert!(cookies.contains(&"a=1".to_string()) && cookies.contains(&"b=2".to_string()));
+
+        let _ = manager.delete_imposter(19820).await;
+    }
+
+    #[tokio::test]
+    async fn default_response_serves_both_values_of_a_header() {
+        // No stub matches → the imposter's defaultResponse is served (a separate emission site).
+        let manager = serve(serde_json::json!({
+            "port": 19823, "protocol": "http",
+            "defaultResponse": {"statusCode": 200,
+                "headers": {"Set-Cookie": ["a=1", "b=2"]}, "body": "def"},
+            "stubs": []
+        }))
+        .await;
+
+        let resp = reqwest::get("http://127.0.0.1:19823/nomatch")
+            .await
+            .unwrap();
+        let cookies: Vec<String> = resp
+            .headers()
+            .get_all("set-cookie")
+            .iter()
+            .map(|v| v.to_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            cookies.len(),
+            2,
+            "defaultResponse serves both Set-Cookie lines, got {cookies:?}"
+        );
+        assert!(cookies.contains(&"a=1".to_string()) && cookies.contains(&"b=2".to_string()));
+
+        let _ = manager.delete_imposter(19823).await;
+    }
+
+    #[tokio::test]
+    async fn single_value_response_header_still_works() {
+        let manager = serve(serde_json::json!({
+            "port": 19821, "protocol": "http",
+            "stubs": [{"responses": [{"is": {"statusCode": 200,
+                "headers": {"X-Custom": "v"}, "body": "ok"}}]}]
+        }))
+        .await;
+
+        let resp = reqwest::get("http://127.0.0.1:19821/x").await.unwrap();
+        assert_eq!(resp.headers().get("x-custom").unwrap(), "v");
+        let _ = manager.delete_imposter(19821).await;
+    }
+
+    #[tokio::test]
+    async fn records_both_values_of_a_request_header() {
+        let manager = serve(serde_json::json!({
+            "port": 19822, "protocol": "http", "recordRequests": true,
+            "stubs": [{"responses": [{"is": {"statusCode": 200, "body": "ok"}}]}]
+        }))
+        .await;
+
+        reqwest::Client::new()
+            .get("http://127.0.0.1:19822/x")
+            .header("X-Multi", "one")
+            .header("X-Multi", "two")
+            .send()
+            .await
+            .unwrap();
+
+        let admin = "127.0.0.1:12720";
+        let server = rift_http_proxy::admin_api::AdminApiServer::new(
+            admin.parse().unwrap(),
+            manager.clone(),
+            None,
+        );
+        tokio::spawn(server.run());
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let recorded = json(
+            &reqwest::Client::new(),
+            format!("http://{admin}/imposters/19822/requests"),
+        )
+        .await;
+        let values: Vec<String> = recorded[0]["headers"]["X-Multi"]
+            .as_array()
+            .expect("multi-value header serialized as array")
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert!(
+            values.contains(&"one".to_string()) && values.contains(&"two".to_string()),
+            "both request header values recorded, got {values:?}"
+        );
+
+        let _ = manager.delete_imposter(19822).await;
+    }
+}

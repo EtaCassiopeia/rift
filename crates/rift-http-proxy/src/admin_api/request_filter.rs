@@ -68,18 +68,19 @@ fn resolve_flow_id(req: &RecordedRequest, flow_id_source: &str, port: u16) -> Op
     if flow_id_source == "imposter_port" {
         Some(port.to_string())
     } else if let Some(name) = flow_id_source.strip_prefix("header:") {
-        header_value(req, name)
+        // A flow id derives from a single header value; take the first if multi-valued (#238).
+        header_values(req, name).and_then(|values| values.first().cloned())
     } else {
         None
     }
 }
 
-/// Case-insensitive header lookup against a recorded request.
-fn header_value(req: &RecordedRequest, name: &str) -> Option<String> {
+/// Case-insensitive header lookup against a recorded request — returns all values for the key.
+fn header_values<'a>(req: &'a RecordedRequest, name: &str) -> Option<&'a Vec<String>> {
     req.headers
         .iter()
         .find(|(k, _)| k.eq_ignore_ascii_case(name))
-        .map(|(_, v)| v.clone())
+        .map(|(_, v)| v)
 }
 
 /// Does `req` satisfy ALL clauses (AND)?
@@ -91,7 +92,8 @@ pub(crate) fn request_matches(
 ) -> bool {
     clauses.iter().all(|clause| match clause {
         MatchClause::Header { name, value } => {
-            header_value(req, name).as_deref() == Some(value.as_str())
+            // Match if ANY recorded value for the header equals the target (#238 multi-value).
+            header_values(req, name).is_some_and(|values| values.iter().any(|v| v == value))
         }
         MatchClause::FlowId(value) => {
             resolve_flow_id(req, flow_id_source, port).as_deref() == Some(value.as_str())
@@ -106,7 +108,7 @@ mod tests {
 
     fn req_with_header(name: &str, value: &str) -> RecordedRequest {
         let mut headers = HashMap::new();
-        headers.insert(name.to_string(), value.to_string());
+        headers.insert(name.to_string(), vec![value.to_string()]);
         RecordedRequest {
             request_from: "127.0.0.1".to_string(),
             method: "GET".to_string(),
@@ -202,7 +204,8 @@ mod tests {
     #[test]
     fn multiple_clauses_are_anded() {
         let mut req = req_with_header("X-Mock-Space", "abc");
-        req.headers.insert("X-Tenant".to_string(), "t1".to_string());
+        req.headers
+            .insert("X-Tenant".to_string(), vec!["t1".to_string()]);
         let clauses = vec![
             MatchClause::Header {
                 name: "X-Mock-Space".to_string(),

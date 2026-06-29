@@ -5,6 +5,50 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Serde for multi-value headers (issue #238). Accepts the Mountebank-style `"k": "v"` *and*
+/// `"k": ["v1", "v2"]` on the wire; serializes a single value back as a plain string and multiple
+/// values as an array, so existing single-value consumers are unaffected.
+pub(crate) mod multi_value_headers {
+    use serde::de::Deserializer;
+    use serde::ser::{SerializeMap, Serializer};
+    use serde::Deserialize;
+    use std::collections::HashMap;
+
+    pub fn serialize<S: Serializer>(
+        headers: &HashMap<String, Vec<String>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        let mut map = serializer.serialize_map(Some(headers.len()))?;
+        for (key, values) in headers {
+            match values.as_slice() {
+                [] => continue, // a key with no values would emit no header line; omit it
+                [single] => map.serialize_entry(key, single)?,
+                many => map.serialize_entry(key, many)?,
+            }
+        }
+        map.end()
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<HashMap<String, Vec<String>>, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum OneOrMany {
+            One(String),
+            Many(Vec<String>),
+        }
+        let raw = HashMap::<String, OneOrMany>::deserialize(deserializer)?;
+        Ok(raw
+            .into_iter()
+            .map(|(k, v)| match v {
+                OneOrMany::One(s) => (k, vec![s]),
+                OneOrMany::Many(v) => (k, v),
+            })
+            .collect())
+    }
+}
+
 // ============================================================================
 // Recorded Request Types
 // ============================================================================
@@ -17,7 +61,8 @@ pub struct RecordedRequest {
     pub method: String,
     pub path: String,
     pub query: HashMap<String, String>,
-    pub headers: HashMap<String, String>,
+    #[serde(default, with = "multi_value_headers")]
+    pub headers: HashMap<String, Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
     pub timestamp: String,
@@ -365,8 +410,8 @@ pub(crate) struct IsResponseRaw {
         deserialize_with = "deserialize_status_code"
     )]
     pub status_code: u16,
-    #[serde(default)]
-    pub headers: HashMap<String, String>,
+    #[serde(default, deserialize_with = "multi_value_headers::deserialize")]
+    pub headers: HashMap<String, Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body: Option<serde_json::Value>,
     /// Response mode: "text" (default) or "binary" (body is base64-encoded)
@@ -381,8 +426,8 @@ pub(crate) struct IsResponseOut {
     /// Status code serialized as string for Mountebank compatibility
     #[serde(serialize_with = "serialize_status_code_as_string")]
     pub status_code: u16,
-    #[serde(default)]
-    pub headers: HashMap<String, String>,
+    #[serde(default, serialize_with = "multi_value_headers::serialize")]
+    pub headers: HashMap<String, Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body: Option<serde_json::Value>,
     /// Response mode: "text" (default) or "binary" (body is base64-encoded)
@@ -597,8 +642,8 @@ pub enum ResponseMode {
 pub struct IsResponse {
     #[serde(default = "default_status_code")]
     pub status_code: u16,
-    #[serde(default)]
-    pub headers: HashMap<String, String>,
+    #[serde(default, with = "multi_value_headers")]
+    pub headers: HashMap<String, Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body: Option<serde_json::Value>,
     /// Response mode: "text" (default) or "binary" (body is base64-encoded)
@@ -986,6 +1031,50 @@ pub enum ImposterError {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    // Issue #238: multi-value headers accept "k":"v" and "k":["v1","v2"]; serialize back as
+    // a string for one value and an array for many (via IsResponse, which uses the helper).
+    #[test]
+    fn multi_value_headers_deserialize_string_or_array() {
+        let single: IsResponse =
+            serde_json::from_str(r#"{"statusCode":200,"headers":{"X-One":"v"}}"#).unwrap();
+        assert_eq!(single.headers["X-One"], vec!["v".to_string()]);
+
+        let many: IsResponse =
+            serde_json::from_str(r#"{"statusCode":200,"headers":{"Set-Cookie":["a","b"]}}"#)
+                .unwrap();
+        assert_eq!(
+            many.headers["Set-Cookie"],
+            vec!["a".to_string(), "b".to_string()]
+        );
+    }
+
+    #[test]
+    fn multi_value_headers_serialize_single_as_string_many_as_array() {
+        let mut headers = HashMap::new();
+        headers.insert("X-One".to_string(), vec!["v".to_string()]);
+        headers.insert(
+            "Set-Cookie".to_string(),
+            vec!["a".to_string(), "b".to_string()],
+        );
+        let out = IsResponseOut {
+            status_code: 200,
+            headers,
+            body: None,
+            mode: ResponseMode::Text,
+        };
+        let v = serde_json::to_value(&out).unwrap();
+        assert_eq!(
+            v["headers"]["X-One"],
+            json!("v"),
+            "one value -> bare string"
+        );
+        assert_eq!(
+            v["headers"]["Set-Cookie"],
+            json!(["a", "b"]),
+            "multiple values -> array"
+        );
+    }
 
     // Fix #107: Stub.responses now has #[serde(default)]
     #[test]

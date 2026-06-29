@@ -443,9 +443,9 @@ mod requests_filter_tests {
 
     fn rec(space: &str, tenant: Option<&str>) -> RecordedRequest {
         let mut headers = HashMap::new();
-        headers.insert("X-Mock-Space".to_string(), space.to_string());
+        headers.insert("X-Mock-Space".to_string(), vec![space.to_string()]);
         if let Some(t) = tenant {
-            headers.insert("X-Tenant".to_string(), t.to_string());
+            headers.insert("X-Tenant".to_string(), vec![t.to_string()]);
         }
         RecordedRequest {
             request_from: "127.0.0.1".to_string(),
@@ -506,9 +506,12 @@ mod requests_filter_tests {
         let resp = handle_get_requests(19732, Some("match=header:X-Mock-Space=A"), m.clone()).await;
         let got = requests(resp).await;
         assert_eq!(got.len(), 2, "only the two X-Mock-Space=A requests");
-        assert!(got
-            .iter()
-            .all(|r| r.headers.get("X-Mock-Space").unwrap() == "A"));
+        assert!(got.iter().all(|r| r
+            .headers
+            .get("X-Mock-Space")
+            .and_then(|v| v.first())
+            .map(String::as_str)
+            == Some("A")));
         let _ = m.delete_imposter(19732).await;
     }
 
@@ -537,7 +540,7 @@ mod requests_filter_tests {
         )
         .await;
         assert_eq!(by_flow_id.len(), 1);
-        assert_eq!(by_flow_id[0].headers.get("X-Mock-Space").unwrap(), "A");
+        assert_eq!(by_flow_id[0].headers.get("X-Mock-Space").unwrap()[0], "A");
         assert_eq!(
             serde_json::to_value(&by_flow_id).unwrap(),
             serde_json::to_value(&by_header).unwrap(),
@@ -607,7 +610,7 @@ mod requests_filter_tests {
         handle_clear_requests(19739, Some("match=header:X-Mock-Space=A"), base, m.clone()).await;
         let remaining = requests(handle_get_requests(19739, None, m.clone()).await).await;
         assert_eq!(remaining.len(), 1, "only the B request survives");
-        assert_eq!(remaining[0].headers.get("X-Mock-Space").unwrap(), "B");
+        assert_eq!(remaining[0].headers.get("X-Mock-Space").unwrap()[0], "B");
         let _ = m.delete_imposter(19739).await;
     }
 
