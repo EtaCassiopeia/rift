@@ -3428,6 +3428,7 @@ dependencies = [
  "regex",
  "reqwest",
  "rhai",
+ "rift-types",
  "rustls",
  "rustls-pemfile",
  "serde",
@@ -3485,6 +3486,14 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tui-popup",
+]
+
+[[package]]
+name = "rift-types"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
