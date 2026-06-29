@@ -56,7 +56,7 @@ pub fn create_response_preview(response: &StubResponse) -> DebugResponsePreview 
                 Some(
                     is.headers
                         .iter()
-                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .map(|(k, v)| (k.clone(), v.join(", ")))
                         .collect(),
                 )
             };
@@ -114,7 +114,7 @@ pub fn execute_stub_response_with_rift(
     response: &StubResponse,
 ) -> Option<(
     u16,
-    HashMap<String, String>,
+    HashMap<String, Vec<String>>,
     String,
     Option<serde_json::Value>,
     Option<RiftResponseExtension>,
@@ -140,8 +140,10 @@ pub fn execute_stub_response_with_rift(
                         if !headers.contains_key("content-type")
                             && !headers.contains_key("Content-Type")
                         {
-                            headers
-                                .insert("Content-Type".to_string(), "application/json".to_string());
+                            headers.insert(
+                                "Content-Type".to_string(),
+                                vec!["application/json".to_string()],
+                            );
                         }
                         serde_json::to_string(b).unwrap_or_default()
                     }
@@ -188,9 +190,9 @@ pub fn get_rift_script_config(response: &StubResponse) -> Option<RiftScriptConfi
 /// and the stub uses `_mode: "binary"` so it can be replayed correctly.
 ///
 /// Headers are accepted as `&[(String, String)]` to preserve multi-valued
-/// headers (e.g., multiple `Set-Cookie`). They are converted to a HashMap
-/// for storage in the stub's `IsResponse`, which uses Mountebank's single-value
-/// header format. Multi-valued headers are comma-joined per HTTP spec.
+/// headers (e.g., multiple `Set-Cookie`), which are stored as separate values in
+/// the stub's `IsResponse` (multi-value headers, issue #238). Hop-by-hop headers
+/// are dropped.
 pub fn create_stub_from_proxy_response(
     predicates: Vec<serde_json::Value>,
     status: u16,
@@ -200,14 +202,15 @@ pub fn create_stub_from_proxy_response(
     decorate_fn: Option<String>,
     recorded_from: Option<String>,
 ) -> super::types::Stub {
-    // Convert to HashMap, comma-joining multi-valued headers (per HTTP spec).
-    // Filter out hop-by-hop headers.
-    let response_headers: HashMap<String, String> = {
-        let merged = crate::util::merge_headers_to_map(headers);
-        merged
-            .into_iter()
-            .filter(|(k, _)| !crate::util::is_hop_by_hop_header(k))
-            .collect()
+    // Group values per key so multiple values for one header (e.g. Set-Cookie) survive replay.
+    let response_headers: HashMap<String, Vec<String>> = {
+        let mut map: HashMap<String, Vec<String>> = HashMap::new();
+        for (k, v) in headers {
+            if !crate::util::is_hop_by_hop_header(k) {
+                map.entry(k.clone()).or_default().push(v.clone());
+            }
+        }
+        map
     };
 
     let (body_value, is_binary) = crate::util::encode_body_for_stub(body);
@@ -334,8 +337,8 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn test_create_stub_multi_valued_headers_comma_joined() {
-        // Multiple Set-Cookie headers should be comma-joined in the stub
+    fn test_create_stub_preserves_multi_valued_headers() {
+        // Multiple Set-Cookie headers are preserved as separate values in the stub (issue #238)
         let headers = vec![
             ("Set-Cookie".to_string(), "session=abc".to_string()),
             ("Set-Cookie".to_string(), "theme=dark".to_string()),
@@ -346,12 +349,16 @@ mod tests {
 
         match &stub.responses[0] {
             StubResponse::Is { is, .. } => {
+                let cookies = is.headers.get("Set-Cookie").unwrap();
                 assert_eq!(
-                    is.headers.get("Set-Cookie").unwrap(),
-                    "session=abc, theme=dark",
-                    "Multi-valued Set-Cookie headers should be comma-joined"
+                    cookies,
+                    &vec!["session=abc".to_string(), "theme=dark".to_string()],
+                    "Multi-valued Set-Cookie headers are preserved as separate values"
                 );
-                assert_eq!(is.headers.get("Content-Type").unwrap(), "text/html");
+                assert_eq!(
+                    is.headers.get("Content-Type").unwrap(),
+                    &vec!["text/html".to_string()]
+                );
             }
             _ => panic!("Expected StubResponse::Is"),
         }

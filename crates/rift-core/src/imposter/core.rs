@@ -328,6 +328,21 @@ impl Imposter {
     /// `"header:<Name>"` uses that (case-insensitive) header; `"imposter_port"` (the default,
     /// and the fallback when the header is absent) uses the imposter port.
     pub fn resolve_flow_id(&self, headers: &HashMap<String, String>) -> String {
+        // Live path uses the single-value header view (`headers_clone`); kept separate from the
+        // multi-value `flow_id_for` (used over recorded requests) to avoid a per-request alloc.
+        let port = self.config.port.unwrap_or(0);
+        match self.flow_id_source().strip_prefix("header:") {
+            Some(name) => headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                .map(|(_, v)| v.clone())
+                .unwrap_or_else(|| port.to_string()),
+            None => port.to_string(),
+        }
+    }
+
+    /// Resolve the correlation `flow_id` for an already-recorded request (multi-value headers).
+    pub fn resolve_flow_id_recorded(&self, headers: &HashMap<String, Vec<String>>) -> String {
         Self::flow_id_for(
             &self.flow_id_source(),
             headers,
@@ -336,12 +351,13 @@ impl Imposter {
     }
 
     /// Pure flow_id resolution (no `&self`), so it can be reused over recorded requests.
-    fn flow_id_for(source: &str, headers: &HashMap<String, String>, port: u16) -> String {
+    /// A flow id derives from a single header value; the first is taken if multi-valued (#238).
+    fn flow_id_for(source: &str, headers: &HashMap<String, Vec<String>>, port: u16) -> String {
         match source.strip_prefix("header:") {
             Some(name) => headers
                 .iter()
                 .find(|(k, _)| k.eq_ignore_ascii_case(name))
-                .map(|(_, v)| v.clone())
+                .and_then(|(_, v)| v.first().cloned())
                 .unwrap_or_else(|| port.to_string()),
             None => port.to_string(),
         }
@@ -565,7 +581,7 @@ impl Imposter {
         stub_state: &StubState,
     ) -> Option<(
         u16,
-        HashMap<String, String>,
+        HashMap<String, Vec<String>>,
         String,
         Option<serde_json::Value>,
         Option<RiftResponseExtension>,
@@ -1499,7 +1515,7 @@ mod tests {
 
         let req = |space: &str| {
             let mut headers = std::collections::HashMap::new();
-            headers.insert("X-Mock-Space".to_string(), space.to_string());
+            headers.insert("X-Mock-Space".to_string(), vec![space.to_string()]);
             RecordedRequest {
                 request_from: "127.0.0.1".to_string(),
                 method: "GET".to_string(),
@@ -1517,7 +1533,13 @@ mod tests {
             imposter.increment_request_count();
         }
 
-        imposter.retain_recorded_requests(|r| r.headers.get("X-Mock-Space").unwrap() != "A");
+        imposter.retain_recorded_requests(|r| {
+            r.headers
+                .get("X-Mock-Space")
+                .and_then(|v| v.first())
+                .map(String::as_str)
+                != Some("A")
+        });
         assert_eq!(imposter.get_recorded_requests().len(), 1, "only B kept");
         assert_eq!(
             imposter.get_request_count(),
