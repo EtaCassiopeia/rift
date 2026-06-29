@@ -55,6 +55,11 @@ jobs:
       - name: Run unit tests
         run: cargo test --workspace --all-features --lib
 
+      # Issue #205: prove the librift_ffi cdylib builds and exports the full C-ABI before the
+      # per-platform release matrix relies on it.
+      - name: rift-ffi C-ABI smoke test
+        run: ./scripts/verify-ffi-cdylib.sh
+
   lint:
     name: Lint
     runs-on: ubuntu-latest

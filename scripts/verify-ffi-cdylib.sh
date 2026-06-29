@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# Issue #205 C-ABI smoke test: build the rift-ffi cdylib for the host and assert it exports the
+# full C-ABI symbol set. Runs locally and as a CI step before the per-platform release matrix.
+#
+# Any extra args are forwarded to `cargo build` (e.g. feature flags).
+set -euo pipefail
+
+SYMBOLS=(
+  rift_start
+  rift_create_imposter
+  rift_replace_stubs
+  rift_delete_all
+  rift_recorded
+  rift_free
+  rift_stop
+)
+
+echo "[info] building librift_ffi cdylib (release)..."
+cargo build -p rift-ffi --release "$@"
+
+case "$(uname -s)" in
+  Darwin)
+    lib="target/release/librift_ffi.dylib"
+    list_symbols() { nm -gU "$1"; }
+    ;;
+  Linux)
+    lib="target/release/librift_ffi.so"
+    list_symbols() { nm -D --defined-only "$1"; }
+    ;;
+  *)
+    echo "[error] unsupported host OS '$(uname -s)' for symbol check" >&2
+    exit 1
+    ;;
+esac
+
+if [ ! -f "$lib" ]; then
+  echo "[error] cdylib not found at $lib" >&2
+  exit 1
+fi
+
+echo "[info] checking exported symbols in $lib"
+exported="$(list_symbols "$lib")"
+missing=0
+for sym in "${SYMBOLS[@]}"; do
+  # macOS prefixes C symbols with a leading underscore; match either form.
+  if printf '%s\n' "$exported" | grep -qE " _?${sym}\$"; then
+    echo "  [ok]      $sym"
+  else
+    echo "  [MISSING] $sym"
+    missing=1
+  fi
+done
+
+if [ "$missing" -ne 0 ]; then
+  echo "[fail] librift_ffi is missing one or more C-ABI symbols" >&2
+  exit 1
+fi
+echo "[pass] all ${#SYMBOLS[@]} C-ABI symbols exported by $lib"

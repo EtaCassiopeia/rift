@@ -33,10 +33,12 @@ jobs:
       matrix:
         include:
           # Linux x86_64 (glibc)
+          # `classifier` names the librift_ffi cdylib asset by os/arch for the JVM loader (#205).
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-22.04
             archive: tar.gz
             features: lua,javascript,redis-backend
+            classifier: linux-x86_64
 
           # Linux ARM64 (glibc)
           - target: aarch64-unknown-linux-gnu
@@ -45,6 +47,7 @@ jobs:
             features: javascript,redis-backend
             no_default_features: true
             cross: true
+            classifier: linux-aarch64
 
           # Linux x86_64 (musl - static binary)
           - target: x86_64-unknown-linux-musl
@@ -53,6 +56,7 @@ jobs:
             features: javascript,redis-backend
             no_default_features: true
             cross: true
+            classifier: linux-x86_64-musl
 
           # Linux ARM64 (musl - static binary)
           - target: aarch64-unknown-linux-musl
@@ -61,6 +65,7 @@ jobs:
             features: javascript,redis-backend
             no_default_features: true
             cross: true
+            classifier: linux-aarch64-musl
 
           # macOS x86_64 (Intel) - cross-compiled on ARM64 runner
           # Note: Lua disabled because LuaJIT can't be cross-compiled via pkg-config
@@ -69,12 +74,14 @@ jobs:
             archive: tar.gz
             features: javascript,redis-backend
             no_default_features: true
+            classifier: darwin-x86_64
 
           # macOS ARM64 (Apple Silicon)
           - target: aarch64-apple-darwin
             os: macos-14
             archive: tar.gz
             features: lua,javascript,redis-backend
+            classifier: darwin-aarch64
 
           # Windows x86_64
           - target: x86_64-pc-windows-msvc
@@ -82,6 +89,7 @@ jobs:
             archive: zip
             features: javascript,redis-backend
             no_default_features: true
+            classifier: windows-x86_64
 
     steps:
       - name: Checkout
@@ -167,10 +175,13 @@ jobs:
             cross build --release --package rift-http-proxy --target ${{ matrix.target }} $FEATURE_FLAGS
             cross build --release --package rift-lint --target ${{ matrix.target }}
             cross build --release --package rift-tui --target ${{ matrix.target }}
+            # rift-ffi cdylib (issue #205) — same per-target feature set as the proxy
+            cross build --release --package rift-ffi --target ${{ matrix.target }} $FEATURE_FLAGS
           else
             cargo build --release --package rift-http-proxy --target ${{ matrix.target }} $FEATURE_FLAGS
             cargo build --release --package rift-lint --target ${{ matrix.target }}
             cargo build --release --package rift-tui --target ${{ matrix.target }}
+            cargo build --release --package rift-ffi --target ${{ matrix.target }} $FEATURE_FLAGS
           fi
 
       # Package
@@ -210,6 +221,15 @@ jobs:
           echo "CHECKSUM_PATH=target/${{ matrix.target }}/release/$ARCHIVE_NAME.tar.gz.sha256" >> $GITHUB_ENV
           echo "CHECKSUM_NAME=$ARCHIVE_NAME.tar.gz.sha256" >> $GITHUB_ENV
 
+          # rift-ffi cdylib as a standalone, classifier-named release asset (issue #205): the JVM
+          # embedded backend loads the raw library by os/arch, so it ships outside the binary tarball.
+          if [[ "$OSTYPE" == "darwin"* ]]; then EXT="dylib"; else EXT="so"; fi
+          FFI_NAME="librift_ffi-${{ matrix.classifier }}.$EXT"
+          cp "librift_ffi.$EXT" "$FFI_NAME"
+          shasum -a 256 "$FFI_NAME" > "$FFI_NAME.sha256"
+          echo "FFI_ASSET_PATH=target/${{ matrix.target }}/release/$FFI_NAME" >> $GITHUB_ENV
+          echo "FFI_CHECKSUM_PATH=target/${{ matrix.target }}/release/$FFI_NAME.sha256" >> $GITHUB_ENV
+
       - name: Package (Windows)
         if: matrix.os == 'windows-latest'
         shell: pwsh
@@ -243,6 +263,15 @@ jobs:
           echo "CHECKSUM_PATH=target/${{ matrix.target }}/release/$ARCHIVE_NAME.zip.sha256" >> $env:GITHUB_ENV
           echo "CHECKSUM_NAME=$ARCHIVE_NAME.zip.sha256" >> $env:GITHUB_ENV
 
+          # rift-ffi cdylib as a standalone, classifier-named release asset (issue #205).
+          # The Windows cdylib has no 'lib' prefix (rift_ffi.dll); rename to the librift_ffi-* convention.
+          $FFI_NAME = "librift_ffi-${{ matrix.classifier }}.dll"
+          Copy-Item "rift_ffi.dll" "$FFI_NAME"
+          $ffiHash = (Get-FileHash -Algorithm SHA256 "$FFI_NAME").Hash.ToLower()
+          "$ffiHash  $FFI_NAME" | Out-File -Encoding utf8 "$FFI_NAME.sha256"
+          echo "FFI_ASSET_PATH=target/${{ matrix.target }}/release/$FFI_NAME" >> $env:GITHUB_ENV
+          echo "FFI_CHECKSUM_PATH=target/${{ matrix.target }}/release/$FFI_NAME.sha256" >> $env:GITHUB_ENV
+
       - name: Upload artifact
         uses: actions/upload-artifact@v6
         with:
@@ -250,6 +279,8 @@ jobs:
           path: |
             ${{ env.ASSET_PATH }}
             ${{ env.CHECKSUM_PATH }}
+            ${{ env.FFI_ASSET_PATH }}
+            ${{ env.FFI_CHECKSUM_PATH }}
           retention-days: 1
 
   # =============================================================================
@@ -445,6 +476,9 @@ jobs:
             artifacts/**/*.tar.gz
             artifacts/**/*.zip
             artifacts/**/*.sha256
+            artifacts/**/*.so
+            artifacts/**/*.dylib
+            artifacts/**/*.dll
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
