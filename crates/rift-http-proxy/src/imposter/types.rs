@@ -273,56 +273,10 @@ fn inject_wait_behavior(response: StubResponse, wait_val: serde_json::Value) -> 
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Predicate {
-    #[serde(flatten)]
-    pub parameters: PredicateParameters,
-    #[serde(flatten)]
-    pub operation: PredicateOperation,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum PredicateOperation {
-    Equals(HashMap<String, serde_json::Value>),
-    DeepEquals(HashMap<String, serde_json::Value>),
-    Contains(HashMap<String, serde_json::Value>),
-    StartsWith(HashMap<String, serde_json::Value>),
-    EndsWith(HashMap<String, serde_json::Value>),
-    Matches(HashMap<String, serde_json::Value>),
-    Exists(HashMap<String, serde_json::Value>),
-    Not(Box<Predicate>),
-    Or(Vec<Predicate>),
-    And(Vec<Predicate>),
-    Inject(String),
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PredicateParameters {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub case_sensitive: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub key_case_sensitive: Option<bool>,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub except: String,
-    #[serde(flatten)]
-    pub selector: Option<PredicateSelector>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum PredicateSelector {
-    XPath {
-        selector: String,
-        #[serde(rename = "ns", default, skip_serializing_if = "Option::is_none")]
-        namespaces: Option<HashMap<String, String>>,
-    },
-    JsonPath {
-        selector: String,
-    },
-}
+// Predicate types live in the shared `rift-types` crate (issue #36) so the proxy and the
+// linter share one definition. Re-exported here so existing `crate::imposter::types::*`
+// paths keep resolving unchanged.
+pub use rift_types::{Predicate, PredicateOperation, PredicateParameters, PredicateSelector};
 
 /// Response within a stub - wrapper type that handles various formats
 #[derive(Debug, Clone, Serialize, Deserialize)]
