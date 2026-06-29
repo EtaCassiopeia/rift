@@ -59,6 +59,7 @@ fn test_predicate_matching() {
         scenario_name: None,
         required_scenario_state: None,
         new_scenario_state: None,
+        space: None,
         recorded_from: None,
     };
 
@@ -150,6 +151,7 @@ fn test_execute_stub() {
         scenario_name: None,
         required_scenario_state: None,
         new_scenario_state: None,
+        space: None,
         recorded_from: None,
     };
 
@@ -2438,6 +2440,7 @@ async fn test_cors_headers_on_stub_response() {
         scenario_name: None,
         required_scenario_state: None,
         new_scenario_state: None,
+        space: None,
         recorded_from: None,
     };
     let config = ImposterConfig {
@@ -2936,5 +2939,375 @@ mod scenario_fsm_tests {
         );
 
         let _ = manager.delete_imposter(19765).await;
+    }
+}
+
+// Issue #223: Correlated isolation — space-scoped stubs + one-call per-space teardown.
+#[cfg(test)]
+mod correlated_space_tests {
+    use super::*;
+
+    async fn get(
+        c: &reqwest::Client,
+        port: u16,
+        path: &str,
+        space: Option<&str>,
+    ) -> reqwest::Response {
+        let mut req = c.get(format!("http://127.0.0.1:{port}{path}"));
+        if let Some(s) = space {
+            req = req.header("X-Mock-Space", s);
+        }
+        req.send().await.expect("send")
+    }
+
+    /// Imposter whose flow_id = the X-Mock-Space header, with the given stubs.
+    fn correlated_config(port: u16, stubs: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "port": port, "protocol": "http", "recordRequests": true,
+            "_rift": { "flowState": { "backend": "inmemory", "ttlSeconds": 300,
+                "mountebankStateMapping": { "flowIdSource": "header:X-Mock-Space" } } },
+            "stubs": stubs
+        })
+    }
+
+    #[tokio::test]
+    async fn space_scoped_stubs_isolate_responses() {
+        let manager = ImposterManager::new();
+        let config = serde_json::from_value(correlated_config(
+            19770,
+            serde_json::json!([
+                { "space": "alpha", "predicates": [{ "equals": { "path": "/data" } }],
+                  "responses": [{ "is": { "statusCode": 200, "body": "ALPHA" } }] },
+                { "space": "beta", "predicates": [{ "equals": { "path": "/data" } }],
+                  "responses": [{ "is": { "statusCode": 200, "body": "BETA" } }] }
+            ]),
+        ))
+        .unwrap();
+        manager.create_imposter(config).await.expect("create");
+        let c = reqwest::Client::new();
+
+        assert_eq!(
+            get(&c, 19770, "/data", Some("alpha"))
+                .await
+                .text()
+                .await
+                .unwrap(),
+            "ALPHA"
+        );
+        assert_eq!(
+            get(&c, 19770, "/data", Some("beta"))
+                .await
+                .text()
+                .await
+                .unwrap(),
+            "BETA"
+        );
+        // a space with no scoped stub for /data matches neither scoped stub (no leak across spaces)
+        let gamma = get(&c, 19770, "/data", Some("gamma"))
+            .await
+            .text()
+            .await
+            .unwrap();
+        assert!(
+            gamma != "ALPHA" && gamma != "BETA",
+            "scoped stubs must not leak to gamma, got: {gamma:?}"
+        );
+
+        let _ = manager.delete_imposter(19770).await;
+    }
+
+    #[tokio::test]
+    async fn global_stub_matches_all_spaces() {
+        let manager = ImposterManager::new();
+        let config = serde_json::from_value(correlated_config(
+            19771,
+            serde_json::json!([
+                { "predicates": [{ "equals": { "path": "/health" } }],
+                  "responses": [{ "is": { "statusCode": 200, "body": "OK" } }] }
+            ]),
+        ))
+        .unwrap();
+        manager.create_imposter(config).await.expect("create");
+        let c = reqwest::Client::new();
+
+        assert_eq!(
+            get(&c, 19771, "/health", Some("alpha"))
+                .await
+                .text()
+                .await
+                .unwrap(),
+            "OK"
+        );
+        assert_eq!(
+            get(&c, 19771, "/health", Some("beta"))
+                .await
+                .text()
+                .await
+                .unwrap(),
+            "OK"
+        );
+        assert_eq!(
+            get(&c, 19771, "/health", None).await.text().await.unwrap(),
+            "OK"
+        );
+
+        let _ = manager.delete_imposter(19771).await;
+    }
+
+    #[tokio::test]
+    async fn space_scope_composes_with_scenario_fsm() {
+        let manager = ImposterManager::new();
+        let config = serde_json::from_value(correlated_config(19772, serde_json::json!([
+            { "space": "alpha", "scenarioName": "order", "requiredScenarioState": "Started",
+              "predicates": [{ "equals": { "path": "/status" } }],
+              "responses": [{ "is": { "statusCode": 200, "body": "unpaid" } }] },
+            { "space": "alpha", "scenarioName": "order", "requiredScenarioState": "Started", "newScenarioState": "paid",
+              "predicates": [{ "equals": { "path": "/pay" } }],
+              "responses": [{ "is": { "statusCode": 200, "body": "ok" } }] },
+            { "space": "alpha", "scenarioName": "order", "requiredScenarioState": "paid",
+              "predicates": [{ "equals": { "path": "/status" } }],
+              "responses": [{ "is": { "statusCode": 200, "body": "paid" } }] },
+            { "space": "beta", "predicates": [{ "equals": { "path": "/status" } }],
+              "responses": [{ "is": { "statusCode": 200, "body": "beta" } }] }
+        ])))
+        .unwrap();
+        manager.create_imposter(config).await.expect("create");
+        let c = reqwest::Client::new();
+
+        assert_eq!(
+            get(&c, 19772, "/status", Some("alpha"))
+                .await
+                .text()
+                .await
+                .unwrap(),
+            "unpaid"
+        );
+        assert_eq!(
+            get(&c, 19772, "/pay", Some("alpha"))
+                .await
+                .text()
+                .await
+                .unwrap(),
+            "ok"
+        );
+        assert_eq!(
+            get(&c, 19772, "/status", Some("alpha"))
+                .await
+                .text()
+                .await
+                .unwrap(),
+            "paid",
+            "alpha FSM advanced"
+        );
+        // beta shares neither stubs nor state with alpha
+        assert_eq!(
+            get(&c, 19772, "/status", Some("beta"))
+                .await
+                .text()
+                .await
+                .unwrap(),
+            "beta"
+        );
+
+        let _ = manager.delete_imposter(19772).await;
+    }
+
+    #[tokio::test]
+    async fn space_teardown_is_isolated() {
+        let manager = std::sync::Arc::new(ImposterManager::new());
+        let config = serde_json::from_value(correlated_config(
+            19773,
+            serde_json::json!([
+                { "space": "alpha", "predicates": [{ "equals": { "path": "/data" } }],
+                  "responses": [{ "is": { "statusCode": 200, "body": "ALPHA" } }] },
+                { "space": "beta", "predicates": [{ "equals": { "path": "/data" } }],
+                  "responses": [{ "is": { "statusCode": 200, "body": "BETA" } }] }
+            ]),
+        ))
+        .unwrap();
+        manager.create_imposter(config).await.expect("create");
+
+        let admin_addr = "127.0.0.1:12592".parse().unwrap();
+        let server = crate::admin_api::AdminApiServer::new(admin_addr, manager.clone(), None);
+        tokio::spawn(server.run());
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let c = reqwest::Client::new();
+        let admin = "http://127.0.0.1:12592";
+
+        // record one request per space
+        let _ = get(&c, 19773, "/data", Some("alpha")).await;
+        let _ = get(&c, 19773, "/data", Some("beta")).await;
+
+        // tear down alpha only
+        let r = c
+            .delete(format!("{admin}/imposters/19773/spaces/alpha"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+
+        // alpha's recorded requests are cleared (check BEFORE any new alpha request below,
+        // which would re-record one).
+        let alpha_reqs = c
+            .get(format!(
+                "{admin}/imposters/19773/requests?match=header:X-Mock-Space=alpha"
+            ))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert_eq!(alpha_reqs, "[]", "alpha recorded requests cleared");
+        // alpha's stub no longer matches /data
+        let alpha_after = get(&c, 19773, "/data", Some("alpha"))
+            .await
+            .text()
+            .await
+            .unwrap();
+        assert_ne!(alpha_after, "ALPHA", "alpha stubs removed");
+
+        // beta is fully intact
+        assert_eq!(
+            get(&c, 19773, "/data", Some("beta"))
+                .await
+                .text()
+                .await
+                .unwrap(),
+            "BETA",
+            "beta untouched"
+        );
+        let beta_space = c
+            .get(format!("{admin}/imposters/19773/spaces/beta/stubs"))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(
+            beta_space.contains("BETA"),
+            "beta stubs intact: {beta_space}"
+        );
+
+        let _ = manager.delete_imposter(19773).await;
+    }
+
+    #[tokio::test]
+    async fn space_teardown_resets_scenario_state_and_leaves_others() {
+        let manager = std::sync::Arc::new(ImposterManager::new());
+        // Two spaces each running the "order" FSM, declared only on their own scoped stubs.
+        let fsm = |space: &str| {
+            serde_json::json!({
+                "space": space, "scenarioName": "order",
+                "requiredScenarioState": "Started", "newScenarioState": "paid",
+                "predicates": [{ "equals": { "path": "/pay" } }],
+                "responses": [{ "is": { "statusCode": 200, "body": "ok" } }]
+            })
+        };
+        let config = serde_json::from_value(correlated_config(
+            19774,
+            serde_json::json!([fsm("alpha"), fsm("beta")]),
+        ))
+        .unwrap();
+        manager.create_imposter(config).await.expect("create");
+
+        let admin_addr = "127.0.0.1:12593".parse().unwrap();
+        let server = crate::admin_api::AdminApiServer::new(admin_addr, manager.clone(), None);
+        tokio::spawn(server.run());
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let c = reqwest::Client::new();
+        let admin = "http://127.0.0.1:12593";
+        let state_url =
+            |flow: &str| format!("{admin}/admin/imposters/19774/flow-state/{flow}/order");
+
+        // advance both spaces' "order" scenario to paid
+        let _ = get(&c, 19774, "/pay", Some("alpha")).await;
+        let _ = get(&c, 19774, "/pay", Some("beta")).await;
+        assert_eq!(
+            c.get(state_url("alpha")).send().await.unwrap().status(),
+            200,
+            "alpha order state set before teardown"
+        );
+
+        // tear down alpha
+        let r = c
+            .delete(format!("{admin}/imposters/19774/spaces/alpha"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+
+        // alpha's scenario state is reset (key deleted ⇒ 404); beta's survives
+        assert_eq!(
+            c.get(state_url("alpha")).send().await.unwrap().status(),
+            404,
+            "alpha scenario state reset by teardown"
+        );
+        let beta_state = c.get(state_url("beta")).send().await.unwrap();
+        assert_eq!(beta_state.status(), 200, "beta scenario state untouched");
+        assert!(beta_state.text().await.unwrap().contains("paid"));
+
+        let _ = manager.delete_imposter(19774).await;
+    }
+
+    #[tokio::test]
+    async fn space_stub_registration_and_inspection_endpoints() {
+        let manager = std::sync::Arc::new(ImposterManager::new());
+        let config =
+            serde_json::from_value(correlated_config(19775, serde_json::json!([]))).unwrap();
+        manager.create_imposter(config).await.expect("create");
+
+        let admin_addr = "127.0.0.1:12594".parse().unwrap();
+        let server = crate::admin_api::AdminApiServer::new(admin_addr, manager.clone(), None);
+        tokio::spawn(server.run());
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let c = reqwest::Client::new();
+        let admin = "http://127.0.0.1:12594";
+
+        // register a stub scoped to "alpha" via the space endpoint
+        let r = c
+            .post(format!("{admin}/imposters/19775/spaces/alpha/stubs"))
+            .header("content-type", "application/json")
+            .body(r#"{"predicates":[{"equals":{"path":"/data"}}],"responses":[{"is":{"statusCode":200,"body":"ALPHA"}}]}"#)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 201);
+
+        // it matches alpha's requests and is gated from other spaces
+        assert_eq!(
+            get(&c, 19775, "/data", Some("alpha"))
+                .await
+                .text()
+                .await
+                .unwrap(),
+            "ALPHA"
+        );
+        let beta = get(&c, 19775, "/data", Some("beta"))
+            .await
+            .text()
+            .await
+            .unwrap();
+        assert_ne!(
+            beta, "ALPHA",
+            "space-scoped stub must not match other spaces"
+        );
+
+        // inspection: GET /spaces/alpha reports the stub + a per-space request count
+        let body = c
+            .get(format!("{admin}/imposters/19775/spaces/alpha"))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        let space: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(space["space"], "alpha");
+        assert_eq!(space["stubs"].as_array().unwrap().len(), 1);
+        assert_eq!(space["numberOfRequests"], 1, "one alpha request recorded");
+
+        let _ = manager.delete_imposter(19775).await;
     }
 }

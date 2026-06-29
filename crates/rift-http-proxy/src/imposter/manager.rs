@@ -256,6 +256,14 @@ impl ImposterManager {
         self.persist_imposter_checked(&imposter).await
     }
 
+    /// Tear down a correlation space (issue #223): remove its scoped stubs, recorded requests,
+    /// and scenario state, then persist the updated stub set.
+    pub async fn teardown_space(&self, port: u16, space: &str) -> Result<(), ImposterError> {
+        let imposter = self.get_imposter(port)?;
+        imposter.teardown_space(space);
+        self.persist_imposter_checked(&imposter).await
+    }
+
     /// Replace a stub
     pub async fn replace_stub(
         &self,

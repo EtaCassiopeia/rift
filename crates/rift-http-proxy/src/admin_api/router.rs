@@ -34,6 +34,10 @@ enum ImposterRoute {
     ScenarioState(String),
     /// POST /imposters/:port/scenarios/reset
     ScenariosReset,
+    /// GET/DELETE /imposters/:port/spaces/:flowId
+    Space(String),
+    /// POST/GET /imposters/:port/spaces/:flowId/stubs
+    SpaceStubs(String),
 }
 
 impl ImposterRoute {
@@ -50,6 +54,8 @@ impl ImposterRoute {
             ["scenarios"] => Some(ImposterRoute::Scenarios),
             ["scenarios", "reset"] => Some(ImposterRoute::ScenariosReset),
             ["scenarios", name, "state"] => Some(ImposterRoute::ScenarioState((*name).to_string())),
+            ["spaces", flow_id] => Some(ImposterRoute::Space((*flow_id).to_string())),
+            ["spaces", flow_id, "stubs"] => Some(ImposterRoute::SpaceStubs((*flow_id).to_string())),
             _ => None,
         }
     }
@@ -229,6 +235,20 @@ async fn route_imposter(
         }
         (&Method::POST, ImposterRoute::ScenariosReset) => {
             scenarios::handle_reset_scenarios(port, req, manager).await
+        }
+
+        // /imposters/:port/spaces/:flowId — Correlated isolation (issue #223)
+        (&Method::POST, ImposterRoute::SpaceStubs(flow_id)) => {
+            scenarios::handle_add_space_stub(port, &flow_id, req, manager).await
+        }
+        (&Method::GET, ImposterRoute::SpaceStubs(flow_id)) => {
+            scenarios::handle_list_space_stubs(port, &flow_id, manager).await
+        }
+        (&Method::GET, ImposterRoute::Space(flow_id)) => {
+            scenarios::handle_get_space(port, &flow_id, manager).await
+        }
+        (&Method::DELETE, ImposterRoute::Space(flow_id)) => {
+            scenarios::handle_teardown_space(port, &flow_id, manager).await
         }
 
         _ => not_found(),
