@@ -175,8 +175,9 @@ jobs:
             cross build --release --package rift-http-proxy --target ${{ matrix.target }} $FEATURE_FLAGS
             cross build --release --package rift-lint --target ${{ matrix.target }}
             cross build --release --package rift-tui --target ${{ matrix.target }}
-            # rift-ffi cdylib (issue #205) — same per-target feature set as the proxy
-            cross build --release --package rift-ffi --target ${{ matrix.target }} $FEATURE_FLAGS
+            # No rift-ffi cdylib on musl: the static-only musl toolchain drops the `cdylib`
+            # crate type (issue #205), so a musl librift_ffi can't be produced. gnu Linux covers
+            # the JVM embedded-backend use case.
           else
             cargo build --release --package rift-http-proxy --target ${{ matrix.target }} $FEATURE_FLAGS
             cargo build --release --package rift-lint --target ${{ matrix.target }}
@@ -223,12 +224,15 @@ jobs:
 
           # rift-ffi cdylib as a standalone, classifier-named release asset (issue #205): the JVM
           # embedded backend loads the raw library by os/arch, so it ships outside the binary tarball.
-          if [[ "$OSTYPE" == "darwin"* ]]; then EXT="dylib"; else EXT="so"; fi
-          FFI_NAME="librift_ffi-${{ matrix.classifier }}.$EXT"
-          cp "librift_ffi.$EXT" "$FFI_NAME"
-          shasum -a 256 "$FFI_NAME" > "$FFI_NAME.sha256"
-          echo "FFI_ASSET_PATH=target/${{ matrix.target }}/release/$FFI_NAME" >> $GITHUB_ENV
-          echo "FFI_CHECKSUM_PATH=target/${{ matrix.target }}/release/$FFI_NAME.sha256" >> $GITHUB_ENV
+          # Skipped on musl, which can't produce a cdylib (the build step builds no librift_ffi there).
+          if [[ "${{ matrix.target }}" != *"musl"* ]]; then
+            if [[ "$OSTYPE" == "darwin"* ]]; then EXT="dylib"; else EXT="so"; fi
+            FFI_NAME="librift_ffi-${{ matrix.classifier }}.$EXT"
+            cp "librift_ffi.$EXT" "$FFI_NAME"
+            shasum -a 256 "$FFI_NAME" > "$FFI_NAME.sha256"
+            echo "FFI_ASSET_PATH=target/${{ matrix.target }}/release/$FFI_NAME" >> $GITHUB_ENV
+            echo "FFI_CHECKSUM_PATH=target/${{ matrix.target }}/release/$FFI_NAME.sha256" >> $GITHUB_ENV
+          fi
 
       - name: Package (Windows)
         if: matrix.os == 'windows-latest'
