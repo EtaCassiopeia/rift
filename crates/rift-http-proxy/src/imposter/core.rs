@@ -7,6 +7,9 @@
 /// Once the cap is reached, the oldest entry is evicted (ring-buffer semantics).
 const MAX_RECORDED_REQUESTS: usize = 10_000;
 
+/// Default scenario state when a `(flow_id, scenario)` entry is absent (WireMock parity).
+pub const INITIAL_SCENARIO_STATE: &str = "Started";
+
 use super::predicates::stub_matches;
 use super::response::{
     create_response_preview, create_stub_from_proxy_response, execute_stub_response_with_rift,
@@ -138,30 +141,45 @@ impl Imposter {
         stubs.extend(new_stubs.into_iter().map(StubState::new));
     }
 
-    /// Create flow store based on _rift.flowState configuration
+    /// Create flow store based on _rift.flowState configuration.
+    /// Falls back to a default in-memory store (not NoOp) when stubs declare the scenario FSM,
+    /// so declarative scenarios work out of the box without explicit `_rift.flowState`.
+    ///
+    /// Note: the store is chosen at construction. Scenario stubs added later via an in-place
+    /// `PUT /imposters/:port/stubs` to an imposter that started with no scenario stubs (and no
+    /// `_rift.flowState`) will hit the NoOp store and not advance — declare scenario stubs at
+    /// creation, configure `_rift.flowState`, or use `PUT /imposters` (which recreates).
     fn create_flow_store(config: &ImposterConfig) -> Arc<dyn FlowStore> {
-        let Some(ref rift_config) = config.rift else {
-            return Arc::new(NoOpFlowStore);
-        };
-
-        let Some(ref flow_state_config) = rift_config.flow_state else {
-            return Arc::new(NoOpFlowStore);
-        };
-
-        match flow_state_config.backend.as_str() {
-            "inmemory" => {
-                info!(
-                    "Creating InMemory FlowStore for imposter (ttl={}s)",
-                    flow_state_config.ttl_seconds
-                );
-                Arc::new(InMemoryFlowStore::new(flow_state_config.ttl_seconds as u64))
-            }
-            "redis" => Self::create_redis_flow_store(flow_state_config),
-            other => {
-                warn!("Unknown flow state backend '{}', using NoOp", other);
-                Arc::new(NoOpFlowStore)
-            }
+        if let Some(flow_state_config) = config.rift.as_ref().and_then(|r| r.flow_state.as_ref()) {
+            return match flow_state_config.backend.as_str() {
+                "inmemory" => {
+                    info!(
+                        "Creating InMemory FlowStore for imposter (ttl={}s)",
+                        flow_state_config.ttl_seconds
+                    );
+                    Arc::new(InMemoryFlowStore::new(flow_state_config.ttl_seconds as u64))
+                }
+                "redis" => Self::create_redis_flow_store(flow_state_config),
+                other => {
+                    warn!("Unknown flow state backend '{}', using NoOp", other);
+                    Arc::new(NoOpFlowStore)
+                }
+            };
         }
+
+        if Self::uses_scenario_fsm(&config.stubs) {
+            info!("Stubs declare scenario state; using default in-memory FlowStore");
+            return Arc::new(InMemoryFlowStore::new(300));
+        }
+
+        Arc::new(NoOpFlowStore)
+    }
+
+    /// Whether any stub declares the declarative scenario FSM (`requiredScenarioState`/`newScenarioState`).
+    fn uses_scenario_fsm(stubs: &[Stub]) -> bool {
+        stubs
+            .iter()
+            .any(|s| s.required_scenario_state.is_some() || s.new_scenario_state.is_some())
     }
 
     /// Create Redis flow store if configured and available
@@ -255,8 +273,18 @@ impl Imposter {
         let form = Self::parse_form_data(headers, body);
 
         let imposter_port = self.config.port.unwrap_or(0);
+        let flow_id = self.resolve_flow_id(&headers_map);
         for (index, stub_state) in stubs.iter().enumerate() {
             let stub = &stub_state.stub;
+            // Scenario FSM eligibility gate (before predicate precedence): a stub guarded by
+            // `requiredScenarioState` only participates in matching when the current
+            // (flow_id, scenario) state equals it.
+            if let Some(required) = &stub.required_scenario_state {
+                let scenario = stub.scenario_name.as_deref().unwrap_or("");
+                if self.scenario_state(&flow_id, scenario) != *required {
+                    continue;
+                }
+            }
             if stub_matches(
                 &stub.predicates,
                 method,
@@ -274,6 +302,111 @@ impl Imposter {
             }
         }
         None
+    }
+
+    /// The configured `flow_id_source` (`"imposter_port"` or `"header:<Name>"`),
+    /// defaulting to `"imposter_port"`.
+    pub fn flow_id_source(&self) -> String {
+        self.config
+            .rift
+            .as_ref()
+            .and_then(|r| r.flow_state.as_ref())
+            .and_then(|fs| fs.mountebank_state_mapping.as_ref())
+            .map(|m| m.flow_id_source.clone())
+            .unwrap_or_else(|| "imposter_port".to_string())
+    }
+
+    /// Resolve the correlation `flow_id` for a request, partitioning scenario state.
+    /// `"header:<Name>"` uses that (case-insensitive) header; `"imposter_port"` (the default,
+    /// and the fallback when the header is absent) uses the imposter port.
+    pub fn resolve_flow_id(&self, headers: &HashMap<String, String>) -> String {
+        let port_id = || self.config.port.unwrap_or(0).to_string();
+        match self.flow_id_source().strip_prefix("header:") {
+            Some(name) => headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                .map(|(_, v)| v.clone())
+                .unwrap_or_else(port_id),
+            None => port_id(),
+        }
+    }
+
+    /// Current scenario state for `(flow_id, scenario)`, or the initial state if absent.
+    /// A backend read error degrades to the initial state but is logged — it must not be
+    /// silently mistaken for "no state yet", which would mis-gate matching.
+    pub fn scenario_state(&self, flow_id: &str, scenario: &str) -> String {
+        match self.flow_store.get(flow_id, scenario) {
+            Ok(Some(v)) => v.as_str().unwrap_or(INITIAL_SCENARIO_STATE).to_string(),
+            Ok(None) => INITIAL_SCENARIO_STATE.to_string(),
+            Err(e) => {
+                warn!(
+                    "scenario state read failed ({flow_id}/{scenario}); using initial '{INITIAL_SCENARIO_STATE}': {e}"
+                );
+                INITIAL_SCENARIO_STATE.to_string()
+            }
+        }
+    }
+
+    /// Set scenario state for `(flow_id, scenario)`.
+    pub fn set_scenario_state(
+        &self,
+        flow_id: &str,
+        scenario: &str,
+        state: &str,
+    ) -> anyhow::Result<()> {
+        self.flow_store.set(
+            flow_id,
+            scenario,
+            serde_json::Value::String(state.to_string()),
+        )
+    }
+
+    /// Delete a scenario's state for a flow (so it reads back as the initial state).
+    pub fn delete_scenario_state(&self, flow_id: &str, scenario: &str) -> anyhow::Result<()> {
+        self.flow_store.delete(flow_id, scenario)
+    }
+
+    /// Apply a matched stub's `newScenarioState` transition after it responds (no-op if unset).
+    pub fn apply_scenario_transition(&self, flow_id: &str, stub: &Stub) {
+        if let Some(next) = &stub.new_scenario_state {
+            let scenario = stub.scenario_name.as_deref().unwrap_or("");
+            if let Err(e) = self.set_scenario_state(flow_id, scenario, next) {
+                warn!("scenario transition failed ({flow_id}/{scenario} -> {next}): {e}");
+            }
+        }
+    }
+
+    /// Read a raw flow-state value (admin flow-state inspection).
+    pub fn flow_get(&self, flow_id: &str, key: &str) -> anyhow::Result<Option<serde_json::Value>> {
+        self.flow_store.get(flow_id, key)
+    }
+
+    /// Set a raw flow-state value (admin flow-state arrange).
+    pub fn flow_set(
+        &self,
+        flow_id: &str,
+        key: &str,
+        value: serde_json::Value,
+    ) -> anyhow::Result<()> {
+        self.flow_store.set(flow_id, key, value)
+    }
+
+    /// Delete a raw flow-state value (admin flow-state teardown).
+    pub fn flow_delete(&self, flow_id: &str, key: &str) -> anyhow::Result<()> {
+        self.flow_store.delete(flow_id, key)
+    }
+
+    /// Distinct scenario names declared by this imposter's stubs (sorted).
+    pub fn scenario_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .stubs
+            .read()
+            .iter()
+            .filter_map(|s| s.stub.scenario_name.clone())
+            .collect();
+        names.sort();
+        names.dedup();
+        names
     }
 
     /// Parse form-urlencoded data from body if Content-Type matches

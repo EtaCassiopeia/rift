@@ -202,6 +202,13 @@ async fn handle_request_inner(
         Some(&request_from),
         Some(&client_ip),
     ) {
+        // Scenario FSM: apply the matched stub's newScenarioState transition (no-op unless set).
+        // Resolve flow_id from the same header map the eligibility gate used (headers_for_context)
+        // so the transition writes the exact key the gate read.
+        let scenario_flow_id =
+            imposter.resolve_flow_id(&Imposter::header_map_to_hashmap(&headers_for_context));
+        imposter.apply_scenario_transition(&scenario_flow_id, &stub_state.stub);
+
         // Check if this is a proxy response
         if let Some(proxy_config) = imposter.get_proxy_response(&stub_state) {
             debug!("Handling proxy request to {}", proxy_config.to);

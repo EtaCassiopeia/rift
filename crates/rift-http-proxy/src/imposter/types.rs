@@ -121,6 +121,14 @@ pub struct Stub {
     /// Placed first to match Mountebank output ordering
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scenario_name: Option<String>,
+    /// Scenario FSM gate (WireMock `whenScenarioStateIs`): the stub is eligible only when the
+    /// `(flow_id, scenario_name)` state equals this. Absent ⇒ always eligible.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub required_scenario_state: Option<String>,
+    /// Scenario FSM transition (WireMock `willSetStateTo`): after this stub responds, set the
+    /// `(flow_id, scenario_name)` state to this. Absent ⇒ no transition.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub new_scenario_state: Option<String>,
     /// Optional unique identifier for the stub (Rift extension)
     /// Useful for targeting specific stubs for updates/deletion without relying on index
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -143,6 +151,10 @@ pub struct Stub {
 struct StubRaw {
     #[serde(default)]
     scenario_name: Option<String>,
+    #[serde(default)]
+    required_scenario_state: Option<String>,
+    #[serde(default)]
+    new_scenario_state: Option<String>,
     #[serde(default)]
     id: Option<String>,
     #[serde(default)]
@@ -205,6 +217,8 @@ impl From<StubRaw> for Stub {
 
         Stub {
             scenario_name: raw.scenario_name,
+            required_scenario_state: raw.required_scenario_state,
+            new_scenario_state: raw.new_scenario_state,
             id: raw.id,
             predicates,
             responses,

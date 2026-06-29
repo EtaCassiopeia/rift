@@ -417,6 +417,8 @@ mod tests {
             predicates,
             responses: vec![],
             scenario_name: None,
+            required_scenario_state: None,
+            new_scenario_state: None,
             recorded_from: None,
         }
     }
@@ -428,6 +430,8 @@ mod tests {
             predicates,
             responses: vec![],
             scenario_name: None,
+            required_scenario_state: None,
+            new_scenario_state: None,
             recorded_from: None,
         }
     }
