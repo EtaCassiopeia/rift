@@ -5,7 +5,7 @@
 //! flow (`resolve_flow_id` with no headers ⇒ the `imposter_port` flow) is used.
 
 use crate::admin_api::types::{collect_body, error_response, json_response};
-use crate::imposter::{Imposter, ImposterManager};
+use crate::imposter::{Imposter, ImposterManager, Stub};
 use bytes::Bytes;
 use http_body_util::Full;
 use hyper::body::Incoming;
@@ -198,6 +198,103 @@ pub async fn handle_delete_flow_state(
             ),
             Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
         },
+        Err(e) => e.into(),
+    }
+}
+
+// ── Correlated-isolation "space" endpoints (issue #223) ─────────────────────────
+
+/// POST /imposters/:port/spaces/:flowId/stubs — register a stub scoped to that space.
+pub async fn handle_add_space_stub(
+    port: u16,
+    flow_id: &str,
+    req: Request<Incoming>,
+    manager: Arc<ImposterManager>,
+) -> Response<Full<Bytes>> {
+    let payload = match parse_json_body(req).await {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+    let mut stub: Stub = match serde_json::from_value(payload) {
+        Ok(s) => s,
+        Err(e) => return error_response(StatusCode::BAD_REQUEST, &format!("Invalid stub: {e}")),
+    };
+    // The path `:flowId` is the source of truth for the scope; ignore any `space` in the body.
+    stub.space = Some(flow_id.to_string());
+    match manager.add_stub(port, stub, None).await {
+        Ok(()) => match manager.get_imposter(port) {
+            Ok(imposter) => json_response(
+                StatusCode::CREATED,
+                &serde_json::json!({ "space": flow_id, "stubs": imposter.space_stubs(flow_id) }),
+            ),
+            Err(e) => e.into(),
+        },
+        Err(e) => e.into(),
+    }
+}
+
+/// GET /imposters/:port/spaces/:flowId/stubs — list a space's scoped stubs.
+pub async fn handle_list_space_stubs(
+    port: u16,
+    flow_id: &str,
+    manager: Arc<ImposterManager>,
+) -> Response<Full<Bytes>> {
+    match manager.get_imposter(port) {
+        Ok(imposter) => json_response(
+            StatusCode::OK,
+            &serde_json::json!({ "space": flow_id, "stubs": imposter.space_stubs(flow_id) }),
+        ),
+        Err(e) => e.into(),
+    }
+}
+
+/// GET /imposters/:port/spaces/:flowId — inspect a space (stubs + scenario states + request count).
+pub async fn handle_get_space(
+    port: u16,
+    flow_id: &str,
+    manager: Arc<ImposterManager>,
+) -> Response<Full<Bytes>> {
+    match manager.get_imposter(port) {
+        Ok(imposter) => {
+            let scenarios: Vec<_> = imposter
+                .scenario_names()
+                .into_iter()
+                .map(|name| {
+                    let state = imposter.scenario_state(flow_id, &name);
+                    serde_json::json!({ "name": name, "state": state })
+                })
+                .collect();
+            let number_of_requests = imposter
+                .get_recorded_requests()
+                .iter()
+                .filter(|r| imposter.resolve_flow_id(&r.headers) == flow_id)
+                .count();
+            json_response(
+                StatusCode::OK,
+                &serde_json::json!({
+                    "space": flow_id,
+                    "stubs": imposter.space_stubs(flow_id),
+                    "scenarios": scenarios,
+                    "numberOfRequests": number_of_requests
+                }),
+            )
+        }
+        Err(e) => e.into(),
+    }
+}
+
+/// DELETE /imposters/:port/spaces/:flowId — one-call per-space teardown
+/// (scoped stubs + recorded requests + scenario state), never a global reset.
+pub async fn handle_teardown_space(
+    port: u16,
+    flow_id: &str,
+    manager: Arc<ImposterManager>,
+) -> Response<Full<Bytes>> {
+    match manager.teardown_space(port, flow_id).await {
+        Ok(()) => json_response(
+            StatusCode::OK,
+            &serde_json::json!({ "space": flow_id, "tornDown": true }),
+        ),
         Err(e) => e.into(),
     }
 }

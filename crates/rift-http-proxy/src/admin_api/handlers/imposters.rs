@@ -425,6 +425,7 @@ fn filter_proxy_stubs(stubs: Vec<crate::imposter::Stub>) -> Vec<crate::imposter:
                     scenario_name: stub.scenario_name,
                     required_scenario_state: stub.required_scenario_state,
                     new_scenario_state: stub.new_scenario_state,
+                    space: stub.space,
                     recorded_from: stub.recorded_from,
                 })
             }

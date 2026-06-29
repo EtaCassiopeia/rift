@@ -276,6 +276,14 @@ impl Imposter {
         let flow_id = self.resolve_flow_id(&headers_map);
         for (index, stub_state) in stubs.iter().enumerate() {
             let stub = &stub_state.stub;
+            // Correlated-isolation gate (issue #223, runs first): a space-scoped stub only
+            // participates in matching when the request's resolved flow_id equals its space.
+            // Unscoped stubs match any space (PerInstance default).
+            if let Some(space) = &stub.space {
+                if flow_id != *space {
+                    continue;
+                }
+            }
             // Scenario FSM eligibility gate (before predicate precedence): a stub guarded by
             // `requiredScenarioState` only participates in matching when the current
             // (flow_id, scenario) state equals it.
@@ -320,14 +328,22 @@ impl Imposter {
     /// `"header:<Name>"` uses that (case-insensitive) header; `"imposter_port"` (the default,
     /// and the fallback when the header is absent) uses the imposter port.
     pub fn resolve_flow_id(&self, headers: &HashMap<String, String>) -> String {
-        let port_id = || self.config.port.unwrap_or(0).to_string();
-        match self.flow_id_source().strip_prefix("header:") {
+        Self::flow_id_for(
+            &self.flow_id_source(),
+            headers,
+            self.config.port.unwrap_or(0),
+        )
+    }
+
+    /// Pure flow_id resolution (no `&self`), so it can be reused over recorded requests.
+    fn flow_id_for(source: &str, headers: &HashMap<String, String>, port: u16) -> String {
+        match source.strip_prefix("header:") {
             Some(name) => headers
                 .iter()
                 .find(|(k, _)| k.eq_ignore_ascii_case(name))
                 .map(|(_, v)| v.clone())
-                .unwrap_or_else(port_id),
-            None => port_id(),
+                .unwrap_or_else(|| port.to_string()),
+            None => port.to_string(),
         }
     }
 
@@ -407,6 +423,36 @@ impl Imposter {
         names.sort();
         names.dedup();
         names
+    }
+
+    /// Stubs scoped to a given correlation space (issue #223).
+    pub fn space_stubs(&self, space: &str) -> Vec<Stub> {
+        self.stubs
+            .read()
+            .iter()
+            .filter(|s| s.stub.space.as_deref() == Some(space))
+            .map(|s| s.stub.clone())
+            .collect()
+    }
+
+    /// Tear down a correlation space (issue #223): remove its scoped stubs, drop its recorded
+    /// requests, and reset its named scenario states. Other spaces and the port are untouched.
+    pub fn teardown_space(&self, space: &str) {
+        // Snapshot scenario names BEFORE pruning stubs: a scenario declared only on this space's
+        // stubs would otherwise vanish from scenario_names() and its state would never be reset.
+        let scenarios = self.scenario_names();
+        self.stubs
+            .write()
+            .retain(|s| s.stub.space.as_deref() != Some(space));
+        let source = self.flow_id_source();
+        self.recorded_requests.write().retain(|r| {
+            Self::flow_id_for(&source, &r.headers, self.config.port.unwrap_or(0)) != space
+        });
+        for scenario in scenarios {
+            if let Err(e) = self.delete_scenario_state(space, &scenario) {
+                warn!("space teardown: failed to reset scenario '{scenario}' for '{space}': {e}");
+            }
+        }
     }
 
     /// Parse form-urlencoded data from body if Content-Type matches

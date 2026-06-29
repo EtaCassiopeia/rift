@@ -263,6 +263,7 @@ pub fn create_stub_from_proxy_response(
         scenario_name: None,
         required_scenario_state: None,
         new_scenario_state: None,
+        space: None,
         recorded_from,
     }
 }

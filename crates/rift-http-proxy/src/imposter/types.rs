@@ -129,6 +129,11 @@ pub struct Stub {
     /// `(flow_id, scenario_name)` state to this. Absent ⇒ no transition.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub new_scenario_state: Option<String>,
+    /// Correlated-isolation scope (issue #223): when set, the stub is eligible only for requests
+    /// whose resolved `flow_id` (see `flowIdSource`) equals this. Absent ⇒ global (matches any
+    /// space), preserving PerInstance behaviour.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub space: Option<String>,
     /// Optional unique identifier for the stub (Rift extension)
     /// Useful for targeting specific stubs for updates/deletion without relying on index
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -155,6 +160,8 @@ struct StubRaw {
     required_scenario_state: Option<String>,
     #[serde(default)]
     new_scenario_state: Option<String>,
+    #[serde(default)]
+    space: Option<String>,
     #[serde(default)]
     id: Option<String>,
     #[serde(default)]
@@ -219,6 +226,7 @@ impl From<StubRaw> for Stub {
             scenario_name: raw.scenario_name,
             required_scenario_state: raw.required_scenario_state,
             new_scenario_state: raw.new_scenario_state,
+            space: raw.space,
             id: raw.id,
             predicates,
             responses,
