@@ -99,6 +99,20 @@ async fn handle_request_inner(
             )
         })
         .collect();
+    // Capture ALL values per header for the recorded request (issue #238) — hyper's HeaderMap
+    // yields one entry per value, so a header sent twice is preserved here (headers_clone above
+    // collapses to one value and stays the single-value view used for matching/context).
+    let headers_multi: HashMap<String, Vec<String>> = if imposter.config.record_requests {
+        let mut map: HashMap<String, Vec<String>> = HashMap::new();
+        for (k, v) in req.headers().iter() {
+            map.entry(header_to_title_case(k.as_str()))
+                .or_default()
+                .push(v.to_str().unwrap_or("").to_string());
+        }
+        map
+    } else {
+        HashMap::new()
+    };
     let path = uri.path().to_string();
     let query_str = uri.query().unwrap_or("").to_string();
 
@@ -155,7 +169,7 @@ async fn handle_request_inner(
             method: method.clone(),
             path: path.clone(),
             query: parse_query_string(&query_str),
-            headers: headers_clone.clone(),
+            headers: headers_multi,
             body: body_string.clone(),
             timestamp: chrono::Utc::now().to_rfc3339(),
         };
@@ -462,54 +476,80 @@ async fn handle_request_inner(
                         }
                     }
 
-                    // Apply copy behaviors
-                    if !parsed_behaviors.copy.is_empty() {
-                        body = apply_copy_behaviors(
-                            &body,
-                            &mut headers,
-                            &parsed_behaviors.copy,
-                            &request_context,
-                        );
-                    }
+                    // Behaviors (copy/lookup/decorate) operate on single-value headers (Mountebank
+                    // semantics). Collapse the multi-value map to a single-value view for them and
+                    // fold the result back, so a plain multi-value `is` response (no behaviors)
+                    // keeps its multiple values while a response that also uses behaviors degrades
+                    // to single-value (issue #238).
+                    let has_behaviors = !parsed_behaviors.copy.is_empty()
+                        || !parsed_behaviors.lookup.is_empty()
+                        || parsed_behaviors.decorate.is_some();
+                    if has_behaviors {
+                        if headers.values().any(|v| v.len() > 1) {
+                            warn!(
+                                "response uses behaviors (copy/lookup/decorate); multi-value \
+                                 headers are collapsed to single-value (comma-joined), so e.g. \
+                                 multiple Set-Cookie become one line (issue #238 boundary). \
+                                 Affected: {:?}",
+                                headers
+                                    .iter()
+                                    .filter(|(_, v)| v.len() > 1)
+                                    .map(|(k, _)| k)
+                                    .collect::<Vec<_>>()
+                            );
+                        }
+                        let mut single: HashMap<String, String> = headers
+                            .iter()
+                            .map(|(k, v)| (k.clone(), v.join(", ")))
+                            .collect();
 
-                    // Apply lookup behaviors (CSV-backed token replacement)
-                    if !parsed_behaviors.lookup.is_empty() {
-                        body = apply_lookup_behaviors(
-                            &body,
-                            &mut headers,
-                            &parsed_behaviors.lookup,
-                            &request_context,
-                            csv_cache(),
-                        );
-                    }
-
-                    // Apply decorate behavior
-                    if let Some(ref decorate_script) = parsed_behaviors.decorate {
-                        // Handle JavaScript-style decorate (Mountebank format)
-                        // Convert to Rhai or execute as JS
-                        match apply_js_or_rhai_decorate(
-                            decorate_script,
-                            &request_context,
-                            &body,
-                            status,
-                            &mut headers,
-                        ) {
-                            Ok((new_body, new_status)) => {
-                                body = new_body;
-                                status = new_status;
-                            }
-                            Err(e) => {
-                                warn!("Decorate script error: {}", e);
+                        if !parsed_behaviors.copy.is_empty() {
+                            body = apply_copy_behaviors(
+                                &body,
+                                &mut single,
+                                &parsed_behaviors.copy,
+                                &request_context,
+                            );
+                        }
+                        if !parsed_behaviors.lookup.is_empty() {
+                            body = apply_lookup_behaviors(
+                                &body,
+                                &mut single,
+                                &parsed_behaviors.lookup,
+                                &request_context,
+                                csv_cache(),
+                            );
+                        }
+                        if let Some(ref decorate_script) = parsed_behaviors.decorate {
+                            match apply_js_or_rhai_decorate(
+                                decorate_script,
+                                &request_context,
+                                &body,
+                                status,
+                                &mut single,
+                            ) {
+                                Ok((new_body, new_status)) => {
+                                    body = new_body;
+                                    status = new_status;
+                                }
+                                Err(e) => {
+                                    warn!("Decorate script error: {}", e);
+                                }
                             }
                         }
+
+                        headers = single.into_iter().map(|(k, v)| (k, vec![v])).collect();
                     }
                 }
             }
 
             let mut response = Response::builder().status(status);
 
-            for (k, v) in &headers {
-                response = response.header(k, v);
+            // One header line per value (issue #238 multi-value headers, e.g. multiple Set-Cookie).
+            for (k, values) in &headers {
+                for v in values {
+                    response = response.header(k, v);
+                }
             }
 
             response = response.header("x-rift-imposter", "true");
@@ -619,8 +659,10 @@ async fn handle_request_inner(
         };
 
         let mut response = Response::builder().status(default.status_code);
-        for (k, v) in &default.headers {
-            response = response.header(k, v);
+        for (k, values) in &default.headers {
+            for v in values {
+                response = response.header(k, v);
+            }
         }
         response = response.header("x-rift-imposter", "true");
         response = response.header("x-rift-default-response", "true");

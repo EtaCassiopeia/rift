@@ -267,7 +267,7 @@ pub async fn handle_get_space(
             let number_of_requests = imposter
                 .get_recorded_requests()
                 .iter()
-                .filter(|r| imposter.resolve_flow_id(&r.headers) == flow_id)
+                .filter(|r| imposter.resolve_flow_id_recorded(&r.headers) == flow_id)
                 .count();
             json_response(
                 StatusCode::OK,
