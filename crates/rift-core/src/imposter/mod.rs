@@ -44,7 +44,7 @@ pub use types::{
 pub use core::Imposter;
 
 // Re-export manager
-pub use manager::ImposterManager;
+pub use manager::{ImposterManager, TlsDefaults};
 
 // Re-export predicate utilities (used in tests and for external consumers)
 #[allow(unused_imports)]

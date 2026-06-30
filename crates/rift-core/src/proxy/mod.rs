@@ -25,7 +25,7 @@ mod headers;
 pub(crate) mod network;
 mod response_ext;
 mod server;
-mod tls;
+pub(crate) mod tls;
 
 mod context;
 #[cfg(test)]

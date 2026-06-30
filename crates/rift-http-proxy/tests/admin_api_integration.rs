@@ -493,6 +493,238 @@ async fn stub_by_id_admin_endpoints() {
     let _ = manager.delete_imposter(19776).await;
 }
 
+// Issue #206: an imposter declared `protocol: "https"` terminates TLS on its own port.
+mod https {
+    use super::*;
+    use rift_http_proxy::imposter::TlsDefaults;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    fn gen_cert() -> (String, String) {
+        let c = rcgen::generate_simple_self_signed(vec![
+            "localhost".to_string(),
+            "127.0.0.1".to_string(),
+        ])
+        .unwrap();
+        (c.cert.pem(), c.key_pair.serialize_pem())
+    }
+
+    fn stub_config(port: u16, protocol: &str, cert: Option<(&str, &str)>) -> serde_json::Value {
+        let mut cfg = serde_json::json!({
+            "port": port, "protocol": protocol,
+            "stubs": [{"responses": [{"is": {"statusCode": 200, "body": "secure-ok"}}]}]
+        });
+        if let Some((cert, key)) = cert {
+            cfg["cert"] = serde_json::json!(cert);
+            cfg["key"] = serde_json::json!(key);
+        }
+        cfg
+    }
+
+    fn tls_client() -> reqwest::Client {
+        reqwest::Client::builder()
+            .danger_accept_invalid_certs(true) // self-signed / test certs
+            .timeout(Duration::from_secs(3))
+            .build()
+            .unwrap()
+    }
+
+    async fn serve(manager: &Arc<ImposterManager>, cfg: serde_json::Value) {
+        manager
+            .create_imposter(serde_json::from_value(cfg).unwrap())
+            .await
+            .expect("create imposter");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    #[tokio::test]
+    async fn https_imposter_with_inline_cert_serves_tls() {
+        let (cert, key) = gen_cert();
+        let manager = Arc::new(ImposterManager::new());
+        serve(&manager, stub_config(19840, "https", Some((&cert, &key)))).await;
+
+        let body = tls_client()
+            .get("https://127.0.0.1:19840/x")
+            .send()
+            .await
+            .expect("TLS request should succeed")
+            .text()
+            .await
+            .unwrap();
+        assert_eq!(body, "secure-ok");
+        let _ = manager.delete_imposter(19840).await;
+    }
+
+    #[tokio::test]
+    async fn http_imposter_unchanged() {
+        let manager = Arc::new(ImposterManager::new());
+        serve(&manager, stub_config(19841, "http", None)).await;
+        let body = reqwest::get("http://127.0.0.1:19841/x")
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert_eq!(body, "secure-ok", "plain http imposter unaffected");
+        let _ = manager.delete_imposter(19841).await;
+    }
+
+    #[tokio::test]
+    async fn https_zero_config_uses_self_signed() {
+        // No cert/key, default manager (self-signed enabled) → still serves over TLS.
+        let manager = Arc::new(ImposterManager::new());
+        serve(&manager, stub_config(19842, "https", None)).await;
+        let body = tls_client()
+            .get("https://127.0.0.1:19842/x")
+            .send()
+            .await
+            .expect("zero-config https should serve via self-signed cert")
+            .text()
+            .await
+            .unwrap();
+        assert_eq!(body, "secure-ok");
+        let _ = manager.delete_imposter(19842).await;
+    }
+
+    #[tokio::test]
+    async fn https_uses_server_default_cert() {
+        // Self-signed DISABLED + a server default cert → the default must be used (proves the
+        // default path, not the self-signed fallback).
+        let (cert, key) = gen_cert();
+        let manager = Arc::new(ImposterManager::new().with_tls_defaults(TlsDefaults {
+            default_cert: Some(cert),
+            default_key: Some(key),
+            allow_self_signed: false,
+        }));
+        serve(&manager, stub_config(19843, "https", None)).await;
+        let body = tls_client()
+            .get("https://127.0.0.1:19843/x")
+            .send()
+            .await
+            .expect("server-default cert should serve the https imposter")
+            .text()
+            .await
+            .unwrap();
+        assert_eq!(body, "secure-ok");
+        let _ = manager.delete_imposter(19843).await;
+    }
+
+    #[tokio::test]
+    async fn https_no_cert_and_self_signed_disabled_errors() {
+        let manager = Arc::new(ImposterManager::new().with_tls_defaults(TlsDefaults {
+            default_cert: None,
+            default_key: None,
+            allow_self_signed: false,
+        }));
+        let result = manager
+            .create_imposter(serde_json::from_value(stub_config(19844, "https", None)).unwrap())
+            .await;
+        assert!(
+            matches!(
+                result,
+                Err(rift_http_proxy::imposter::ImposterError::Tls(_))
+            ),
+            "https with no cert + self-signed disabled must error, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn https_invalid_cert_errors_not_panics() {
+        let manager = Arc::new(ImposterManager::new());
+        let result = manager
+            .create_imposter(
+                serde_json::from_value(stub_config(
+                    19845,
+                    "https",
+                    Some((
+                        "-----BEGIN CERTIFICATE-----\nnonsense\n-----END CERTIFICATE-----",
+                        "bad",
+                    )),
+                ))
+                .unwrap(),
+            )
+            .await;
+        assert!(
+            matches!(
+                result,
+                Err(rift_http_proxy::imposter::ImposterError::Tls(_))
+            ),
+            "invalid cert/key must be a defined Tls error, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn https_cert_without_key_errors() {
+        let (cert, _key) = gen_cert();
+        let manager = Arc::new(ImposterManager::new());
+        let mut cfg = stub_config(19846, "https", None);
+        cfg["cert"] = serde_json::json!(cert); // cert present, key absent
+        let result = manager
+            .create_imposter(serde_json::from_value(cfg).unwrap())
+            .await;
+        assert!(
+            matches!(
+                result,
+                Err(rift_http_proxy::imposter::ImposterError::Tls(_))
+            ),
+            "cert without key must error (both-or-neither), got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn https_partial_server_default_errors() {
+        // Only a default cert (operator forgot --default-tls-key) must error, NOT silently
+        // downgrade to self-signed.
+        let (cert, _key) = gen_cert();
+        let manager = Arc::new(ImposterManager::new().with_tls_defaults(TlsDefaults {
+            default_cert: Some(cert),
+            default_key: None,
+            allow_self_signed: true,
+        }));
+        let result = manager
+            .create_imposter(serde_json::from_value(stub_config(19847, "https", None)).unwrap())
+            .await;
+        assert!(
+            matches!(result, Err(rift_http_proxy::imposter::ImposterError::Tls(_))),
+            "half-configured server default must error, not downgrade to self-signed, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn https_mismatched_valid_pair_never_serves_cleartext() {
+        // cert from one keypair, key from another — both individually valid. rustls does not
+        // cross-validate at build time, so this may bind; the TLS handshake must then fail and the
+        // client must NEVER receive a normal response. Either outcome (creation error OR handshake
+        // failure) is acceptable; serving the stub would not be (criterion 6 + no silent cleartext).
+        let (cert_a, _key_a) = gen_cert();
+        let (_cert_b, key_b) = gen_cert();
+        let manager = Arc::new(ImposterManager::new());
+        let mut cfg = stub_config(19848, "https", None);
+        cfg["cert"] = serde_json::json!(cert_a);
+        cfg["key"] = serde_json::json!(key_b);
+
+        match manager
+            .create_imposter(serde_json::from_value(cfg).unwrap())
+            .await
+        {
+            Err(rift_http_proxy::imposter::ImposterError::Tls(_)) => {} // caught at creation — ideal
+            Ok(port) => {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                let r = tls_client()
+                    .get(format!("https://127.0.0.1:{port}/x"))
+                    .send()
+                    .await;
+                assert!(
+                    r.is_err(),
+                    "mismatched cert/key must fail the TLS handshake, never serve a response"
+                );
+                let _ = manager.delete_imposter(port).await;
+            }
+            Err(other) => panic!("unexpected non-Tls error: {other:?}"),
+        }
+    }
+}
+
 // Issue #239: _rift.fault.tcp must produce a REAL client-observable transport failure (not a 502).
 mod tcp_faults {
     use super::*;

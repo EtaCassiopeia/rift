@@ -19,6 +19,69 @@ use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 use tracing::{debug, error, info};
 
+/// Server-level TLS defaults for HTTPS imposters that don't carry their own cert/key (issue #206).
+#[derive(Debug, Clone)]
+pub struct TlsDefaults {
+    /// Default cert/key PEM applied to any HTTPS imposter without inline `cert`/`key`.
+    pub default_cert: Option<String>,
+    pub default_key: Option<String>,
+    /// Generate an in-memory self-signed cert when no other material is available (Mountebank
+    /// zero-config default). When `false`, an HTTPS imposter without cert material is an error.
+    pub allow_self_signed: bool,
+}
+
+impl Default for TlsDefaults {
+    fn default() -> Self {
+        Self {
+            default_cert: None,
+            default_key: None,
+            allow_self_signed: true,
+        }
+    }
+}
+
+/// Serve one HTTP/1 connection (over plaintext or an already-handshaked TLS stream) until it
+/// completes or the imposter is torn down. Shared by the plain and HTTPS serve paths (issue #206).
+async fn run_http1<I>(
+    io: I,
+    imposter: Arc<Imposter>,
+    addr: std::net::SocketAddr,
+    fault_cell: FaultCell,
+    mut conn_shutdown_rx: broadcast::Receiver<()>,
+    port: u16,
+) where
+    I: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
+{
+    let service = service_fn(move |req| {
+        let imposter = Arc::clone(&imposter);
+        let fault_cell = Arc::clone(&fault_cell);
+        async move {
+            let response = handle_imposter_request(req, imposter, addr).await?;
+            if let Some(kind) = response.extensions().get::<TcpFaultKind>().copied() {
+                *fault_cell.lock() = Some(kind);
+            }
+            Ok::<_, std::convert::Infallible>(response)
+        }
+    });
+    let conn = http1::Builder::new().serve_connection(io, service);
+    tokio::pin!(conn);
+    tokio::select! {
+        res = conn.as_mut() => {
+            if let Err(e) = res {
+                debug!("Connection error on port {}: {}", port, e);
+            }
+        }
+        _ = conn_shutdown_rx.recv() => {
+            // Stop accepting new requests on this connection and close it once any in-flight
+            // request completes (issue #207).
+            conn.as_mut().graceful_shutdown();
+            if let Err(e) = conn.as_mut().await {
+                debug!("Connection error on port {} during shutdown: {}", port, e);
+            }
+        }
+    }
+}
+
 /// Manages the lifecycle of multiple imposters
 pub struct ImposterManager {
     /// Active imposters by port
@@ -27,6 +90,8 @@ pub struct ImposterManager {
     shutdown_tx: broadcast::Sender<()>,
     /// Optional data directory for persistence write-through
     datadir: Option<Arc<PathBuf>>,
+    /// TLS defaults for HTTPS imposters (issue #206)
+    tls_defaults: TlsDefaults,
 }
 
 impl ImposterManager {
@@ -42,7 +107,58 @@ impl ImposterManager {
             imposters: RwLock::new(HashMap::new()),
             shutdown_tx,
             datadir: datadir.map(Arc::new),
+            tls_defaults: TlsDefaults::default(),
         }
+    }
+
+    /// Set the server-level TLS defaults for HTTPS imposters (issue #206).
+    #[must_use]
+    pub fn with_tls_defaults(mut self, tls_defaults: TlsDefaults) -> Self {
+        self.tls_defaults = tls_defaults;
+        self
+    }
+
+    /// Resolve the TLS acceptor for an HTTPS imposter by precedence: inline imposter cert/key →
+    /// server default → self-signed fallback → error (never silent cleartext, issue #206).
+    fn resolve_tls_acceptor(
+        &self,
+        config: &ImposterConfig,
+    ) -> Result<tokio_rustls::TlsAcceptor, ImposterError> {
+        let from_pem = |cert: &str, key: &str| {
+            crate::proxy::tls::tls_acceptor_from_pem(cert.as_bytes(), key.as_bytes())
+                .map_err(|e| ImposterError::Tls(e.to_string()))
+        };
+        match (&config.cert, &config.key) {
+            (Some(cert), Some(key)) => return from_pem(cert, key),
+            (None, None) => {}
+            _ => {
+                return Err(ImposterError::Tls(
+                    "https imposter must provide both `cert` and `key`, or neither".to_string(),
+                ))
+            }
+        }
+        // Same both-or-neither rule for the server default: a half-configured default (e.g. only
+        // --default-tls-cert) must error, not silently downgrade to a self-signed cert.
+        match (
+            &self.tls_defaults.default_cert,
+            &self.tls_defaults.default_key,
+        ) {
+            (Some(cert), Some(key)) => return from_pem(cert, key),
+            (None, None) => {}
+            _ => {
+                return Err(ImposterError::Tls(
+                    "server default TLS must provide both cert and key, or neither".to_string(),
+                ))
+            }
+        }
+        if self.tls_defaults.allow_self_signed {
+            return crate::proxy::tls::generate_self_signed_acceptor()
+                .map_err(|e| ImposterError::Tls(e.to_string()));
+        }
+        Err(ImposterError::Tls(
+            "protocol \"https\" requested but no cert/key provided and self-signed generation is disabled"
+                .to_string(),
+        ))
     }
 
     /// Create and start an imposter
@@ -53,6 +169,14 @@ impl ImposterManager {
             "http" | "https" => {}
             proto => return Err(ImposterError::InvalidProtocol(proto.to_string())),
         }
+
+        // For HTTPS, resolve the per-imposter TLS acceptor up front so a missing/invalid cert
+        // fails loudly at creation rather than silently serving cleartext (issue #206).
+        let tls_acceptor = if config.protocol.eq_ignore_ascii_case("https") {
+            Some(self.resolve_tls_acceptor(&config)?)
+        } else {
+            None
+        };
 
         let bind_host: &str = config.host.as_deref().unwrap_or("0.0.0.0");
         // Determine port - either from config or auto-assign
@@ -105,47 +229,53 @@ impl ImposterManager {
                                 // Each connection watches the shutdown signal so existing
                                 // keep-alive connections are gracefully closed on delete,
                                 // not just new connections (issue #207).
-                                let mut conn_shutdown_rx = conn_shutdown_tx.subscribe();
+                                let conn_shutdown_rx = conn_shutdown_tx.subscribe();
+                                // Per-imposter TLS acceptor is cheap to clone (Arc-backed).
+                                let tls_acceptor = tls_acceptor.clone();
                                 tokio::spawn(async move {
                                     // Per-connection slot for a real transport fault (issue #239);
                                     // armed by the handler, applied by FaultIo on the response write.
                                     let fault_cell: FaultCell = Arc::new(Mutex::new(None));
-                                    let io =
-                                        TokioIo::new(FaultIo::new(stream, Arc::clone(&fault_cell)));
-                                    let service = service_fn(move |req| {
-                                        let imposter = Arc::clone(&imposter);
-                                        let fault_cell = Arc::clone(&fault_cell);
-                                        async move {
-                                            let response =
-                                                handle_imposter_request(req, imposter, addr).await?;
-                                            if let Some(kind) = response
-                                                .extensions()
-                                                .get::<TcpFaultKind>()
-                                                .copied()
-                                            {
-                                                *fault_cell.lock() = Some(kind);
+                                    // FaultIo sits beneath TLS so #239 connection faults still break
+                                    // an HTTPS connection.
+                                    let faulted = FaultIo::new(stream, Arc::clone(&fault_cell));
+                                    match tls_acceptor {
+                                        // Bound the TLS handshake so a stalled/half-open client
+                                        // can't pin the connection task indefinitely.
+                                        Some(acceptor) => match tokio::time::timeout(
+                                            std::time::Duration::from_secs(10),
+                                            acceptor.accept(faulted),
+                                        )
+                                        .await
+                                        {
+                                            Ok(Ok(tls)) => {
+                                                run_http1(
+                                                    TokioIo::new(tls),
+                                                    imposter,
+                                                    addr,
+                                                    fault_cell,
+                                                    conn_shutdown_rx,
+                                                    port,
+                                                )
+                                                .await
                                             }
-                                            Ok::<_, std::convert::Infallible>(response)
-                                        }
-                                    });
-                                    let conn = http1::Builder::new().serve_connection(io, service);
-                                    tokio::pin!(conn);
-                                    tokio::select! {
-                                        res = conn.as_mut() => {
-                                            if let Err(e) = res {
-                                                debug!("Connection error on port {}: {}", port, e);
+                                            Ok(Err(e)) => {
+                                                debug!("TLS handshake failed on port {}: {}", port, e)
                                             }
-                                        }
-                                        _ = conn_shutdown_rx.recv() => {
-                                            // Stop accepting new requests on this connection and
-                                            // close it once any in-flight request completes.
-                                            conn.as_mut().graceful_shutdown();
-                                            if let Err(e) = conn.as_mut().await {
-                                                debug!(
-                                                    "Connection error on port {} during shutdown: {}",
-                                                    port, e
-                                                );
+                                            Err(_) => {
+                                                debug!("TLS handshake timed out on port {}", port)
                                             }
+                                        },
+                                        None => {
+                                            run_http1(
+                                                TokioIo::new(faulted),
+                                                imposter,
+                                                addr,
+                                                fault_cell,
+                                                conn_shutdown_rx,
+                                                port,
+                                            )
+                                            .await
                                         }
                                     }
                                 });

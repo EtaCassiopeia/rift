@@ -68,6 +68,10 @@ impl From<ImposterError> for Response<Full<Bytes>> {
                 StatusCode::SERVICE_UNAVAILABLE,
                 &format!("Persistence error: {msg}"),
             ),
+            ImposterError::Tls(msg) => error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("TLS configuration error: {msg}"),
+            ),
         }
     }
 }
