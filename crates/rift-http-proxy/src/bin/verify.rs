@@ -870,10 +870,27 @@ fn expects_tcp_fault(responses: &[serde_json::Value]) -> bool {
         .is_some()
 }
 
+/// Render an error together with its full `source()` chain. reqwest's top-level `Display` is only
+/// `error sending request for url (...)`; the actual cause (e.g. "connection reset by peer") lives
+/// in the source chain, so classifying on `to_string()` alone misses transport resets (issue #258).
+fn error_chain_string(err: &dyn std::error::Error) -> String {
+    let mut out = err.to_string();
+    let mut source = err.source();
+    while let Some(cause) = source {
+        out.push_str(": ");
+        out.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    out
+}
+
 /// Classify a request error string as a connection-level reset/abort (the signature of a TCP
 /// fault) rather than an application error. Used to PASS `_rift.fault.tcp` stubs (finding #3).
+/// Pass the full chain from `error_chain_string` — the reset cause is not in reqwest's top Display.
 fn is_transport_reset_error(err: &str) -> bool {
     let e = err.to_lowercase();
+    // `connection closed`/`incomplete message` can't distinguish an intentional reset from an
+    // imposter crash mid-response; the dynamic path's control-request health check guards that.
     e.contains("connection reset")
         || e.contains("connection closed")
         || e.contains("connection aborted")
@@ -1585,7 +1602,7 @@ async fn execute_test(
             }
         }
         Err(e) => {
-            let error_msg = e.to_string();
+            let error_msg = error_chain_string(&e);
             // A `_rift.fault.tcp` stub is expected to reset the connection (issue #239): a
             // transport-level error is the PASS condition, not a failure (finding #3).
             let expected_reset = is_expected_reset(test_case.expects_transport_error, &error_msg);
@@ -2161,6 +2178,40 @@ mod verify_tests {
     #[test]
     fn is_transport_reset_error_ignores_status_like_errors() {
         assert!(!is_transport_reset_error("builder error: invalid URL"));
+    }
+
+    #[test]
+    fn error_chain_string_walks_source() {
+        use std::fmt;
+        #[derive(Debug)]
+        struct Outer(std::io::Error);
+        impl fmt::Display for Outer {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, "error sending request for url (http://127.0.0.1:1/x)")
+            }
+        }
+        impl std::error::Error for Outer {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.0)
+            }
+        }
+        let err = Outer(std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "connection reset by peer (os error 54)",
+        ));
+        let chain = error_chain_string(&err);
+        // The top-level Display alone is NOT classifiable; the chained cause makes it so.
+        assert!(!is_transport_reset_error(&err.to_string()));
+        assert!(chain.contains("connection reset by peer"));
+        assert!(is_transport_reset_error(&chain));
+    }
+
+    #[test]
+    fn is_transport_reset_error_rejects_connection_refused_chain() {
+        // A down imposter (connection refused) must NOT be mistaken for a reset (no false PASS).
+        let refused = "error sending request for url (http://127.0.0.1:1/x): \
+                       tcp connect error: connection refused (os error 61)";
+        assert!(!is_transport_reset_error(refused));
     }
 
     // ── #4a/#4b: URL construction ──────────────────────────────────────────

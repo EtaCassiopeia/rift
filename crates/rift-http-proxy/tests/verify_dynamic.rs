@@ -185,3 +185,78 @@ async fn dynamic_skipped_without_flag() {
         "no proxy assertion should run without the flag:\n{stdout}"
     );
 }
+
+#[tokio::test]
+async fn verify_dynamic_asserts_tcp_fault() {
+    // Issue #258: a real `_rift.fault.tcp` reset surfaces as a reqwest error whose top-level
+    // Display is only "error sending request for url (...)"; the verifier must classify it as a
+    // transport reset (via the source chain) and report PASS, not FAIL.
+    let manager = Arc::new(ImposterManager::new());
+    create(
+        &manager,
+        serde_json::json!({
+            "port": 19891, "protocol": "http",
+            "stubs": [{
+                "predicates": [{ "equals": { "path": "/reset" } }],
+                "responses": [{ "is": { "statusCode": 200 },
+                    "_rift": { "fault": { "tcp": "CONNECTION_RESET_BY_PEER" } } }]
+            }]
+        }),
+    )
+    .await;
+
+    let admin = start_admin(12701, manager).await;
+    let out = run_verify(&admin).await;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert!(
+        out.status.success(),
+        "tcp-fault assertion should PASS; stdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        stdout.contains("tcp reset"),
+        "missing tcp reset check:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("FAIL"),
+        "tcp reset must not FAIL:\n{stdout}"
+    );
+}
+
+#[tokio::test]
+async fn verify_normal_pass_asserts_tcp_fault() {
+    // Issue #258: the NORMAL verification pass (no --verify-dynamic) also classifies a real
+    // `_rift.fault.tcp` reset via execute_test's Err arm — guards that fix site against regression.
+    let manager = Arc::new(ImposterManager::new());
+    create(
+        &manager,
+        serde_json::json!({
+            "port": 19901, "protocol": "http",
+            "stubs": [{
+                "predicates": [{ "equals": { "path": "/reset" } }],
+                "responses": [{ "is": { "statusCode": 200 },
+                    "_rift": { "fault": { "tcp": "CONNECTION_RESET_BY_PEER" } } }]
+            }]
+        }),
+    )
+    .await;
+
+    let admin = start_admin(12711, manager).await;
+    let out = Command::new(BIN)
+        .args(["--admin-url", &admin]) // normal mode: no --skip-dynamic, no --verify-dynamic
+        .output()
+        .await
+        .expect("run rift-verify");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert!(
+        out.status.success(),
+        "normal-pass tcp-fault must PASS (reset is the expected outcome); stdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !stdout.contains("FAIL"),
+        "tcp reset must not FAIL in the normal pass:\n{stdout}"
+    );
+}
