@@ -260,3 +260,77 @@ async fn verify_normal_pass_asserts_tcp_fault() {
         "tcp reset must not FAIL in the normal pass:\n{stdout}"
     );
 }
+
+#[tokio::test]
+async fn verify_normal_pass_accepts_date_template_body() {
+    // Issue #259: a stub whose is.body carries Rift date templates ({{NOW}}/{{DAYS+N}}) is
+    // expanded by the engine; the verifier must not assert the literal template body and FAIL.
+    let manager = Arc::new(ImposterManager::new());
+    create(
+        &manager,
+        serde_json::json!({
+            "port": 19911, "protocol": "http",
+            "stubs": [{
+                "predicates": [{ "equals": { "path": "/token" } }],
+                "responses": [{ "is": { "statusCode": 200,
+                    "body": { "issued": "{{NOW}}", "expires": "{{DAYS+30}}", "kind": "token" } } }]
+            }]
+        }),
+    )
+    .await;
+
+    let admin = start_admin(12721, manager).await;
+    let out = Command::new(BIN)
+        .args(["--admin-url", &admin]) // normal verification pass
+        .output()
+        .await
+        .expect("run rift-verify");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert!(
+        out.status.success(),
+        "date-template body must not FAIL; stdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !stdout.contains("FAIL"),
+        "no body-mismatch FAIL for template body:\n{stdout}"
+    );
+}
+
+#[tokio::test]
+async fn verify_normal_pass_accepts_plaintext_template_body() {
+    // Issue #259: a NON-JSON (plain-text) body carrying a template expands to a bare string that
+    // is not valid JSON, so it exercises verify_response's plain-text-compare branch — which must
+    // also skip the literal assertion rather than report a body mismatch.
+    let manager = Arc::new(ImposterManager::new());
+    create(
+        &manager,
+        serde_json::json!({
+            "port": 19921, "protocol": "http",
+            "stubs": [{
+                "predicates": [{ "equals": { "path": "/snapshot" } }],
+                "responses": [{ "is": { "statusCode": 200, "body": "snapshot taken at {{NOW}}" } }]
+            }]
+        }),
+    )
+    .await;
+
+    let admin = start_admin(12731, manager).await;
+    let out = Command::new(BIN)
+        .args(["--admin-url", &admin])
+        .output()
+        .await
+        .expect("run rift-verify");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert!(
+        out.status.success(),
+        "plain-text template body must not FAIL; stdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !stdout.contains("FAIL"),
+        "no mismatch FAIL for plain-text template body:\n{stdout}"
+    );
+}

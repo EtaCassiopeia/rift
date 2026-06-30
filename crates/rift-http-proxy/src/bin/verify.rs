@@ -1722,7 +1722,8 @@ fn verify_response(
                         serde_json::Value::String(s) => s.clone(),
                         _ => expected_normalized.to_string(),
                     };
-                    if actual_text != &expected_plain {
+                    // A template body is expanded by the engine; the literal can't be asserted.
+                    if !contains_template(&expected_plain) && actual_text != &expected_plain {
                         failures.push(FailureReason::BodyMismatch {
                             expected: expected_plain,
                             actual: actual_text.clone(),
@@ -1758,11 +1759,21 @@ fn normalize_json_value(value: &serde_json::Value) -> serde_json::Value {
     }
 }
 
+/// True when a string carries a Rift `{{...}}` template (`{{NOW}}`, `{{DAYS+N}}`, `{{MONTHS+N}}`,
+/// #245). The engine expands these, so the literal source value cannot be asserted (issue #259).
+/// Requires a `{{` followed by a later `}}` so stray/reversed braces (`}} x {{`) don't suppress a
+/// real body assertion.
+fn contains_template(s: &str) -> bool {
+    s.find("{{")
+        .is_some_and(|open| s[open + 2..].contains("}}"))
+}
+
 /// Checks if two JSON values are semantically equal.
 /// This handles:
 /// - Different key ordering in objects
 /// - Compact vs pretty-printed formatting
 /// - String values that contain JSON (parses and compares them)
+/// - `{{...}}` template strings on the expected side (wildcards — the engine expands them)
 fn json_matches(expected: &serde_json::Value, actual: &serde_json::Value) -> bool {
     match (expected, actual) {
         (serde_json::Value::Object(exp_obj), serde_json::Value::Object(act_obj)) => {
@@ -1784,6 +1795,10 @@ fn json_matches(expected: &serde_json::Value, actual: &serde_json::Value) -> boo
                     .zip(act_arr.iter())
                     .all(|(e, a)| json_matches(e, a))
         }
+        // A `{{...}}` Rift template (e.g. `{{NOW}}`, `{{DAYS+N}}`, #245/#259) is expanded by the
+        // engine, so the literal source value can't be asserted — treat it as a wildcard. Sibling
+        // (non-template) fields are still compared by the surrounding object/array recursion.
+        (serde_json::Value::String(exp_str), _) if contains_template(exp_str) => true,
         // Handle case where one side is a JSON string that needs parsing
         (serde_json::Value::String(exp_str), actual) => {
             // Try to parse the expected string as JSON
@@ -2212,6 +2227,67 @@ mod verify_tests {
         let refused = "error sending request for url (http://127.0.0.1:1/x): \
                        tcp connect error: connection refused (os error 61)";
         assert!(!is_transport_reset_error(refused));
+    }
+
+    // ── #259: date-template bodies are not asserted literally ───────────────
+    #[test]
+    fn contains_template_detects_rift_templates() {
+        assert!(contains_template("{{NOW}}"));
+        assert!(contains_template("expires {{DAYS+30}} from now"));
+        assert!(contains_template("{{MONTHS+12}}"));
+        assert!(!contains_template("2026-06-30T00:00:00+00:00"));
+        assert!(!contains_template("plain body"));
+        // Stray / reversed braces must NOT be treated as a template (no over-suppression).
+        assert!(!contains_template("}} literal {{"));
+        assert!(!contains_template("only {{ open"));
+        assert!(!contains_template("only }} close"));
+    }
+
+    #[test]
+    fn json_matches_template_in_array_element() {
+        // The wildcard also applies inside arrays; a non-template element is still compared.
+        assert!(json_matches(
+            &serde_json::json!(["{{NOW}}", "fixed"]),
+            &serde_json::json!(["2026-06-30T00:00:00+00:00", "fixed"])
+        ));
+        assert!(!json_matches(
+            &serde_json::json!(["{{NOW}}", "fixed"]),
+            &serde_json::json!(["2026-06-30T00:00:00+00:00", "WRONG"])
+        ));
+    }
+
+    #[test]
+    fn json_matches_template_string_is_wildcard() {
+        // An expected `{{NOW}}` matches the engine's expanded timestamp.
+        assert!(json_matches(
+            &serde_json::json!("{{NOW}}"),
+            &serde_json::json!("2026-06-30T16:06:39.878853+00:00")
+        ));
+    }
+
+    #[test]
+    fn json_matches_template_in_object_field() {
+        let expected = serde_json::json!({
+            "issued": "{{NOW}}", "expires": "{{DAYS+30}}", "kind": "token"
+        });
+        // Template fields are wildcards, but a non-template sibling is still compared.
+        assert!(json_matches(
+            &expected,
+            &serde_json::json!({ "issued": "2026-06-30T00:00:00+00:00", "expires": "2026-07-30T00:00:00+00:00", "kind": "token" })
+        ));
+        assert!(!json_matches(
+            &expected,
+            &serde_json::json!({ "issued": "2026-06-30T00:00:00+00:00", "expires": "2026-07-30T00:00:00+00:00", "kind": "WRONG" })
+        ));
+    }
+
+    #[test]
+    fn json_matches_non_template_still_strict() {
+        // Regression: a plain value mismatch must still fail.
+        assert!(!json_matches(
+            &serde_json::json!({ "a": "x" }),
+            &serde_json::json!({ "a": "y" })
+        ));
     }
 
     // ── #4a/#4b: URL construction ──────────────────────────────────────────
