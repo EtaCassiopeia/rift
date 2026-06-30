@@ -97,6 +97,12 @@ struct Args {
     /// and asserts deterministic `_rift.fault` outcomes. Off by default (safe-skip preserved).
     #[arg(long)]
     verify_dynamic: bool,
+
+    /// Fallback correlated-isolation header name (issue #260): used only when the imposter's
+    /// `flowIdSource` isn't discoverable from `GET /imposters`. A detected per-imposter header takes
+    /// precedence, so this never clobbers a correctly-detected, differently-named imposter.
+    #[arg(long)]
+    flow_id_header: Option<String>,
 }
 
 // ============================================================================
@@ -130,18 +136,19 @@ struct ImposterDetails {
     name: Option<String>,
     #[serde(default)]
     stubs: Vec<Stub>,
-    /// Raw `flowState` block (issue #223). Parsed loosely so the verifier doesn't couple to the
-    /// engine's full config schema — we only need `mountebankStateMapping.flowIdSource`.
-    #[serde(default)]
-    flow_state: Option<serde_json::Value>,
+    /// Raw `_rift` extensions block. `GET /imposters` exposes the flow-state config under
+    /// `_rift.flowState` (issue #260); parsed loosely — we only need `flowIdSource`.
+    #[serde(default, rename = "_rift")]
+    rift: Option<serde_json::Value>,
 }
 
 impl ImposterDetails {
     /// The header name carrying the correlation/space id, when this imposter isolates flows by a
     /// request header (`flowIdSource: "header:<Name>"`). `None` for the default `imposter_port`.
     fn flow_header(&self) -> Option<String> {
-        self.flow_state
+        self.rift
             .as_ref()?
+            .get("flowState")?
             .get("mountebankStateMapping")?
             .get("flowIdSource")?
             .as_str()
@@ -154,6 +161,10 @@ impl ImposterDetails {
 struct Stub {
     #[serde(default)]
     id: Option<String>,
+    /// Correlated-isolation partition (issue #223): when set, the stub is eligible only for the
+    /// flow id equal to this. The verifier must drive it with this value (issue #260).
+    #[serde(default)]
+    space: Option<String>,
     #[serde(default)]
     predicates: Vec<serde_json::Value>,
     #[serde(default)]
@@ -181,8 +192,11 @@ struct TestCase {
     /// Stub injects a `_rift.fault.tcp` reset (issue #239): a connection error is the expected
     /// outcome, not a failure (finding #3).
     expects_transport_error: bool,
-    /// Correlated-isolation header name to send (issue #223), value = `--space`.
+    /// Correlated-isolation header name to send (issue #223).
     flow_header: Option<String>,
+    /// The stub's own `space` partition, if any (issue #260): sent as the flow header value so a
+    /// space-gated stub is eligible. `None` ⇒ use the global `--space`.
+    flow_space: Option<String>,
 }
 
 #[derive(Debug)]
@@ -339,7 +353,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
 
-        let flow_header = imposter.flow_header();
+        let flow_header =
+            resolve_flow_header(imposter.flow_header(), args.flow_id_header.as_deref());
         for (stub_index, stub) in imposter.stubs.iter().enumerate() {
             let test_cases = generate_test_cases(
                 stub_index,
@@ -667,6 +682,7 @@ fn generate_test_cases(
     // Parse predicates to build test request (needed for all cases)
     let (method, path, headers, query_params, body) = parse_predicates(&stub.predicates);
     let flow_header = flow_header.map(str::to_string);
+    let flow_space = stub.space.clone();
 
     // No-match stubs (e.g., "DONT MATCH THIS") are designed to never match any request.
     // We mark them as passed because:
@@ -691,6 +707,36 @@ fn generate_test_cases(
             protocol: protocol.to_string(),
             expects_transport_error: false,
             flow_header: flow_header.clone(),
+            flow_space: flow_space.clone(),
+        });
+        return test_cases;
+    }
+
+    // Correlated isolation declared (stub has a `space`) but the verifier couldn't resolve the
+    // flowIdSource header — driving it would silently mis-route. Surface it as a visible skip
+    // rather than running a degraded check (issue #260).
+    if flow_space.is_some() && flow_header.is_none() {
+        test_cases.push(TestCase {
+            stub_index,
+            stub_id: stub.id.clone(),
+            method,
+            path,
+            headers,
+            query_params,
+            body,
+            expected_status: 200,
+            expected_headers: HashMap::new(),
+            expected_body: None,
+            is_dynamic,
+            skip_reason: Some(
+                "stub declares `space` but flowIdSource is not discoverable — pass --flow-id-header"
+                    .to_string(),
+            ),
+            is_no_match_stub: false,
+            protocol: protocol.to_string(),
+            expects_transport_error,
+            flow_header: flow_header.clone(),
+            flow_space,
         });
         return test_cases;
     }
@@ -714,6 +760,7 @@ fn generate_test_cases(
             protocol: protocol.to_string(),
             expects_transport_error,
             flow_header: flow_header.clone(),
+            flow_space: flow_space.clone(),
         });
         return test_cases;
     }
@@ -739,6 +786,7 @@ fn generate_test_cases(
         protocol: protocol.to_string(),
         expects_transport_error,
         flow_header,
+        flow_space,
     });
 
     test_cases
@@ -933,6 +981,13 @@ fn flow_id_header_name(flow_id_source: &str) -> Option<String> {
         .strip_prefix("header:")
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
+}
+
+/// Resolve the correlated-isolation header name for an imposter (issue #260): prefer what the
+/// imposter exposes; fall back to the `--flow-id-header` override only when detection is
+/// unavailable, so a global override never clobbers a correctly-detected, differently-named imposter.
+fn resolve_flow_header(detected: Option<String>, fallback: Option<&str>) -> Option<String> {
+    detected.or_else(|| fallback.map(str::to_string))
 }
 
 fn extract_expected_response(
@@ -1520,9 +1575,11 @@ async fn execute_test(
         request = request.header(name, value);
     }
 
-    // Correlated-isolation header (issue #223): route this request to the verifier's space.
+    // Correlated-isolation header (issue #223): route this request to the stub's own space when it
+    // declares one (issue #260), else the global `--space`.
     if let Some(flow_header) = &test_case.flow_header {
-        request = request.header(flow_header, space);
+        let value = test_case.flow_space.as_deref().unwrap_or(space);
+        request = request.header(flow_header, value);
     }
 
     // Add body if present
@@ -2341,14 +2398,14 @@ mod verify_tests {
     fn imposter_flow_header_navigates_flow_state() {
         let with_header: ImposterDetails = serde_json::from_value(json!({
             "port": 4500, "protocol": "http", "stubs": [],
-            "flowState": { "mountebankStateMapping": { "flowIdSource": "header:X-Mock-Space" } }
+            "_rift": { "flowState": { "mountebankStateMapping": { "flowIdSource": "header:X-Mock-Space" } } }
         }))
         .unwrap();
         assert_eq!(with_header.flow_header().as_deref(), Some("X-Mock-Space"));
 
         let port_source: ImposterDetails = serde_json::from_value(json!({
             "port": 4500, "protocol": "http", "stubs": [],
-            "flowState": { "mountebankStateMapping": { "flowIdSource": "imposter_port" } }
+            "_rift": { "flowState": { "mountebankStateMapping": { "flowIdSource": "imposter_port" } } }
         }))
         .unwrap();
         assert_eq!(port_source.flow_header(), None);
@@ -2358,5 +2415,60 @@ mod verify_tests {
         }))
         .unwrap();
         assert_eq!(no_flow_state.flow_header(), None);
+    }
+
+    #[test]
+    fn test_case_carries_stub_space() {
+        // Issue #260: a space-gated stub must drive requests with its own space, not the global one.
+        let with_space: Stub = serde_json::from_value(json!({
+            "space": "alice",
+            "predicates": [{ "equals": { "path": "/data" } }],
+            "responses": [{ "is": { "statusCode": 200, "body": "A" } }]
+        }))
+        .unwrap();
+        let cases = generate_test_cases(0, &with_space, false, "http", Some("X-Mock-Space"));
+        assert_eq!(cases[0].flow_space.as_deref(), Some("alice"));
+
+        let no_space: Stub = serde_json::from_value(json!({
+            "predicates": [{ "equals": { "path": "/data" } }],
+            "responses": [{ "is": { "statusCode": 200, "body": "A" } }]
+        }))
+        .unwrap();
+        let cases = generate_test_cases(0, &no_space, false, "http", Some("X-Mock-Space"));
+        assert_eq!(cases[0].flow_space, None);
+    }
+
+    #[test]
+    fn resolve_flow_header_prefers_detection_then_override() {
+        // Detection wins; the --flow-id-header override only fills the gap (no clobber).
+        assert_eq!(
+            resolve_flow_header(Some("X-Detected".to_string()), Some("X-Override")),
+            Some("X-Detected".to_string())
+        );
+        assert_eq!(
+            resolve_flow_header(None, Some("X-Override")),
+            Some("X-Override".to_string())
+        );
+        assert_eq!(resolve_flow_header(None, None), None);
+    }
+
+    #[test]
+    fn space_stub_skipped_when_flow_header_unresolved() {
+        let stub: Stub = serde_json::from_value(json!({
+            "space": "alice",
+            "predicates": [{ "equals": { "path": "/data" } }],
+            "responses": [{ "is": { "statusCode": 200, "body": "A" } }]
+        }))
+        .unwrap();
+        // No flow header resolved → the space-gated stub is a visible SKIP, not a silent degraded run.
+        let cases = generate_test_cases(0, &stub, false, "http", None);
+        assert!(cases[0]
+            .skip_reason
+            .as_deref()
+            .unwrap_or("")
+            .contains("flowIdSource"));
+        // With a header resolved, it is verified normally (no skip).
+        let cases = generate_test_cases(0, &stub, false, "http", Some("X-Mock-Space"));
+        assert!(cases[0].skip_reason.is_none());
     }
 }
