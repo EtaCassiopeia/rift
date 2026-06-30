@@ -43,8 +43,11 @@ pub use types::{
 #[allow(unused_imports)]
 pub use core::Imposter;
 
+// Re-export the imposter request handler (single-port gateway dispatch, issue #212)
+pub use handler::handle_imposter_request;
+
 // Re-export manager
-pub use manager::ImposterManager;
+pub use manager::{ImposterManager, TlsDefaults};
 
 // Re-export predicate utilities (used in tests and for external consumers)
 #[allow(unused_imports)]

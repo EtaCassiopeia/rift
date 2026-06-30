@@ -704,6 +704,12 @@ pub struct ImposterConfig {
     pub host: Option<String>,
     #[serde(default = "default_protocol")]
     pub protocol: String,
+    /// Inline PEM certificate for `protocol: "https"` (Mountebank-compatible). Paired with `key`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cert: Option<String>,
+    /// Inline PEM private key for `protocol: "https"` (Mountebank-compatible). Paired with `cert`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(default)]
@@ -1025,6 +1031,8 @@ pub enum ImposterError {
     StubIdConflict(String),
     #[error("Failed to persist imposter: {0}")]
     PersistError(String),
+    #[error("TLS configuration error: {0}")]
+    Tls(String),
 }
 
 #[cfg(test)]

@@ -133,6 +133,19 @@ struct Cli {
     /// RC file with default flag values (Mountebank compatibility; partial support — port/host/loglevel only)
     #[arg(long, value_name = "FILE")]
     rcfile: Option<PathBuf>,
+
+    /// Default TLS certificate (PEM) for HTTPS imposters that don't carry their own (issue #206)
+    #[arg(long, value_name = "FILE", env = "RIFT_DEFAULT_TLS_CERT")]
+    default_tls_cert: Option<PathBuf>,
+
+    /// Default TLS private key (PEM), paired with --default-tls-cert
+    #[arg(long, value_name = "FILE", env = "RIFT_DEFAULT_TLS_KEY")]
+    default_tls_key: Option<PathBuf>,
+
+    /// Disable the self-signed fallback: an HTTPS imposter without cert material becomes an error
+    /// instead of serving with a generated self-signed cert (issue #206)
+    #[arg(long, env = "RIFT_NO_SELF_SIGNED_TLS")]
+    no_self_signed_tls: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -268,7 +281,28 @@ fn run_mountebank_mode(cli: Cli) -> Result<(), anyhow::Error> {
 
     runtime.block_on(async move {
         // Create imposter manager (with write-through if --datadir is set)
-        let manager = Arc::new(ImposterManager::with_datadir(cli.datadir.clone()));
+        // Per-imposter HTTPS defaults (issue #206): an optional server-wide cert/key applied to
+        // HTTPS imposters without their own, and whether to fall back to a generated self-signed.
+        let tls_defaults = {
+            let default_cert = cli
+                .default_tls_cert
+                .as_ref()
+                .map(std::fs::read_to_string)
+                .transpose()?;
+            let default_key = cli
+                .default_tls_key
+                .as_ref()
+                .map(std::fs::read_to_string)
+                .transpose()?;
+            imposter::TlsDefaults {
+                default_cert,
+                default_key,
+                allow_self_signed: !cli.no_self_signed_tls,
+            }
+        };
+        let manager = Arc::new(
+            ImposterManager::with_datadir(cli.datadir.clone()).with_tls_defaults(tls_defaults),
+        );
 
         // Load imposters from configfile if provided
         if let Some(ref configfile) = cli.configfile {

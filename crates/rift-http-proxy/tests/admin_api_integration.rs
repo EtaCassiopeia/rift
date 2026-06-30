@@ -493,6 +493,238 @@ async fn stub_by_id_admin_endpoints() {
     let _ = manager.delete_imposter(19776).await;
 }
 
+// Issue #206: an imposter declared `protocol: "https"` terminates TLS on its own port.
+mod https {
+    use super::*;
+    use rift_http_proxy::imposter::TlsDefaults;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    fn gen_cert() -> (String, String) {
+        let c = rcgen::generate_simple_self_signed(vec![
+            "localhost".to_string(),
+            "127.0.0.1".to_string(),
+        ])
+        .unwrap();
+        (c.cert.pem(), c.key_pair.serialize_pem())
+    }
+
+    fn stub_config(port: u16, protocol: &str, cert: Option<(&str, &str)>) -> serde_json::Value {
+        let mut cfg = serde_json::json!({
+            "port": port, "protocol": protocol,
+            "stubs": [{"responses": [{"is": {"statusCode": 200, "body": "secure-ok"}}]}]
+        });
+        if let Some((cert, key)) = cert {
+            cfg["cert"] = serde_json::json!(cert);
+            cfg["key"] = serde_json::json!(key);
+        }
+        cfg
+    }
+
+    fn tls_client() -> reqwest::Client {
+        reqwest::Client::builder()
+            .danger_accept_invalid_certs(true) // self-signed / test certs
+            .timeout(Duration::from_secs(3))
+            .build()
+            .unwrap()
+    }
+
+    async fn serve(manager: &Arc<ImposterManager>, cfg: serde_json::Value) {
+        manager
+            .create_imposter(serde_json::from_value(cfg).unwrap())
+            .await
+            .expect("create imposter");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    #[tokio::test]
+    async fn https_imposter_with_inline_cert_serves_tls() {
+        let (cert, key) = gen_cert();
+        let manager = Arc::new(ImposterManager::new());
+        serve(&manager, stub_config(19840, "https", Some((&cert, &key)))).await;
+
+        let body = tls_client()
+            .get("https://127.0.0.1:19840/x")
+            .send()
+            .await
+            .expect("TLS request should succeed")
+            .text()
+            .await
+            .unwrap();
+        assert_eq!(body, "secure-ok");
+        let _ = manager.delete_imposter(19840).await;
+    }
+
+    #[tokio::test]
+    async fn http_imposter_unchanged() {
+        let manager = Arc::new(ImposterManager::new());
+        serve(&manager, stub_config(19841, "http", None)).await;
+        let body = reqwest::get("http://127.0.0.1:19841/x")
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert_eq!(body, "secure-ok", "plain http imposter unaffected");
+        let _ = manager.delete_imposter(19841).await;
+    }
+
+    #[tokio::test]
+    async fn https_zero_config_uses_self_signed() {
+        // No cert/key, default manager (self-signed enabled) → still serves over TLS.
+        let manager = Arc::new(ImposterManager::new());
+        serve(&manager, stub_config(19842, "https", None)).await;
+        let body = tls_client()
+            .get("https://127.0.0.1:19842/x")
+            .send()
+            .await
+            .expect("zero-config https should serve via self-signed cert")
+            .text()
+            .await
+            .unwrap();
+        assert_eq!(body, "secure-ok");
+        let _ = manager.delete_imposter(19842).await;
+    }
+
+    #[tokio::test]
+    async fn https_uses_server_default_cert() {
+        // Self-signed DISABLED + a server default cert → the default must be used (proves the
+        // default path, not the self-signed fallback).
+        let (cert, key) = gen_cert();
+        let manager = Arc::new(ImposterManager::new().with_tls_defaults(TlsDefaults {
+            default_cert: Some(cert),
+            default_key: Some(key),
+            allow_self_signed: false,
+        }));
+        serve(&manager, stub_config(19843, "https", None)).await;
+        let body = tls_client()
+            .get("https://127.0.0.1:19843/x")
+            .send()
+            .await
+            .expect("server-default cert should serve the https imposter")
+            .text()
+            .await
+            .unwrap();
+        assert_eq!(body, "secure-ok");
+        let _ = manager.delete_imposter(19843).await;
+    }
+
+    #[tokio::test]
+    async fn https_no_cert_and_self_signed_disabled_errors() {
+        let manager = Arc::new(ImposterManager::new().with_tls_defaults(TlsDefaults {
+            default_cert: None,
+            default_key: None,
+            allow_self_signed: false,
+        }));
+        let result = manager
+            .create_imposter(serde_json::from_value(stub_config(19844, "https", None)).unwrap())
+            .await;
+        assert!(
+            matches!(
+                result,
+                Err(rift_http_proxy::imposter::ImposterError::Tls(_))
+            ),
+            "https with no cert + self-signed disabled must error, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn https_invalid_cert_errors_not_panics() {
+        let manager = Arc::new(ImposterManager::new());
+        let result = manager
+            .create_imposter(
+                serde_json::from_value(stub_config(
+                    19845,
+                    "https",
+                    Some((
+                        "-----BEGIN CERTIFICATE-----\nnonsense\n-----END CERTIFICATE-----",
+                        "bad",
+                    )),
+                ))
+                .unwrap(),
+            )
+            .await;
+        assert!(
+            matches!(
+                result,
+                Err(rift_http_proxy::imposter::ImposterError::Tls(_))
+            ),
+            "invalid cert/key must be a defined Tls error, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn https_cert_without_key_errors() {
+        let (cert, _key) = gen_cert();
+        let manager = Arc::new(ImposterManager::new());
+        let mut cfg = stub_config(19846, "https", None);
+        cfg["cert"] = serde_json::json!(cert); // cert present, key absent
+        let result = manager
+            .create_imposter(serde_json::from_value(cfg).unwrap())
+            .await;
+        assert!(
+            matches!(
+                result,
+                Err(rift_http_proxy::imposter::ImposterError::Tls(_))
+            ),
+            "cert without key must error (both-or-neither), got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn https_partial_server_default_errors() {
+        // Only a default cert (operator forgot --default-tls-key) must error, NOT silently
+        // downgrade to self-signed.
+        let (cert, _key) = gen_cert();
+        let manager = Arc::new(ImposterManager::new().with_tls_defaults(TlsDefaults {
+            default_cert: Some(cert),
+            default_key: None,
+            allow_self_signed: true,
+        }));
+        let result = manager
+            .create_imposter(serde_json::from_value(stub_config(19847, "https", None)).unwrap())
+            .await;
+        assert!(
+            matches!(result, Err(rift_http_proxy::imposter::ImposterError::Tls(_))),
+            "half-configured server default must error, not downgrade to self-signed, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn https_mismatched_valid_pair_never_serves_cleartext() {
+        // cert from one keypair, key from another — both individually valid. rustls does not
+        // cross-validate at build time, so this may bind; the TLS handshake must then fail and the
+        // client must NEVER receive a normal response. Either outcome (creation error OR handshake
+        // failure) is acceptable; serving the stub would not be (criterion 6 + no silent cleartext).
+        let (cert_a, _key_a) = gen_cert();
+        let (_cert_b, key_b) = gen_cert();
+        let manager = Arc::new(ImposterManager::new());
+        let mut cfg = stub_config(19848, "https", None);
+        cfg["cert"] = serde_json::json!(cert_a);
+        cfg["key"] = serde_json::json!(key_b);
+
+        match manager
+            .create_imposter(serde_json::from_value(cfg).unwrap())
+            .await
+        {
+            Err(rift_http_proxy::imposter::ImposterError::Tls(_)) => {} // caught at creation — ideal
+            Ok(port) => {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                let r = tls_client()
+                    .get(format!("https://127.0.0.1:{port}/x"))
+                    .send()
+                    .await;
+                assert!(
+                    r.is_err(),
+                    "mismatched cert/key must fail the TLS handshake, never serve a response"
+                );
+                let _ = manager.delete_imposter(port).await;
+            }
+            Err(other) => panic!("unexpected non-Tls error: {other:?}"),
+        }
+    }
+}
+
 // Issue #239: _rift.fault.tcp must produce a REAL client-observable transport failure (not a 502).
 mod tcp_faults {
     use super::*;
@@ -959,5 +1191,207 @@ mod date_templates {
             "defaultResponse body must expand date templates too, got {body}"
         );
         let _ = manager.delete_imposter(19861).await;
+    }
+}
+
+// Issue #212: reach imposters through the single admin port via `/__rift/:port/<path>`.
+mod gateway {
+    use super::*;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    /// Start an imposter (with the given stubs) + an AdminApiServer; returns (manager, admin_base).
+    async fn setup(
+        imposter_port: u16,
+        admin_port: u16,
+        stubs: serde_json::Value,
+    ) -> (Arc<ImposterManager>, String) {
+        let manager = Arc::new(ImposterManager::new());
+        manager
+            .create_imposter(
+                serde_json::from_value(serde_json::json!({
+                    "port": imposter_port, "protocol": "http", "stubs": stubs
+                }))
+                .unwrap(),
+            )
+            .await
+            .expect("create imposter");
+        let server = rift_http_proxy::admin_api::AdminApiServer::new(
+            format!("127.0.0.1:{admin_port}").parse().unwrap(),
+            manager.clone(),
+            None,
+        );
+        tokio::spawn(server.run());
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        (manager, format!("http://127.0.0.1:{admin_port}"))
+    }
+
+    #[tokio::test]
+    async fn gateway_routes_to_imposter() {
+        let (manager, admin) = setup(
+            19850,
+            12750,
+            serde_json::json!([{
+                "predicates": [{"equals": {"path": "/api/data"}}],
+                "responses": [{"is": {"statusCode": 200, "body": "routed"}}]
+            }]),
+        )
+        .await;
+
+        // Hit the imposter through the admin port — the imposter must see path /api/data.
+        let resp = reqwest::get(format!("{admin}/__rift/19850/api/data"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        assert_eq!(resp.text().await.unwrap(), "routed");
+        let _ = manager.delete_imposter(19850).await;
+    }
+
+    #[tokio::test]
+    async fn gateway_preserves_method_and_query() {
+        let (manager, admin) = setup(
+            19851,
+            12751,
+            serde_json::json!([{
+                "predicates": [{"equals": {"method": "POST", "path": "/submit", "query": {"q": "1"}}}],
+                "responses": [{"is": {"statusCode": 201, "body": "posted"}}]
+            }]),
+        )
+        .await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("{admin}/__rift/19851/submit?q=1"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 201, "method + query must reach the imposter");
+        assert_eq!(resp.text().await.unwrap(), "posted");
+        let _ = manager.delete_imposter(19851).await;
+    }
+
+    #[tokio::test]
+    async fn gateway_unknown_port_404() {
+        let (manager, admin) = setup(
+            19852,
+            12752,
+            serde_json::json!([{"responses": [{"is": {"statusCode": 200, "body": "x"}}]}]),
+        )
+        .await;
+        let resp = reqwest::get(format!("{admin}/__rift/59999/anything"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404, "no imposter on that port → 404");
+        let _ = manager.delete_imposter(19852).await;
+    }
+
+    #[tokio::test]
+    async fn gateway_forwards_post_body() {
+        let (manager, admin) = setup(
+            19854,
+            12754,
+            serde_json::json!([{
+                "predicates": [{"equals": {"method": "POST", "path": "/echo", "body": "hello-body"}}],
+                "responses": [{"is": {"statusCode": 200, "body": "got-body"}}]
+            }]),
+        )
+        .await;
+        let resp = reqwest::Client::new()
+            .post(format!("{admin}/__rift/19854/echo"))
+            .body("hello-body")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.text().await.unwrap(),
+            "got-body",
+            "the POST body must reach the imposter through the gateway"
+        );
+        let _ = manager.delete_imposter(19854).await;
+    }
+
+    #[tokio::test]
+    async fn gateway_no_subpath_routes_to_root() {
+        let (manager, admin) = setup(
+            19855,
+            12755,
+            serde_json::json!([{
+                "predicates": [{"equals": {"path": "/"}}],
+                "responses": [{"is": {"statusCode": 200, "body": "root"}}]
+            }]),
+        )
+        .await;
+        let resp = reqwest::get(format!("{admin}/__rift/19855")).await.unwrap();
+        assert_eq!(
+            resp.text().await.unwrap(),
+            "root",
+            "no sub-path → imposter root"
+        );
+        let _ = manager.delete_imposter(19855).await;
+    }
+
+    #[tokio::test]
+    async fn gateway_non_numeric_port_400() {
+        let (manager, admin) = setup(
+            19856,
+            12756,
+            serde_json::json!([{"responses": [{"is": {"statusCode": 200, "body": "x"}}]}]),
+        )
+        .await;
+        let resp = reqwest::get(format!("{admin}/__rift/notaport/x"))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            400,
+            "non-numeric port is a malformed gateway target → 400, distinct from 404"
+        );
+        let _ = manager.delete_imposter(19856).await;
+    }
+
+    #[tokio::test]
+    async fn gateway_not_gated_by_admin_apikey() {
+        // The gateway is data-plane imposter traffic: it must work WITHOUT the admin key, even
+        // when --apikey is set (otherwise the app-under-test would need the admin key).
+        let manager = Arc::new(ImposterManager::new());
+        manager
+            .create_imposter(
+                serde_json::from_value(serde_json::json!({
+                    "port": 19857, "protocol": "http",
+                    "stubs": [{"predicates": [{"equals": {"path": "/x"}}],
+                              "responses": [{"is": {"statusCode": 200, "body": "open"}}]}]
+                }))
+                .unwrap(),
+            )
+            .await
+            .expect("create imposter");
+        let server = rift_http_proxy::admin_api::AdminApiServer::new(
+            "127.0.0.1:12757".parse().unwrap(),
+            manager.clone(),
+            Some("secret".to_string()),
+        );
+        tokio::spawn(server.run());
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Admin route without the key → 401 (control plane stays protected).
+        let admin_resp = reqwest::get("http://127.0.0.1:12757/imposters")
+            .await
+            .unwrap();
+        assert_eq!(
+            admin_resp.status(),
+            401,
+            "admin route still requires the apikey"
+        );
+
+        // Gateway without the key → serves (data plane is not gated).
+        let gw = reqwest::get("http://127.0.0.1:12757/__rift/19857/x")
+            .await
+            .unwrap();
+        assert_eq!(gw.status(), 200);
+        assert_eq!(
+            gw.text().await.unwrap(),
+            "open",
+            "gateway works without the admin key"
+        );
+        let _ = manager.delete_imposter(19857).await;
     }
 }
