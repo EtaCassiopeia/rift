@@ -58,35 +58,51 @@ impl ServerCertVerifier for NoVerifier {
 
 /// Create TLS acceptor from certificate and key files.
 pub fn create_tls_acceptor(cert_path: &str, key_path: &str) -> Result<TlsAcceptor, anyhow::Error> {
-    // Load certificate chain
-    let cert_file = std::fs::File::open(cert_path)
+    let cert_pem = std::fs::read(cert_path)
         .map_err(|e| anyhow::anyhow!("Failed to open certificate file '{cert_path}': {e}"))?;
-    let mut cert_reader = std::io::BufReader::new(cert_file);
-    let certs: Vec<CertificateDer> = rustls_pemfile::certs(&mut cert_reader)
+    let key_pem = std::fs::read(key_path)
+        .map_err(|e| anyhow::anyhow!("Failed to open private key file '{key_path}': {e}"))?;
+    tls_acceptor_from_pem(&cert_pem, &key_pem)
+}
+
+/// Create a TLS acceptor from in-memory PEM bytes (per-imposter HTTPS, issue #206).
+pub fn tls_acceptor_from_pem(
+    cert_pem: &[u8],
+    key_pem: &[u8],
+) -> Result<TlsAcceptor, anyhow::Error> {
+    let certs: Vec<CertificateDer> = rustls_pemfile::certs(&mut &cert_pem[..])
         .collect::<Result<_, _>>()
-        .map_err(|e| anyhow::anyhow!("Failed to parse certificate file: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("Failed to parse certificate PEM: {e}"))?;
 
     if certs.is_empty() {
-        anyhow::bail!("No certificates found in certificate file: {cert_path}");
+        anyhow::bail!("No certificates found in certificate PEM");
     }
 
-    // Load private key
-    let key_file = std::fs::File::open(key_path)
-        .map_err(|e| anyhow::anyhow!("Failed to open private key file '{key_path}': {e}"))?;
-    let mut key_reader = std::io::BufReader::new(key_file);
+    // Accepts PKCS8, RSA, or EC private keys.
+    let key = rustls_pemfile::private_key(&mut &key_pem[..])
+        .map_err(|e| anyhow::anyhow!("Failed to parse private key PEM: {e}"))?
+        .ok_or_else(|| anyhow::anyhow!("No private key found in key PEM"))?;
 
-    // Try reading as PKCS8, RSA, or EC private key
-    let key = rustls_pemfile::private_key(&mut key_reader)
-        .map_err(|e| anyhow::anyhow!("Failed to parse private key file: {e}"))?
-        .ok_or_else(|| anyhow::anyhow!("No private key found in key file: {key_path}"))?;
-
-    // Build TLS server configuration
     let config = rustls::ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(certs, key)
-        .map_err(|e| anyhow::anyhow!("Failed to build TLS configuration: {e}"))?;
+        .map_err(|e| {
+            anyhow::anyhow!("Failed to build TLS configuration (cert/key mismatch?): {e}")
+        })?;
 
     Ok(TlsAcceptor::from(Arc::new(config)))
+}
+
+/// Generate an in-memory self-signed acceptor for zero-config HTTPS imposters (issue #206),
+/// matching Mountebank's built-in self-signed default. Valid for `localhost`/`127.0.0.1`.
+pub fn generate_self_signed_acceptor() -> Result<TlsAcceptor, anyhow::Error> {
+    let cert =
+        rcgen::generate_simple_self_signed(vec!["localhost".to_string(), "127.0.0.1".to_string()])
+            .map_err(|e| anyhow::anyhow!("Failed to generate self-signed certificate: {e}"))?;
+    tls_acceptor_from_pem(
+        cert.cert.pem().as_bytes(),
+        cert.key_pair.serialize_pem().as_bytes(),
+    )
 }
 
 #[cfg(test)]
