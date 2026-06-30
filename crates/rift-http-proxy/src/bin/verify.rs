@@ -633,17 +633,44 @@ fn check_if_dynamic(responses: &[serde_json::Value]) -> (bool, Option<String>) {
         return (true, Some("fault injection".to_string()));
     }
 
-    // Check for _rift script extension
+    // Check for _rift script extension and _rift.fault (tcp/latency/error are non-deterministic
+    // or transport-level; can't be asserted as a normal HTTP response).
     if let Some(rift) = first.get("_rift") {
         if rift.get("script").is_some() {
             return (true, Some("Rift script response".to_string()));
         }
+        if rift.get("fault").is_some() {
+            return (true, Some("Rift fault (_rift.fault)".to_string()));
+        }
     }
 
-    // Check for _behaviors with repeat (stateful)
-    if let Some(behaviors) = first.get("_behaviors") {
-        if behaviors.get("repeat").is_some() {
-            return (true, Some("repeat behavior (stateful)".to_string()));
+    // Behaviors whose output depends on the request or external state can't be predicted from
+    // the stub alone (repeat=stateful; decorate/copy/lookup/shellTransform=dynamic body/headers).
+    // Handle BOTH the input config form (`_behaviors` object) and the form returned by
+    // GET /imposters (`behaviors` array of single-key objects, Mountebank-style).
+    let label = |k: &str| match k {
+        "repeat" => "repeat behavior (stateful)",
+        "decorate" => "decorate behavior (dynamic)",
+        "copy" => "copy behavior (request-derived)",
+        "lookup" => "lookup behavior (data-source)",
+        "shellTransform" => "shellTransform behavior (external)",
+        _ => "dynamic behavior",
+    };
+    const DYNAMIC_BEHAVIORS: [&str; 5] = ["repeat", "decorate", "copy", "lookup", "shellTransform"];
+    if let Some(obj) = first.get("_behaviors").and_then(|v| v.as_object()) {
+        for k in DYNAMIC_BEHAVIORS {
+            if obj.contains_key(k) {
+                return (true, Some(label(k).to_string()));
+            }
+        }
+    }
+    if let Some(arr) = first.get("behaviors").and_then(|v| v.as_array()) {
+        for item in arr.iter().filter_map(|v| v.as_object()) {
+            for k in DYNAMIC_BEHAVIORS {
+                if item.contains_key(k) {
+                    return (true, Some(label(k).to_string()));
+                }
+            }
         }
     }
 
