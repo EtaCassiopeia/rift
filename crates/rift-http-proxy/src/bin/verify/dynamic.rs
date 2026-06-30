@@ -495,9 +495,15 @@ impl<'a> DynamicVerifier<'a> {
         if let Some(body) = &request.body {
             req = req.body(body.clone());
         }
-        let resp = req.send().await.map_err(|e| e.to_string())?;
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| super::error_chain_string(&e))?;
         let status = resp.status().as_u16();
-        let body = resp.text().await.map_err(|e| e.to_string())?;
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| super::error_chain_string(&e))?;
         Ok((status, body))
     }
 
