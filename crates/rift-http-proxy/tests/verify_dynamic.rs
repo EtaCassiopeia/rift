@@ -449,3 +449,77 @@ async fn verify_skips_space_stub_when_flow_id_unresolvable() {
         "the skip reason must explain the unresolved flowIdSource:\n{stdout}"
     );
 }
+
+#[tokio::test]
+async fn verify_normal_pass_drives_xpath_attribute_stub() {
+    // Issue #261: an xpath predicate with an attribute selector wrapped in string() — the verifier
+    // must synthesize `<user role="admin"/>` so the engine's xpath matcher accepts it (PASS).
+    let manager = Arc::new(ImposterManager::new());
+    create(
+        &manager,
+        serde_json::json!({
+            "port": 19971, "protocol": "http",
+            "stubs": [{
+                "predicates": [{ "equals": { "body": "admin" },
+                    "xpath": { "selector": "string(//user/@role)" } }],
+                "responses": [{ "is": { "statusCode": 200, "body": { "matched": "xpath" } } }]
+            }]
+        }),
+    )
+    .await;
+
+    let admin = start_admin(12781, manager).await;
+    let out = Command::new(BIN)
+        .args(["--admin-url", &admin])
+        .output()
+        .await
+        .expect("run rift-verify");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert!(
+        out.status.success(),
+        "xpath attribute stub must PASS; stdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!stdout.contains("FAIL"), "no xpath false-FAIL:\n{stdout}");
+}
+
+#[tokio::test]
+async fn verify_skips_unsynthesizable_xpath_stub() {
+    // Issue #261: an xpath selector the verifier can't synthesize a body for is a visible SKIP
+    // (counted, not a false FAIL); the run still exits 0.
+    let manager = Arc::new(ImposterManager::new());
+    create(
+        &manager,
+        serde_json::json!({
+            "port": 19981, "protocol": "http",
+            "stubs": [{
+                "predicates": [{ "equals": { "body": "5" },
+                    "xpath": { "selector": "count(//item)" } }],
+                "responses": [{ "is": { "statusCode": 200, "body": "ok" } }]
+            }]
+        }),
+    )
+    .await;
+
+    let admin = start_admin(12791, manager).await;
+    let out = Command::new(BIN)
+        .args(["--admin-url", &admin, "--verbose"])
+        .output()
+        .await
+        .expect("run rift-verify");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert!(
+        out.status.success(),
+        "unsynthesizable xpath is a skip, not a failure:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("FAIL"),
+        "no false FAIL for unsynthesizable xpath:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("count(//item)"),
+        "the skip reason must name the selector:\n{stdout}"
+    );
+}

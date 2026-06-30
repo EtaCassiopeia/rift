@@ -712,6 +712,33 @@ fn generate_test_cases(
         return test_cases;
     }
 
+    // An xpath predicate whose selector can't be synthesized into a matching XML body would always
+    // fail to match — surface it as a visible skip rather than a false failure (issue #261).
+    if let Some(selector) = unsynthesizable_xpath(&stub.predicates) {
+        test_cases.push(TestCase {
+            stub_index,
+            stub_id: stub.id.clone(),
+            method,
+            path,
+            headers,
+            query_params,
+            body,
+            expected_status: 200,
+            expected_headers: HashMap::new(),
+            expected_body: None,
+            is_dynamic,
+            skip_reason: Some(format!(
+                "xpath selector `{selector}` is too complex to synthesize a matching body"
+            )),
+            is_no_match_stub: false,
+            protocol: protocol.to_string(),
+            expects_transport_error,
+            flow_header: flow_header.clone(),
+            flow_space: flow_space.clone(),
+        });
+        return test_cases;
+    }
+
     // Correlated isolation declared (stub has a `space`) but the verifier couldn't resolve the
     // flowIdSource header — driving it would silently mis-route. Surface it as a visible skip
     // rather than running a degraded check (issue #260).
@@ -1139,7 +1166,9 @@ fn parse_predicates(
                     .and_then(|e| e.get("body"))
                     .and_then(|v| v.as_str())
                 {
-                    body = Some(build_xml_from_xpath(selector, value));
+                    if let Some(xml) = build_xml_from_xpath(selector, value) {
+                        body = Some(xml);
+                    }
                 }
             }
         }
@@ -1308,24 +1337,111 @@ fn predicate_mentions_field(value: &serde_json::Value, field: &str) -> bool {
     }
 }
 
-/// Build a matching XML body from an xpath selector and a leaf value, mirroring
-/// `build_json_from_jsonpath`. e.g. ("/order/id", "728839") -> "<order><id>728839</id></order>".
-fn build_xml_from_xpath(selector: &str, value: &str) -> String {
-    let parts: Vec<&str> = selector.split('/').filter(|s| !s.is_empty()).collect();
-    if parts.is_empty() {
-        return value.to_string();
+/// Unwrap a leading XPath string-ish function (`string(...)`, `boolean(...)`, `number(...)`,
+/// `normalize-space(...)`) to the inner location path. Returns the selector unchanged otherwise.
+fn unwrap_xpath_function(selector: &str) -> &str {
+    let s = selector.trim();
+    for func in ["string", "boolean", "number", "normalize-space"] {
+        if let Some(rest) = s.strip_prefix(func) {
+            if let Some(inner) = rest
+                .trim_start()
+                .strip_prefix('(')
+                .and_then(|r| r.strip_suffix(')'))
+            {
+                return inner.trim();
+            }
+        }
     }
-    let mut xml = value.to_string();
-    for part in parts.iter().rev() {
-        // Strip positional predicates / attribute markers (e.g. `item[1]`, `@id`) to the bare tag.
-        let tag = part
-            .split('[')
-            .next()
-            .unwrap_or(part)
-            .trim_start_matches('@');
+    s
+}
+
+/// Clean one location step into a bare XML element name, or `None` if it isn't synthesizable: a
+/// non-positional predicate (`[@x='y']`) can't be satisfied by a single element, and anything that
+/// isn't a valid XML name (e.g. residue from an unhandled function) is rejected.
+fn xpath_step_to_tag(step: &str) -> Option<String> {
+    let (name, predicate) = match step.find('[') {
+        Some(i) => (&step[..i], Some(&step[i..])),
+        None => (step, None),
+    };
+    if let Some(p) = predicate {
+        let inner = p.trim_start_matches('[').trim_end_matches(']').trim();
+        if inner != "1" {
+            return None; // only `[1]` is satisfiable by a single synthesized element
+        }
+    }
+    let name = name.trim();
+    let is_xml_name = !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | ':'));
+    is_xml_name.then(|| name.to_string())
+}
+
+/// Escape a string for use as XML element text or a double-quoted attribute value.
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+/// Build a request XML body that satisfies an xpath selector for the given leaf value (issue #249/
+/// #261). Handles element paths (`/order/id`), attribute selectors (`//user/@role` → an attribute),
+/// and the common function wrappers. Returns `None` for selectors too complex to synthesize, so the
+/// caller can emit a visible skip instead of a false failure.
+fn build_xml_from_xpath(selector: &str, value: &str) -> Option<String> {
+    let path = unwrap_xpath_function(selector);
+    let steps: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    let (last, ancestors) = steps.split_last()?;
+    // Escape so the value survives as XML text/attribute and `string(...)` yields it back verbatim;
+    // an unescaped `&`/`<`/`"` would make the body malformed and false-fail the match (issue #261).
+    let value = xml_escape(value);
+
+    // A trailing `@attr` becomes an attribute on the preceding element, not a child element.
+    let (mut xml, ancestors) = if let Some(attr) = last.strip_prefix('@') {
+        let attr = attr.trim();
+        let is_attr_name = !attr.is_empty()
+            && attr
+                .chars()
+                .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | ':'));
+        let (parent, rest) = ancestors.split_last()?;
+        let parent = xpath_step_to_tag(parent)?;
+        if !is_attr_name {
+            return None;
+        }
+        (format!("<{parent} {attr}=\"{value}\"/>"), rest)
+    } else {
+        let leaf = xpath_step_to_tag(last)?;
+        (format!("<{leaf}>{value}</{leaf}>"), ancestors)
+    };
+
+    for step in ancestors.iter().rev() {
+        let tag = xpath_step_to_tag(step)?;
         xml = format!("<{tag}>{xml}</{tag}>");
     }
-    xml
+    Some(xml)
+}
+
+/// The first xpath selector among `predicates` that drives a body (`equals.body`) but cannot be
+/// synthesized into a matching XML request (issue #261). Used to skip such a stub with a reason
+/// rather than report a false failure.
+fn unsynthesizable_xpath(predicates: &[serde_json::Value]) -> Option<String> {
+    for predicate in predicates {
+        let selector = predicate
+            .get("xpath")
+            .and_then(|x| x.get("selector"))
+            .and_then(|s| s.as_str());
+        let has_body = predicate
+            .get("equals")
+            .and_then(|e| e.get("body"))
+            .is_some();
+        if let Some(selector) = selector {
+            if has_body && build_xml_from_xpath(selector, "probe").is_none() {
+                return Some(selector.to_string());
+            }
+        }
+    }
+    None
 }
 
 /// Build a JSON object from a jsonpath selector and value
@@ -2187,14 +2303,80 @@ mod verify_tests {
     #[test]
     fn build_xml_from_xpath_nests_elements() {
         assert_eq!(
-            build_xml_from_xpath("/order/id", "728839"),
-            "<order><id>728839</id></order>"
+            build_xml_from_xpath("/order/id", "728839").as_deref(),
+            Some("<order><id>728839</id></order>")
         );
     }
 
     #[test]
     fn build_xml_from_xpath_single_element() {
-        assert_eq!(build_xml_from_xpath("/root", "x"), "<root>x</root>");
+        assert_eq!(
+            build_xml_from_xpath("/root", "x").as_deref(),
+            Some("<root>x</root>")
+        );
+    }
+
+    #[test]
+    fn build_xml_from_xpath_builds_attribute() {
+        // `//user/@role` selects an attribute → it must be an attribute, not a child element.
+        assert_eq!(
+            build_xml_from_xpath("//user/@role", "admin").as_deref(),
+            Some("<user role=\"admin\"/>")
+        );
+        // Attribute under a nested element keeps the ancestors.
+        assert_eq!(
+            build_xml_from_xpath("/order/item/@id", "7").as_deref(),
+            Some("<order><item id=\"7\"/></order>")
+        );
+    }
+
+    #[test]
+    fn build_xml_from_xpath_unwraps_function() {
+        // `string(...)` / `number(...)` / `normalize-space(...)` wrappers are unwrapped to the path.
+        assert_eq!(
+            build_xml_from_xpath("string(//user/@role)", "admin").as_deref(),
+            Some("<user role=\"admin\"/>")
+        );
+        assert_eq!(
+            build_xml_from_xpath("number(/order/id)", "7").as_deref(),
+            Some("<order><id>7</id></order>")
+        );
+        assert_eq!(
+            build_xml_from_xpath("normalize-space(/a/b)", "v").as_deref(),
+            Some("<a><b>v</b></a>")
+        );
+    }
+
+    #[test]
+    fn build_xml_from_xpath_positional_predicate() {
+        // Only `[1]` is satisfiable by a single synthesized element; `[2]` would never match → None.
+        assert_eq!(
+            build_xml_from_xpath("/order/item[1]/id", "7").as_deref(),
+            Some("<order><item><id>7</id></item></order>")
+        );
+        assert_eq!(build_xml_from_xpath("/order/item[2]/id", "7"), None);
+    }
+
+    #[test]
+    fn build_xml_from_xpath_escapes_value() {
+        // XML metacharacters in the value must be escaped (attribute and element-text contexts), so
+        // the body stays well-formed and `string(...)` yields the original value back.
+        assert_eq!(
+            build_xml_from_xpath("//user/@role", "a&b\"c").as_deref(),
+            Some("<user role=\"a&amp;b&quot;c\"/>")
+        );
+        assert_eq!(
+            build_xml_from_xpath("/note/body", "x < y & z").as_deref(),
+            Some("<note><body>x &lt; y &amp; z</body></note>")
+        );
+    }
+
+    #[test]
+    fn build_xml_from_xpath_none_when_unsynthesizable() {
+        // Unhandled function, value-filter predicate, and empty path can't be synthesized → None.
+        assert_eq!(build_xml_from_xpath("count(//x)", "5"), None);
+        assert_eq!(build_xml_from_xpath("//user[@role='admin']", "x"), None);
+        assert_eq!(build_xml_from_xpath("string()", "x"), None);
     }
 
     #[test]
@@ -2205,6 +2387,32 @@ mod verify_tests {
         })];
         let (_m, _p, _h, _q, body) = parse_predicates(&preds);
         assert_eq!(body.as_deref(), Some("<order><id>728839</id></order>"));
+    }
+
+    #[test]
+    fn xpath_attribute_selector_builds_matching_body() {
+        // The conformance sample 02 stub #11 shape.
+        let preds = vec![json!({
+            "xpath": { "selector": "string(//user/@role)" },
+            "equals": { "body": "admin" }
+        })];
+        let (_m, _p, _h, _q, body) = parse_predicates(&preds);
+        assert_eq!(body.as_deref(), Some("<user role=\"admin\"/>"));
+    }
+
+    #[test]
+    fn unsynthesizable_xpath_stub_skipped() {
+        let stub: Stub = serde_json::from_value(json!({
+            "predicates": [{ "xpath": { "selector": "count(//x)" }, "equals": { "body": "5" } }],
+            "responses": [{ "is": { "statusCode": 200, "body": "ok" } }]
+        }))
+        .unwrap();
+        let cases = generate_test_cases(0, &stub, false, "http", None);
+        let reason = cases[0].skip_reason.as_deref().unwrap_or("");
+        assert!(
+            reason.contains("xpath") && reason.contains("count(//x)"),
+            "reason: {reason}"
+        );
     }
 
     // ── #3: tcp fault detection + classification ───────────────────────────
