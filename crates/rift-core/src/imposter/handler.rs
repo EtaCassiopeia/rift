@@ -10,9 +10,10 @@ use super::types::{
     DebugMatchResult, DebugRequest, DebugResponse, ProxyResponse, RecordedRequest, ResponseMode,
 };
 use crate::behaviors::{
-    apply_copy_behaviors, apply_lookup_behaviors, header_to_title_case, CsvCache, RequestContext,
-    ResponseBehaviors,
+    apply_copy_behaviors, apply_lookup_behaviors, apply_shell_transform, header_to_title_case,
+    CsvCache, RequestContext, ResponseBehaviors,
 };
+use crate::extensions::template::{has_template_variables, process_template, RequestData};
 #[cfg(feature = "javascript")]
 use crate::scripting::{execute_mountebank_inject, MountebankRequest};
 use crate::scripting::{FaultDecision, ScriptEngine, ScriptRequest};
@@ -48,7 +49,13 @@ pub async fn handle_imposter_request(
     client_addr: SocketAddr,
 ) -> Result<Response<Full<Bytes>>, Infallible> {
     let allow_cors = imposter.config.allow_cors;
+    // Capture the method before `req` is consumed so we can record the request metric (issue #269).
+    let method = req.method().to_string();
     let mut response = handle_request_inner(req, imposter, client_addr).await?;
+    // Record `rift_requests_total` once per request the imposter serves (issue #269). The imposter
+    // serve path recorded no Prometheus metrics before; the recording proxy engine
+    // (`proxy/handler.rs`) is a disjoint path, so there is no double-count.
+    crate::extensions::record_request(&method, response.status().as_u16());
     if allow_cors {
         inject_cors_headers(response.headers_mut());
     }
@@ -462,6 +469,38 @@ async fn handle_request_inner(
                 }
             }
 
+            // Expand `${request.*}` request templates (issue #269) BEFORE behaviors — matching the
+            // proxy path's ordering so `shellTransform`/`decorate` operate on the expanded body.
+            // Header values are templated too (the static path's AC1 requirement; the proxy path
+            // templates only the body). Serve-time date templates ({{NOW}}/{{DAYS+N}}) are expanded
+            // later, at body finalization.
+            {
+                let need_body = has_template_variables(&body);
+                let need_headers = headers
+                    .values()
+                    .flatten()
+                    .any(|v| has_template_variables(v));
+                if need_body || need_headers {
+                    let request_data = RequestData::new(
+                        method_str,
+                        path_str,
+                        query_opt,
+                        &headers_for_context,
+                        body_string.as_deref(),
+                    );
+                    if need_body {
+                        body = process_template(&body, &request_data);
+                    }
+                    for values in headers.values_mut() {
+                        for v in values.iter_mut() {
+                            if has_template_variables(v) {
+                                *v = process_template(v, &request_data);
+                            }
+                        }
+                    }
+                }
+            }
+
             // Apply behaviors if present
             if let Some(ref behaviors_json) = behaviors {
                 // Parse behaviors
@@ -539,6 +578,16 @@ async fn handle_request_inner(
                         }
 
                         headers = single.into_iter().map(|(k, v)| (k, vec![v])).collect();
+                    }
+
+                    // shellTransform (issue #269): pipe the body through external command(s);
+                    // stdout becomes the new body. Runs on the static `is` path too, not only the
+                    // proxy path, and independently of copy/lookup/decorate.
+                    for cmd in &parsed_behaviors.shell_transform {
+                        match apply_shell_transform(cmd, &request_context, &body, status) {
+                            Ok(transformed) => body = transformed,
+                            Err(e) => warn!("shellTransform command {cmd:?} failed: {e}"),
+                        }
                     }
                 }
             }
