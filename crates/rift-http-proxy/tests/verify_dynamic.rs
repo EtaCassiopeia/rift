@@ -334,3 +334,118 @@ async fn verify_normal_pass_accepts_plaintext_template_body() {
         "no mismatch FAIL for plain-text template body:\n{stdout}"
     );
 }
+
+#[tokio::test]
+async fn verify_normal_pass_drives_space_partitioned_stubs() {
+    // Issue #260: a correlated-isolation imposter with two stubs partitioned by `space` on the
+    // same path. The verifier must drive each stub with its OWN space value.
+    let manager = Arc::new(ImposterManager::new());
+    create(
+        &manager,
+        serde_json::json!({
+            "port": 19931, "protocol": "http",
+            "_rift": { "flowState": { "backend": "inmemory",
+                "mountebankStateMapping": { "flowIdSource": "header:X-Mock-Space" } } },
+            "stubs": [
+                { "space": "alice", "predicates": [{ "equals": { "path": "/data" } }],
+                  "responses": [{ "is": { "statusCode": 200, "body": { "owner": "alice" } } }] },
+                { "space": "bob", "predicates": [{ "equals": { "path": "/data" } }],
+                  "responses": [{ "is": { "statusCode": 200, "body": { "owner": "bob" } } }] }
+            ]
+        }),
+    )
+    .await;
+
+    let admin = start_admin(12741, manager).await;
+    let out = Command::new(BIN)
+        .args(["--admin-url", &admin])
+        .output()
+        .await
+        .expect("run rift-verify");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert!(
+        out.status.success(),
+        "space-partitioned stubs must each PASS; stdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !stdout.contains("FAIL"),
+        "no space-mismatch FAIL:\n{stdout}"
+    );
+}
+
+#[tokio::test]
+async fn verify_flow_id_header_does_not_clobber_detection() {
+    // Issue #260: a detected per-imposter header takes precedence over --flow-id-header, so a
+    // (here deliberately wrong) global override does NOT clobber a correctly-detected imposter.
+    let manager = Arc::new(ImposterManager::new());
+    create(
+        &manager,
+        serde_json::json!({
+            "port": 19951, "protocol": "http",
+            "_rift": { "flowState": { "backend": "inmemory",
+                "mountebankStateMapping": { "flowIdSource": "header:X-Mock-Space" } } },
+            "stubs": [
+                { "space": "alice", "predicates": [{ "equals": { "path": "/d" } }],
+                  "responses": [{ "is": { "statusCode": 200, "body": { "o": "alice" } } }] },
+                { "space": "bob", "predicates": [{ "equals": { "path": "/d" } }],
+                  "responses": [{ "is": { "statusCode": 200, "body": { "o": "bob" } } }] }
+            ]
+        }),
+    )
+    .await;
+
+    let admin = start_admin(12761, manager).await;
+    let out = Command::new(BIN)
+        .args(["--admin-url", &admin, "--flow-id-header", "X-Wrong-Header"])
+        .output()
+        .await
+        .expect("run rift-verify");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    // Detection (X-Mock-Space) wins over the wrong override, so both stubs still PASS.
+    assert!(
+        out.status.success(),
+        "detection must win over a wrong --flow-id-header; stdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !stdout.contains("FAIL"),
+        "no FAIL when detection wins:\n{stdout}"
+    );
+}
+
+#[tokio::test]
+async fn verify_skips_space_stub_when_flow_id_unresolvable() {
+    // Issue #260 (silent-failure guard): a stub declares `space` but the imposter exposes no
+    // flowIdSource and no --flow-id-header is given → the verifier must SKIP it with a reason,
+    // not silently run a degraded (mis-routed) check.
+    let manager = Arc::new(ImposterManager::new());
+    create(
+        &manager,
+        serde_json::json!({
+            "port": 19961, "protocol": "http",
+            "stubs": [{ "space": "alice", "predicates": [{ "equals": { "path": "/d" } }],
+                "responses": [{ "is": { "statusCode": 200, "body": "A" } }] }]
+        }),
+    )
+    .await;
+
+    let admin = start_admin(12771, manager).await;
+    let out = Command::new(BIN)
+        .args(["--admin-url", &admin, "--verbose"])
+        .output()
+        .await
+        .expect("run rift-verify");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert!(
+        out.status.success(),
+        "an unverifiable space stub is a skip, not a failure:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("flowIdSource"),
+        "the skip reason must explain the unresolved flowIdSource:\n{stdout}"
+    );
+}

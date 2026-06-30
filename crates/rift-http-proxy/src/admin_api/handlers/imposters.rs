@@ -203,7 +203,7 @@ pub async fn handle_get(
             }
 
             let analysis = analyze_stubs(&stubs);
-            let rift_extensions = if analysis.has_warnings() {
+            if analysis.has_warnings() {
                 for warning in &analysis.warnings {
                     warn!(
                         port = port,
@@ -212,8 +212,19 @@ pub async fn handle_get(
                         warning.message
                     );
                 }
+            }
+            // Expose the imposter's flow-state config (issue #260) so tools can read the
+            // correlated-isolation `flowIdSource`.
+            let flow_state = imposter
+                .config
+                .rift
+                .as_ref()
+                .and_then(|r| r.flow_state.as_ref())
+                .map(expose_flow_state);
+            let rift_extensions = if analysis.has_warnings() || flow_state.is_some() {
                 Some(RiftImposterExtensions {
                     warnings: analysis.warnings,
+                    flow_state,
                 })
             } else {
                 None
@@ -311,6 +322,22 @@ async fn handle_set_enabled(
         }
         Err(e) => e.into(),
     }
+}
+
+/// Build the public projection of a `flowState` for `GET /imposters` (issue #260). Fail-closed
+/// allowlist: only the non-sensitive fields tools need are exposed, so a credential-bearing field
+/// added to the config later (e.g. inside `redis`, or a new backend's auth block) is excluded by
+/// default rather than leaked.
+fn expose_flow_state(fs: &rift_core::imposter::RiftFlowStateConfig) -> serde_json::Value {
+    let mut out = serde_json::Map::new();
+    out.insert("backend".to_string(), serde_json::json!(fs.backend));
+    out.insert("ttlSeconds".to_string(), serde_json::json!(fs.ttl_seconds));
+    if let Some(mapping) = &fs.mountebank_state_mapping {
+        if let Ok(value) = serde_json::to_value(mapping) {
+            out.insert("mountebankStateMapping".to_string(), value);
+        }
+    }
+    serde_json::Value::Object(out)
 }
 
 /// Resolve the imposter's `flow_id_source` (default `"imposter_port"`).
@@ -436,6 +463,36 @@ fn filter_proxy_stubs(stubs: Vec<crate::imposter::Stub>) -> Vec<crate::imposter:
 
 // Issue #201: filter recorded requests by header / flow_id via
 // GET /imposters/:port/requests?match=...  (and targeted DELETE).
+#[cfg(test)]
+mod redact_tests {
+    use super::expose_flow_state;
+    use serde_json::json;
+
+    #[test]
+    fn expose_flow_state_allowlists_safe_fields_only() {
+        let fs: rift_core::imposter::RiftFlowStateConfig = serde_json::from_value(json!({
+            "backend": "redis",
+            "ttlSeconds": 300,
+            "redis": { "url": "redis://user:secret@host:6379", "keyPrefix": "rift:" },
+            "mountebankStateMapping": { "flowIdSource": "header:X-Mock-Space" }
+        }))
+        .unwrap();
+        let out = expose_flow_state(&fs);
+        assert!(
+            out.get("redis").is_none(),
+            "redis (credentialed URL) must never be exposed"
+        );
+        assert_eq!(
+            out.pointer("/mountebankStateMapping/flowIdSource")
+                .and_then(|v| v.as_str()),
+            Some("header:X-Mock-Space")
+        );
+        assert_eq!(out.get("backend").and_then(|v| v.as_str()), Some("redis"));
+        // The credential string must not survive anywhere in the exposed value.
+        assert!(!out.to_string().contains("secret"));
+    }
+}
+
 #[cfg(test)]
 mod requests_filter_tests {
     use super::*;

@@ -84,6 +84,11 @@ pub struct ImposterDetail {
 pub struct RiftImposterExtensions {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<StubWarning>,
+    /// The imposter's flow-state config (issue #260), so tools like `rift-verify` can learn the
+    /// correlated-isolation `flowIdSource` header. Redacted: the `redis` block (which may carry a
+    /// credentialed connection URL) is stripped before exposure.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flow_state: Option<serde_json::Value>,
 }
 
 // Error types + `error_response` + the `From<ImposterError>` conversion moved to

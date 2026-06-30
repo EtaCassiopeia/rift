@@ -1395,3 +1395,44 @@ mod gateway {
         let _ = manager.delete_imposter(19857).await;
     }
 }
+
+// Issue #260: GET /imposters/:port exposes the imposter's flowState (so tools can read
+// flowIdSource), with the redis block redacted.
+#[tokio::test]
+async fn get_imposter_exposes_flowstate_redacted() {
+    let manager = std::sync::Arc::new(ImposterManager::new());
+    // inmemory backend ignores a stray `redis` block (no connection attempted) — include one with a
+    // credentialed URL to prove the GET projection actually strips it end-to-end.
+    let config = serde_json::from_value(serde_json::json!({
+        "port": 19771, "protocol": "http",
+        "_rift": { "flowState": { "backend": "inmemory", "ttlSeconds": 300,
+            "redis": { "url": "redis://user:topsecret@host:6379" },
+            "mountebankStateMapping": { "flowIdSource": "header:X-Mock-Space" } } },
+        "stubs": [{ "predicates": [{ "equals": { "path": "/x" } }],
+            "responses": [{ "is": { "statusCode": 200, "body": "ok" } }] }]
+    }))
+    .unwrap();
+    manager.create_imposter(config).await.expect("create");
+
+    let admin_addr = "127.0.0.1:12596".parse().unwrap();
+    let server = rift_http_proxy::admin_api::AdminApiServer::new(admin_addr, manager.clone(), None);
+    tokio::spawn(server.run());
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    let c = reqwest::Client::new();
+    let v = json(&c, "http://127.0.0.1:12596/imposters/19771".to_string()).await;
+    assert_eq!(
+        v.pointer("/_rift/flowState/mountebankStateMapping/flowIdSource")
+            .and_then(|x| x.as_str()),
+        Some("header:X-Mock-Space"),
+        "GET must expose flowIdSource so rift-verify can drive correlated isolation: {v}"
+    );
+    assert!(
+        v.pointer("/_rift/flowState/redis").is_none(),
+        "redis config must be redacted from the exposed flowState: {v}"
+    );
+    assert!(
+        !v.to_string().contains("topsecret"),
+        "the redis credential must not survive anywhere in the GET response"
+    );
+}
