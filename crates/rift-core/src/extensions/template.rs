@@ -149,32 +149,43 @@ static MONTHS_REGEX: OnceLock<Regex> = OnceLock::new();
 static NOW_REGEX: OnceLock<Regex> = OnceLock::new();
 
 /// Expand legacy-recorder relative-date templates in a response body (issue #195):
-/// `{{DAYS+N}}` / `{{MONTHS+N}}` → an RFC3339 timestamp `N` days/months from now, and `{{NOW}}` →
-/// the current UTC timestamp. A token whose offset overflows the representable date range is left
-/// unchanged rather than panicking. These are a legacy extension, not standard Mountebank/WireMock.
+/// `{{DAYS+N}}` / `{{DAYS-N}}` / `{{MONTHS+N}}` / `{{MONTHS-N}}` → an RFC3339 timestamp `N`
+/// days/months in the future (`+`) or past (`-`, issue #270) from now, and `{{NOW}}` → the current
+/// UTC timestamp. A token whose offset overflows the representable date range is left unchanged
+/// rather than panicking. These are a legacy extension, not standard Mountebank/WireMock.
 pub fn apply_date_templates(body: &str) -> String {
     let now = chrono::Utc::now();
-    let days_re = DAYS_REGEX.get_or_init(|| Regex::new(r"\{\{DAYS\+(\d+)\}\}").unwrap());
-    let months_re = MONTHS_REGEX.get_or_init(|| Regex::new(r"\{\{MONTHS\+(\d+)\}\}").unwrap());
+    let days_re = DAYS_REGEX.get_or_init(|| Regex::new(r"\{\{DAYS([+-])(\d+)\}\}").unwrap());
+    let months_re = MONTHS_REGEX.get_or_init(|| Regex::new(r"\{\{MONTHS([+-])(\d+)\}\}").unwrap());
     let now_re = NOW_REGEX.get_or_init(|| Regex::new(r"\{\{NOW\}\}").unwrap());
 
     let with_days = days_re.replace_all(body, |caps: &regex::Captures| {
-        match caps[1].parse::<i64>() {
+        match caps[2].parse::<i64>() {
             // `Duration::days` panics on overflow, so go through the fallible `try_days` and let an
             // out-of-range offset flow into the leave-token-unchanged fallback below.
-            Ok(n) => chrono::Duration::try_days(n)
-                .and_then(|d| now.checked_add_signed(d))
-                .map(|d| d.to_rfc3339())
-                .unwrap_or_else(|| caps[0].to_string()),
+            Ok(n) => {
+                let signed = if &caps[1] == "-" { -n } else { n };
+                chrono::Duration::try_days(signed)
+                    .and_then(|d| now.checked_add_signed(d))
+                    .map(|d| d.to_rfc3339())
+                    .unwrap_or_else(|| caps[0].to_string())
+            }
             Err(_) => caps[0].to_string(),
         }
     });
     let with_months = months_re.replace_all(&with_days, |caps: &regex::Captures| {
-        match caps[1].parse::<u32>() {
-            Ok(n) => now
-                .checked_add_months(chrono::Months::new(n))
-                .map(|d| d.to_rfc3339())
-                .unwrap_or_else(|| caps[0].to_string()),
+        match caps[2].parse::<u32>() {
+            Ok(n) => {
+                let months = chrono::Months::new(n);
+                let shifted = if &caps[1] == "-" {
+                    now.checked_sub_months(months)
+                } else {
+                    now.checked_add_months(months)
+                };
+                shifted
+                    .map(|d| d.to_rfc3339())
+                    .unwrap_or_else(|| caps[0].to_string())
+            }
             Err(_) => caps[0].to_string(),
         }
     });
@@ -399,5 +410,57 @@ mod tests {
     fn date_tpl_months_overflow_leaves_token_unchanged() {
         let body = "{{MONTHS+4000000000}}";
         assert_eq!(apply_date_templates(body), body);
+    }
+
+    // Issue #270: past offsets.
+    #[test]
+    fn date_tpl_days_minus_offsets_into_past() {
+        let out = apply_date_templates("{{DAYS-5}}");
+        let expected = (Utc::now() - chrono::Duration::days(5)).date_naive();
+        assert_eq!(parse_rfc3339(&out).date_naive(), expected);
+    }
+
+    #[test]
+    fn date_tpl_months_minus_offsets_into_past() {
+        let out = apply_date_templates("{{MONTHS-1}}");
+        let expected = Utc::now()
+            .checked_sub_months(Months::new(1))
+            .expect("1 month ago is representable")
+            .date_naive();
+        assert_eq!(parse_rfc3339(&out).date_naive(), expected);
+    }
+
+    #[test]
+    fn date_tpl_days_minus_zero_is_today() {
+        let out = apply_date_templates("{{DAYS-0}}");
+        assert_eq!(parse_rfc3339(&out).date_naive(), Utc::now().date_naive());
+    }
+
+    #[test]
+    fn date_tpl_days_minus_overflow_leaves_token_unchanged() {
+        let body = "{{DAYS-9999999999999}}";
+        assert_eq!(apply_date_templates(body), body);
+    }
+
+    #[test]
+    fn date_tpl_months_minus_underflow_leaves_token_unchanged() {
+        // Subtractive `checked_sub_months` underflow must leave the token literal (no panic).
+        let body = "{{MONTHS-4000000000}}";
+        assert_eq!(apply_date_templates(body), body);
+    }
+
+    #[test]
+    fn date_tpl_mixed_signs_resolve_per_occurrence() {
+        let out = apply_date_templates("{{DAYS-5}}|{{DAYS+5}}");
+        let parts: Vec<&str> = out.split('|').collect();
+        assert_eq!(parts.len(), 2, "both tokens expand: {out}");
+        assert_eq!(
+            parse_rfc3339(parts[0]).date_naive(),
+            (Utc::now() - chrono::Duration::days(5)).date_naive()
+        );
+        assert_eq!(
+            parse_rfc3339(parts[1]).date_naive(),
+            (Utc::now() + chrono::Duration::days(5)).date_naive()
+        );
     }
 }
