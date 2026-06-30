@@ -774,6 +774,23 @@ pub fn validate_behavior(
     }
 }
 
+/// Detect Mountebank's `config`-calling decorate convention (arrow or `function(config)`,
+/// or a body that reads/writes `config.request`/`config.response`). These are valid decorate
+/// scripts since #191, so W009 must not flag them. Mirrors
+/// `rift_core::behaviors::transform::is_js_config_decorate` — kept local to avoid pulling the
+/// engine crate into the standalone linter.
+fn is_js_config_decorate(script: &str) -> bool {
+    let t = script.trim_start();
+    t.starts_with("config =>")
+        || t.starts_with("config=>")
+        || t.starts_with("(config) =>")
+        || t.starts_with("(config)=>")
+        || t.starts_with("function(config)")
+        || t.starts_with("function (config)")
+        || t.contains("config.request.")
+        || t.contains("config.response.")
+}
+
 /// Validate JavaScript in a behavior.
 fn validate_javascript_behavior(
     file: &Path,
@@ -784,7 +801,10 @@ fn validate_javascript_behavior(
 ) {
     let script_trimmed = script.trim();
 
-    if !script_trimmed.starts_with("function") && !script_trimmed.is_empty() {
+    if !script_trimmed.starts_with("function")
+        && !script_trimmed.is_empty()
+        && !is_js_config_decorate(script_trimmed)
+    {
         result.add_issue(
             LintIssue::warning(
                 "W009",
@@ -907,6 +927,86 @@ fn validate_lookup_behavior(file: &Path, lookup: &Value, location: &str, result:
                     file.to_path_buf(),
                 )
                 .with_location(location),
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod js_behavior_tests {
+    use super::validate_javascript_behavior;
+    use crate::types::{LintOptions, LintResult};
+    use std::path::Path;
+
+    fn lint(script: &str) -> LintResult {
+        let mut result = LintResult::new();
+        validate_javascript_behavior(
+            Path::new("test.json"),
+            script,
+            "loc",
+            &mut result,
+            &LintOptions::default(),
+        );
+        result
+    }
+
+    fn has_code(result: &LintResult, code: &str) -> bool {
+        result.issues.iter().any(|i| i.code == code)
+    }
+
+    #[test]
+    fn w009_not_fired_for_arrow_config_decorate() {
+        // Mountebank `config =>` decorate convention, valid since #191.
+        for script in [
+            "config => { config.response.statusCode = 202; }",
+            "config=>{ config.response.statusCode = 202; }",
+            "(config) => { config.response.body = 'x'; }",
+            "(config)=>{ config.response.body = 'x'; }",
+        ] {
+            assert!(!has_code(&lint(script), "W009"), "W009 fired for: {script}");
+        }
+    }
+
+    #[test]
+    fn w009_not_fired_for_function_config_decorate() {
+        for script in [
+            "function(config) { config.response.statusCode = 202; }",
+            "function (config) { config.response.statusCode = 202; }",
+        ] {
+            assert!(!has_code(&lint(script), "W009"), "W009 fired for: {script}");
+        }
+    }
+
+    #[test]
+    fn w009_not_fired_for_bare_config_body() {
+        // A decorate body that just mutates `config.response`/`config.request`.
+        assert!(!has_code(
+            &lint("config.response.statusCode = 404;"),
+            "W009"
+        ));
+        assert!(!has_code(&lint("config.request.body;"), "W009"));
+    }
+
+    #[test]
+    fn w009_not_fired_for_legacy_function_form() {
+        let script = "function(request, response) { response.body = 'x'; }";
+        assert!(!has_code(&lint(script), "W009"));
+    }
+
+    #[test]
+    fn w009_still_fired_for_non_function_junk() {
+        // Not a function expression and not a config-decorate form — keep warning.
+        // Near-boundary cases guard the exact `.contains("config.response.")` predicate
+        // against accidental over-suppression: `config` without the `config.request.`/
+        // `config.response.` prefix, and the substring without its trailing dot.
+        for script in [
+            "response.body = 'x';",
+            "response.statusCode = config.statusCode;",
+            "var x = appConfig.response;",
+        ] {
+            assert!(
+                has_code(&lint(script), "W009"),
+                "W009 should fire for: {script}"
             );
         }
     }
