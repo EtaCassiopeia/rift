@@ -59,7 +59,7 @@ impl CopySource {
 /// Apply copy behaviors to response body
 pub fn apply_copy_behaviors(
     body: &str,
-    headers: &mut HashMap<String, String>,
+    headers: &mut HashMap<String, Vec<String>>,
     behaviors: &[CopyBehavior],
     request: &RequestContext,
 ) -> String {
@@ -75,14 +75,15 @@ pub fn apply_copy_behaviors(
             // Replace token in body
             result = result.replace(&behavior.into, &replacement);
 
-            // Also replace in headers
-            for value in headers.values_mut() {
+            // Also replace in headers — per value, so multi-value headers (e.g. multiple
+            // Set-Cookie) keep their multiplicity (RFC 7230 §3.2.2 forbids folding Set-Cookie).
+            for value in headers.values_mut().flatten() {
                 *value = value.replace(&behavior.into, &replacement);
             }
         } else {
             // Source not found, replace with empty string
             result = result.replace(&behavior.into, "");
-            for value in headers.values_mut() {
+            for value in headers.values_mut().flatten() {
                 *value = value.replace(&behavior.into, "");
             }
         }
@@ -186,5 +187,84 @@ mod tests {
 
         let result = apply_copy_behaviors(body, &mut headers, &behaviors, &request);
         assert_eq!(result, r#"{"userId": "123", "greeting": "Hello, Alice!"}"#);
+    }
+
+    #[test]
+    fn copy_preserves_multi_value_headers_and_substitutes_each() {
+        let mut query = HashMap::new();
+        query.insert("q".to_string(), "hi".to_string());
+        let request = RequestContext {
+            method: "GET".to_string(),
+            path: "/x".to_string(),
+            query,
+            headers: HashMap::new(),
+            body: None,
+        };
+
+        let behaviors = vec![CopyBehavior {
+            from: {
+                let mut map = HashMap::new();
+                map.insert("query".to_string(), "q".to_string());
+                CopySource::Nested(map)
+            },
+            into: "${q}".to_string(),
+            extraction: ExtractionMethod::Regex {
+                selector: ".*".to_string(),
+                options: None,
+            },
+        }];
+
+        let mut headers: HashMap<String, Vec<String>> = HashMap::new();
+        headers.insert(
+            "Set-Cookie".to_string(),
+            vec!["a=1".to_string(), "b=${q}".to_string()],
+        );
+
+        apply_copy_behaviors("", &mut headers, &behaviors, &request);
+
+        // Both cookie lines survive (no fold) and the token is substituted in place.
+        assert_eq!(
+            headers["Set-Cookie"],
+            vec!["a=1".to_string(), "b=hi".to_string()]
+        );
+    }
+
+    #[test]
+    fn copy_missing_source_clears_token_per_value_without_folding() {
+        // No `q` query param → the source is absent, so the token is replaced with "" in each
+        // value; the untouched value and the multiplicity both survive.
+        let request = RequestContext {
+            method: "GET".to_string(),
+            path: "/x".to_string(),
+            query: HashMap::new(),
+            headers: HashMap::new(),
+            body: None,
+        };
+
+        let behaviors = vec![CopyBehavior {
+            from: {
+                let mut map = HashMap::new();
+                map.insert("query".to_string(), "q".to_string());
+                CopySource::Nested(map)
+            },
+            into: "${q}".to_string(),
+            extraction: ExtractionMethod::Regex {
+                selector: ".*".to_string(),
+                options: None,
+            },
+        }];
+
+        let mut headers: HashMap<String, Vec<String>> = HashMap::new();
+        headers.insert(
+            "Set-Cookie".to_string(),
+            vec!["a=1".to_string(), "b=${q}".to_string()],
+        );
+
+        apply_copy_behaviors("", &mut headers, &behaviors, &request);
+
+        assert_eq!(
+            headers["Set-Cookie"],
+            vec!["a=1".to_string(), "b=".to_string()]
+        );
     }
 }

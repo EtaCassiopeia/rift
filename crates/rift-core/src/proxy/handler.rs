@@ -516,33 +516,37 @@ async fn handle_yaml_rule(
                 body
             };
 
-            // Clone headers for mutation
+            // Clone headers for mutation. copy/lookup operate on multi-value headers; proxy
+            // fault responses are single-value, so wrap losslessly for the substitution and fold
+            // the (still single) result back for decorate / response building.
             let mut response_headers = fault_headers.clone();
-
-            // Apply copy behaviors (Mountebank-compatible)
             if let Some(ref bhvs) = behaviors {
-                if !bhvs.copy.is_empty() {
-                    debug!("Applying {} copy behaviors", bhvs.copy.len());
-                    processed_body = apply_copy_behaviors(
-                        &processed_body,
-                        &mut response_headers,
-                        &bhvs.copy,
-                        &request_context,
-                    );
-                }
-            }
-
-            // Apply lookup behaviors (Mountebank-compatible)
-            if let Some(ref bhvs) = behaviors {
-                if !bhvs.lookup.is_empty() {
-                    debug!("Applying {} lookup behaviors", bhvs.lookup.len());
-                    processed_body = apply_lookup_behaviors(
-                        &processed_body,
-                        &mut response_headers,
-                        &bhvs.lookup,
-                        &request_context,
-                        ctx.csv_cache,
-                    );
+                if !bhvs.copy.is_empty() || !bhvs.lookup.is_empty() {
+                    let mut multi: std::collections::HashMap<String, Vec<String>> =
+                        response_headers
+                            .drain()
+                            .map(|(k, v)| (k, vec![v]))
+                            .collect();
+                    if !bhvs.copy.is_empty() {
+                        debug!("Applying {} copy behaviors", bhvs.copy.len());
+                        processed_body = apply_copy_behaviors(
+                            &processed_body,
+                            &mut multi,
+                            &bhvs.copy,
+                            &request_context,
+                        );
+                    }
+                    if !bhvs.lookup.is_empty() {
+                        debug!("Applying {} lookup behaviors", bhvs.lookup.len());
+                        processed_body = apply_lookup_behaviors(
+                            &processed_body,
+                            &mut multi,
+                            &bhvs.lookup,
+                            &request_context,
+                            ctx.csv_cache,
+                        );
+                    }
+                    response_headers = multi.into_iter().map(|(k, v)| (k, v.join(", "))).collect();
                 }
             }
 
