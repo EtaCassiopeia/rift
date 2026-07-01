@@ -58,6 +58,13 @@ Rift provides advanced features for service virtualization and chaos engineering
 
 - [Fault Injection]({{ site.baseurl }}/features/fault-injection/) - Latency and error simulation
 - [Scripting]({{ site.baseurl }}/features/scripting/) - Dynamic behavior with scripts
+- [Scenarios (FSM)]({{ site.baseurl }}/features/scenarios/) - Stateful stubs with declarative state machines
+- [Correlated Isolation (Spaces)]({{ site.baseurl }}/features/spaces/) - Per-flow stub and state partitioning
+- [Flow State]({{ site.baseurl }}/features/flow-state/) - Per-flow key/value store for stateful mocks
+- [Date Templates]({{ site.baseurl }}/features/date-templates/) - `{{NOW}}` / `{{DAYS±N}}` / `{{MONTHS±N}}` in responses
+- [Stub-by-ID]({{ site.baseurl }}/features/stub-by-id/) - Address stubs by stable id
+- [Single-Port Gateway]({{ site.baseurl }}/features/gateway/) - Reach every imposter through the admin port
+- [Hot Reload]({{ site.baseurl }}/features/hot-reload/) - Re-read config without restarting
 - [Stub Analysis]({{ site.baseurl }}/features/stub-analysis/) - Overlap detection and warnings
 - [Debug Mode]({{ site.baseurl }}/features/debug-mode/) - Request matching diagnostics
 - [TLS/HTTPS]({{ site.baseurl }}/features/tls/) - Secure connections
