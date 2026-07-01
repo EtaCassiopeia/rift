@@ -1,0 +1,472 @@
+//! Proxy record/replay: predicate generation, stub insertion, and upstream proxying.
+//!
+//! Part of the `Imposter` implementation; see `core/mod.rs` for the struct definition.
+
+use super::*;
+
+impl Imposter {
+    /// Generate predicates from request based on predicateGenerators config
+    pub(crate) fn generate_predicates_from_request(
+        &self,
+        generators: &[serde_json::Value],
+        method: &str,
+        path: &str,
+        headers: &HashMap<String, String>,
+        body: Option<&str>,
+        query: Option<&str>,
+    ) -> Vec<serde_json::Value> {
+        let mut predicates = Vec::new();
+
+        for gen in generators {
+            let gen_obj = match gen.as_object() {
+                Some(obj) => obj,
+                None => continue,
+            };
+
+            // Handle inject predicateGenerator — calls a JS function with the request and
+            // predicates built so far; the function returns additional predicate objects.
+            if let Some(inject_fn) = gen_obj.get("inject").and_then(|v| v.as_str()) {
+                #[cfg(feature = "javascript")]
+                {
+                    use crate::scripting::{execute_predicate_generator_inject, MountebankRequest};
+                    let query_map = query
+                        .map(crate::imposter::parse_query_string)
+                        .unwrap_or_default();
+                    let mb_request = MountebankRequest {
+                        method: method.to_string(),
+                        path: path.to_string(),
+                        query: query_map,
+                        headers: headers.clone(),
+                        body: body.map(|b| b.to_string()),
+                    };
+                    let inject_preds =
+                        execute_predicate_generator_inject(inject_fn, &mb_request, &predicates);
+                    predicates.extend(inject_preds);
+                }
+                #[cfg(not(feature = "javascript"))]
+                {
+                    tracing::warn!("predicateGenerator inject requires the 'javascript' feature; generator ignored");
+                    let _ = inject_fn;
+                }
+                continue;
+            }
+
+            // Get the matches config
+            let matches = match gen_obj.get("matches").and_then(|m| m.as_object()) {
+                Some(m) => m,
+                None => continue,
+            };
+
+            // Get options
+            let case_sensitive = gen_obj
+                .get("caseSensitive")
+                .and_then(|c| c.as_bool())
+                .unwrap_or(true);
+            let predicate_operator = gen_obj
+                .get("predicateOperator")
+                .and_then(|p| p.as_str())
+                .unwrap_or("equals");
+            let except_pattern = gen_obj.get("except").and_then(|e| e.as_str());
+
+            // Build predicate values
+            let mut pred_values = serde_json::Map::new();
+
+            // Handle path
+            if matches
+                .get("path")
+                .and_then(|p| p.as_bool())
+                .unwrap_or(false)
+            {
+                let mut path_val = path.to_string();
+                // Apply except pattern if present
+                if let Some(pattern) = except_pattern {
+                    if let Ok(re) = regex::Regex::new(pattern) {
+                        path_val = re.replace_all(&path_val, "").to_string();
+                    }
+                }
+                pred_values.insert("path".to_string(), serde_json::Value::String(path_val));
+            }
+
+            // Handle method
+            if matches
+                .get("method")
+                .and_then(|m| m.as_bool())
+                .unwrap_or(false)
+            {
+                let mut method_val = method.to_string();
+                if let Some(pattern) = except_pattern {
+                    if let Ok(re) = regex::Regex::new(pattern) {
+                        method_val = re.replace_all(&method_val, "").to_string();
+                    }
+                }
+                pred_values.insert("method".to_string(), serde_json::Value::String(method_val));
+            }
+
+            // Handle query
+            if matches
+                .get("query")
+                .and_then(|q| q.as_bool())
+                .unwrap_or(false)
+            {
+                if let Some(query_str) = query {
+                    let query_map = crate::imposter::parse_query_string(query_str);
+                    if !query_map.is_empty() {
+                        let query_json: serde_json::Map<String, serde_json::Value> = query_map
+                            .into_iter()
+                            .map(|(k, v)| (k, serde_json::Value::String(v)))
+                            .collect();
+                        pred_values
+                            .insert("query".to_string(), serde_json::Value::Object(query_json));
+                    }
+                }
+            }
+
+            // Handle headers
+            if let Some(header_matches) = matches.get("headers").and_then(|h| h.as_object()) {
+                let mut header_preds = serde_json::Map::new();
+                for (header_name, should_match) in header_matches {
+                    if should_match.as_bool().unwrap_or(false) {
+                        if let Some(header_value) = headers.get(header_name) {
+                            header_preds.insert(
+                                header_name.clone(),
+                                serde_json::Value::String(header_value.clone()),
+                            );
+                        }
+                    }
+                }
+                if !header_preds.is_empty() {
+                    pred_values.insert(
+                        "headers".to_string(),
+                        serde_json::Value::Object(header_preds),
+                    );
+                }
+            }
+
+            // Handle body
+            if matches
+                .get("body")
+                .and_then(|b| b.as_bool())
+                .unwrap_or(false)
+            {
+                if let Some(body_str) = body {
+                    let mut body_val = body_str.to_string();
+                    // Apply except pattern if present
+                    if let Some(pattern) = except_pattern {
+                        if let Ok(re) = regex::Regex::new(pattern) {
+                            body_val = re.replace_all(&body_val, "").to_string();
+                        }
+                    }
+                    pred_values.insert("body".to_string(), serde_json::Value::String(body_val));
+                }
+            }
+
+            if pred_values.is_empty() {
+                continue;
+            }
+
+            // Build the predicate with the operator
+            let mut predicate = serde_json::Map::new();
+            predicate.insert(
+                predicate_operator.to_string(),
+                serde_json::Value::Object(pred_values),
+            );
+
+            // Always write caseSensitive so the matcher sees the generator's intent
+            predicate.insert(
+                "caseSensitive".to_string(),
+                serde_json::Value::Bool(case_sensitive),
+            );
+
+            predicates.push(serde_json::Value::Object(predicate));
+        }
+
+        predicates
+    }
+
+    /// Insert a generated stub at the specified index
+    pub fn insert_generated_stub(&self, stub: Stub, before_index: usize) {
+        let new_stub_state = StubState::new(stub);
+        let mut stubs = self.stubs.write();
+        let index = before_index.min(stubs.len());
+        stubs.insert(index, new_stub_state);
+        debug!("Inserted generated stub at index {}", index);
+    }
+
+    /// Insert or append a generated stub based on proxy mode.
+    ///
+    /// Instead of trusting a previously-obtained stub index (which may be stale
+    /// if concurrent requests modified the stub list), this method re-locates the
+    /// proxy stub under the write lock using `proxy_to` as identifier.
+    ///
+    /// For proxyOnce: Insert new stub BEFORE the proxy stub (so it matches first next time)
+    /// For proxyAlways: Append response to existing stub AFTER proxy stub, or insert new AFTER proxy
+    pub fn insert_or_append_proxy_stub(&self, stub: Stub, proxy_to: &str, proxy_mode: &str) {
+        let mut stubs = self.stubs.write();
+
+        // Re-locate the proxy stub under the write lock to avoid stale-index races.
+        let proxy_stub_index = stubs
+            .iter()
+            .position(|s| {
+                s.stub
+                    .responses
+                    .iter()
+                    .any(|r| matches!(r, StubResponse::Proxy { proxy } if proxy.to == proxy_to))
+            })
+            .unwrap_or(stubs.len());
+
+        if proxy_mode == "proxyAlways" {
+            // For proxyAlways, recorded stubs go AFTER the proxy stub
+            // This ensures proxy always runs first and records each request
+
+            // Try to find existing stub with matching predicates (after the proxy stub)
+            let matching_stub_idx = stubs
+                .iter()
+                .map(|stub_state| &stub_state.stub)
+                .enumerate()
+                .skip(proxy_stub_index + 1) // Only look after the proxy stub
+                .find(|(_, existing)| {
+                    // Compare predicates (JSON comparison)
+                    let existing_preds =
+                        serde_json::to_string(&existing.predicates).unwrap_or_default();
+                    let new_preds = serde_json::to_string(&stub.predicates).unwrap_or_default();
+                    existing_preds == new_preds && !existing.predicates.is_empty()
+                })
+                .map(|(idx, _)| idx);
+
+            if let Some(idx) = matching_stub_idx {
+                // Append responses to existing stub
+                stubs[idx].stub.responses.extend(stub.responses);
+                debug!(
+                    "Appended response to existing stub at index {} (proxyAlways mode, {} total responses)",
+                    idx,
+                    stubs[idx].stub.responses.len()
+                );
+                return;
+            }
+
+            // No matching stub found: insert new stub AFTER the proxy stub
+            let insert_index = (proxy_stub_index + 1).min(stubs.len());
+            stubs.insert(insert_index, StubState::new(stub));
+            debug!(
+                "Inserted generated stub at index {} after proxy (proxyAlways mode)",
+                insert_index
+            );
+        } else {
+            // For proxyOnce: insert new stub BEFORE the proxy stub
+            // This ensures the recorded stub matches first on subsequent requests
+            let index = proxy_stub_index.min(stubs.len());
+            stubs.insert(index, StubState::new(stub));
+            debug!(
+                "Inserted generated stub at index {} before proxy (proxyOnce mode)",
+                index
+            );
+        }
+    }
+
+    /// Forward a request through proxy and optionally record the response
+    pub async fn handle_proxy_request(
+        &self,
+        proxy_config: &ProxyResponse,
+        method: &str,
+        uri: &hyper::Uri,
+        headers: &HashMap<String, String>,
+        body: Option<&str>,
+    ) -> anyhow::Result<(u16, Vec<(String, String)>, Vec<u8>, Option<u64>)> {
+        let client = get_http_client();
+
+        info!("Proxy config - addDecorateBehavior: {:?}, addWaitBehavior: {}, predicateGenerators: {:?}",
+            proxy_config.add_decorate_behavior, proxy_config.add_wait_behavior, proxy_config.predicate_generators);
+
+        // Build the proxy URL, applying path rewrite if configured
+        let original_path = uri.path();
+        let rewritten_path = if let Some(ref rewrite) = proxy_config.path_rewrite {
+            original_path.replacen(&rewrite.from, &rewrite.to, 1)
+        } else {
+            original_path.to_string()
+        };
+
+        let target_url = format!(
+            "{}{}{}",
+            proxy_config.to,
+            rewritten_path,
+            uri.query().map(|q| format!("?{q}")).unwrap_or_default()
+        );
+
+        if proxy_config.path_rewrite.is_some() {
+            debug!(
+                "Proxy request to: {} (path rewritten from '{}')",
+                target_url, original_path
+            );
+        } else {
+            debug!("Proxy request to: {}", target_url);
+        }
+
+        // Create request signature for recording
+        let signature = RequestSignature::new(method, uri.path(), uri.query(), &[]);
+
+        // Check if we should replay cached response (based on proxy mode)
+        if !self.recording_store.should_proxy(&signature) {
+            if let Some(recorded) = self.recording_store.get_recorded(&signature) {
+                debug!("Returning recorded proxy response (proxyOnce mode)");
+                return Ok((
+                    recorded.status,
+                    recorded.headers.clone(),
+                    recorded.body.clone(),
+                    recorded.latency_ms,
+                ));
+            }
+        }
+
+        // Forward the request
+        let start = Instant::now();
+
+        let mut request = match method.to_uppercase().as_str() {
+            "GET" => client.get(&target_url),
+            "POST" => client.post(&target_url),
+            "PUT" => client.put(&target_url),
+            "DELETE" => client.delete(&target_url),
+            "PATCH" => client.patch(&target_url),
+            "HEAD" => client.head(&target_url),
+            _ => client.get(&target_url),
+        };
+
+        // Copy headers (excluding host)
+        for (key, value) in headers {
+            let key_lower = key.to_lowercase();
+            if key_lower != "host" && key_lower != "content-length" {
+                request = request.header(key, value);
+            }
+        }
+
+        // Add inject headers
+        for (key, value) in &proxy_config.inject_headers {
+            request = request.header(key, value);
+        }
+
+        // Add body if present
+        if let Some(body_str) = body {
+            request = request.body(body_str.to_string());
+        }
+
+        // Send request
+        let response = request
+            .send()
+            .await
+            .with_context(|| format!("Failed to send proxy request to {}", target_url))?;
+        let latency_ms = start.elapsed().as_millis() as u64;
+
+        let status = response.status().as_u16();
+        let response_headers: Vec<(String, String)> = response
+            .headers()
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
+            .collect();
+        // Check Content-Length before reading the full body to reject obviously oversized responses
+        if let Some(content_length) = response.content_length() {
+            if content_length as usize > MAX_PROXY_RESPONSE_BODY_SIZE {
+                anyhow::bail!(
+                    "Proxy response body from {} exceeds maximum size ({} > {} bytes)",
+                    target_url,
+                    content_length,
+                    MAX_PROXY_RESPONSE_BODY_SIZE
+                );
+            }
+        }
+
+        let body_bytes = response
+            .bytes()
+            .await
+            .with_context(|| format!("Failed to read response body from {}", target_url))?;
+
+        if body_bytes.len() > MAX_PROXY_RESPONSE_BODY_SIZE {
+            anyhow::bail!(
+                "Proxy response body from {} exceeds maximum size ({} > {} bytes)",
+                target_url,
+                body_bytes.len(),
+                MAX_PROXY_RESPONSE_BODY_SIZE
+            );
+        }
+
+        // Record the response
+        let recorded_response = RecordedResponse {
+            status,
+            headers: response_headers.clone(),
+            body: body_bytes.to_vec(),
+            latency_ms: if proxy_config.add_wait_behavior {
+                Some(latency_ms)
+            } else {
+                None
+            },
+            timestamp_secs: crate::util::unix_timestamp(),
+        };
+
+        self.recording_store.record(signature, recorded_response);
+
+        // Generate and insert stub if predicateGenerators, addWaitBehavior, or addDecorateBehavior is configured
+        // (Mountebank generates stubs automatically when these are enabled)
+        if !proxy_config.predicate_generators.is_empty()
+            || proxy_config.add_wait_behavior
+            || proxy_config.add_decorate_behavior.is_some()
+        {
+            let predicates = if !proxy_config.predicate_generators.is_empty() {
+                self.generate_predicates_from_request(
+                    &proxy_config.predicate_generators,
+                    method,
+                    uri.path(),
+                    headers,
+                    body,
+                    uri.query(),
+                )
+            } else {
+                // No predicateGenerators, generate empty predicates (matches all requests)
+                vec![]
+            };
+
+            let latency_for_stub = if proxy_config.add_wait_behavior {
+                Some(latency_ms)
+            } else {
+                None
+            };
+
+            // Note: addDecorateBehavior is added to the SAVED stub's behaviors,
+            // not applied to the first (live proxy) response. This matches Mountebank's behavior.
+            // The decoration will be applied when the saved stub is used for subsequent requests.
+
+            let new_stub = create_stub_from_proxy_response(
+                predicates,
+                status,
+                &response_headers,
+                &body_bytes,
+                latency_for_stub,
+                proxy_config.add_decorate_behavior.clone(),
+                Some(proxy_config.to.clone()),
+            );
+
+            // Insert or append the stub based on proxy mode
+            // proxyOnce: Insert new stub before the proxy stub
+            // proxyAlways: Append response to existing stub with matching predicates
+            let mode = if proxy_config.mode.is_empty() {
+                "proxyOnce"
+            } else {
+                &proxy_config.mode
+            };
+            self.insert_or_append_proxy_stub(new_stub, &proxy_config.to, mode);
+            debug!(
+                "Generated stub from proxy response for path {} (mode: {})",
+                uri.path(),
+                mode
+            );
+        }
+
+        Ok((
+            status,
+            response_headers,
+            body_bytes.to_vec(),
+            if proxy_config.add_wait_behavior {
+                Some(latency_ms)
+            } else {
+                None
+            },
+        ))
+    }
+}
