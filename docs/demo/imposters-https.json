@@ -4,8 +4,6 @@
       "port": 4545,
       "protocol": "https",
       "name": "HTTPS Demo",
-      "key": "<%- include('/certs/server.key') %>",
-      "cert": "<%- include('/certs/server.crt') %>",
       "_rift": {
         "flowState": {
           "backend": "inmemory",
