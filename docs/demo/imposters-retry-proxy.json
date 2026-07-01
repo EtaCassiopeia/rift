@@ -26,7 +26,7 @@
               "_rift": {
                 "script": {
                   "engine": "rhai",
-                  "code": "let flow_id = request.headers[\"x-flow-id\"]; if flow_id == () { flow_id = \"default\"; }; let attempts = flow_store.get(flow_id, \"attempts\"); if attempts == () { attempts = 0; }; attempts += 1; flow_store.set(flow_id, \"attempts\", attempts); if attempts <= 2 { #{ inject: true, fault: \"error\", status: 503, body: `{\"error\":\"Service temporarily unavailable\",\"attempt\":${attempts},\"message\":\"Retry after a moment\"}`, headers: #{\"Content-Type\": \"application/json\", \"Retry-After\": \"1\", \"X-Attempt\": `${attempts}`} } } else { #{ inject: false } }"
+                  "code": "fn should_inject(request, flow_store) { let flow_id = request.headers[\"x-flow-id\"]; if flow_id == () { flow_id = \"default\"; }; let attempts = flow_store.get(flow_id, \"attempts\"); if attempts == () { attempts = 0; }; attempts += 1; flow_store.set(flow_id, \"attempts\", attempts); if attempts <= 2 { let body = `{\"error\":\"Service temporarily unavailable\",\"attempt\":${attempts},\"message\":\"Retry after a moment\"}`; let att = `${attempts}`; #{ inject: true, fault: \"error\", status: 503, body: body, headers: #{\"Content-Type\": \"application/json\", \"Retry-After\": \"1\", \"X-Attempt\": att} } } else { #{ inject: false } } }"
                 }
               },
               "_behaviors": {
@@ -53,7 +53,7 @@
               "_rift": {
                 "script": {
                   "engine": "rhai",
-                  "code": "let flow_id = request.headers[\"x-flow-id\"]; if flow_id == () { flow_id = \"default\"; }; flow_store.delete(flow_id, \"attempts\"); #{ inject: true, fault: \"error\", status: 200, body: `{\"message\":\"Counter reset for flow: ${flow_id}\"}`, headers: #{\"Content-Type\": \"application/json\"} }"
+                  "code": "fn should_inject(request, flow_store) { let flow_id = request.headers[\"x-flow-id\"]; if flow_id == () { flow_id = \"default\"; }; flow_store.delete(flow_id, \"attempts\"); let body = `{\"message\":\"Counter reset for flow: ${flow_id}\"}`; #{ inject: true, fault: \"error\", status: 200, body: body, headers: #{\"Content-Type\": \"application/json\"} } }"
                 }
               }
             }
@@ -74,7 +74,7 @@
               "_rift": {
                 "script": {
                   "engine": "rhai",
-                  "code": "let flow_id = request.headers[\"x-flow-id\"]; if flow_id == () { flow_id = \"default\"; }; let attempts = flow_store.get(flow_id, \"attempts\"); if attempts == () { attempts = 0; }; #{ inject: true, fault: \"error\", status: 200, body: `{\"flow_id\":\"${flow_id}\",\"attempts\":${attempts}}`, headers: #{\"Content-Type\": \"application/json\"} }"
+                  "code": "fn should_inject(request, flow_store) { let flow_id = request.headers[\"x-flow-id\"]; if flow_id == () { flow_id = \"default\"; }; let attempts = flow_store.get(flow_id, \"attempts\"); if attempts == () { attempts = 0; }; let body = `{\"flow_id\":\"${flow_id}\",\"attempts\":${attempts}}`; #{ inject: true, fault: \"error\", status: 200, body: body, headers: #{\"Content-Type\": \"application/json\"} } }"
                 }
               }
             }

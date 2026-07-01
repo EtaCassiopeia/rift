@@ -63,7 +63,7 @@
             "_rift": {
               "script": {
                 "engine": "rhai",
-                "code": "fn should_inject(request, flow_store) { let fid = \"ratelimit\"; let count = flow_store.get(fid, \"requests\"); if count == () { count = 0; }; count += 1; flow_store.set(fid, \"requests\", count); if count > 5 { #{inject: true, fault: \"error\", status: 429, body: `{\"error\":\"Rate limit exceeded\",\"requests\":${count},\"limit\":5}`, headers: #{\"Content-Type\": \"application/json\", \"Retry-After\": \"60\"}} } else { let remaining = 5 - count; #{inject: true, fault: \"error\", status: 200, body: `{\"message\":\"OK\",\"requests\":${count},\"remaining\":${remaining}}`, headers: #{\"Content-Type\": \"application/json\", \"X-RateLimit-Remaining\": `${remaining}`}} } }"
+                "code": "fn should_inject(request, flow_store) { let fid = \"ratelimit\"; let count = flow_store.get(fid, \"requests\"); if count == () { count = 0; }; count += 1; flow_store.set(fid, \"requests\", count); if count > 5 { let body = `{\"error\":\"Rate limit exceeded\",\"requests\":${count},\"limit\":5}`; #{inject: true, fault: \"error\", status: 429, body: body, headers: #{\"Content-Type\": \"application/json\", \"Retry-After\": \"60\"}} } else { let remaining = 5 - count; let body = `{\"message\":\"OK\",\"requests\":${count},\"remaining\":${remaining}}`; let rem = `${remaining}`; #{inject: true, fault: \"error\", status: 200, body: body, headers: #{\"Content-Type\": \"application/json\", \"X-RateLimit-Remaining\": rem}} } }"
               }
             }
           }]

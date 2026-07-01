@@ -97,21 +97,19 @@ docker compose -f docker-compose-https.yml up -d
 
 ```bash
 # Basic HTTPS request (with CA certificate)
-curl --cacert certs/ca.crt https://localhost:8443/get
+curl --cacert certs/ca.crt https://localhost:4545/api/test
 
 # Or skip verification (development only)
-curl -k https://localhost:8443/get
+curl -k https://localhost:4545/api/test
 
-# Test POST with fault injection
-curl --cacert certs/ca.crt -X POST https://localhost:8443/post \
-  -d '{"test": "data"}'
+# Slow endpoint (500-1000ms latency fault over TLS)
+time curl --cacert certs/ca.crt https://localhost:4545/api/slow
 
-# TLS test endpoint
-curl --cacert certs/ca.crt https://localhost:8443/anything/tls-test
+# Flaky endpoint (30% chance of a 503 error fault)
+curl --cacert certs/ca.crt https://localhost:4545/api/flaky
 
-# TLS test with slow mode
-time curl --cacert certs/ca.crt https://localhost:8443/anything/tls-test \
-  -H "X-TLS-Test: slow"
+# Stateful counter via JavaScript inject
+curl --cacert certs/ca.crt https://localhost:4545/api/counter
 
 # View metrics (HTTP)
 curl http://localhost:9091/metrics | grep rift
