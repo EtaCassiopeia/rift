@@ -164,7 +164,7 @@ fn base_url_from_headers(headers: &hyper::HeaderMap) -> String {
             }
         }
     }
-    "http://localhost:2525".to_string()
+    format!("http://localhost:{}", super::DEFAULT_ADMIN_PORT)
 }
 
 /// Generate HATEOAS links for an imposter

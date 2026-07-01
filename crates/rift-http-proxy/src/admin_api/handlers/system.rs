@@ -57,7 +57,7 @@ pub fn handle_config() -> Response<Full<Bytes>> {
     let config = serde_json::json!({
         "version": env!("CARGO_PKG_VERSION"),
         "options": {
-            "port": 2525,
+            "port": crate::admin_api::DEFAULT_ADMIN_PORT,
             "allowInjection": std::env::var("MB_ALLOW_INJECTION")
                 .map(|v| v == "true")
                 .unwrap_or(false),

@@ -35,13 +35,20 @@ use tracing::{debug, error, info, warn};
 /// Maximum allowed proxy response body size (10 MB)
 const MAX_PROXY_RESPONSE_BODY_SIZE: usize = 10 * 1024 * 1024;
 
+/// Request timeout for the shared proxy HTTP client.
+const PROXY_HTTP_CLIENT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Default time-to-live for the fallback in-memory flow store when a stub declares
+/// scenario state but no explicit flow-state TTL is configured.
+const DEFAULT_FLOW_STATE_TTL_SECS: u64 = 300;
+
 /// Global HTTP client for proxy requests
 static HTTP_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
 
 fn get_http_client() -> &'static reqwest::Client {
     HTTP_CLIENT.get_or_init(|| {
         reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
+            .timeout(PROXY_HTTP_CLIENT_TIMEOUT)
             .pool_max_idle_per_host(0) // Disable connection pooling to avoid stale connections
             .build()
             .expect("Failed to create HTTP client: check system TLS/DNS configuration")
@@ -169,7 +176,7 @@ impl Imposter {
 
         if Self::uses_scenario_fsm(&config.stubs) {
             info!("Stubs declare scenario state; using default in-memory FlowStore");
-            return Arc::new(InMemoryFlowStore::new(300));
+            return Arc::new(InMemoryFlowStore::new(DEFAULT_FLOW_STATE_TTL_SECS));
         }
 
         Arc::new(NoOpFlowStore)

@@ -40,6 +40,8 @@ use std::sync::Arc;
 use tracing::{error, info, warn};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter, Layer};
 
+use admin_api::DEFAULT_ADMIN_PORT;
+
 /// Rift - A Mountebank-compatible HTTP chaos engineering proxy
 ///
 /// Rift starts an admin API on port 2525 (configurable) for creating imposters
@@ -54,7 +56,7 @@ struct Cli {
 
     // === Mountebank-compatible options ===
     /// Port for the admin API (Mountebank mode)
-    #[arg(long, default_value = "2525", env = "MB_PORT")]
+    #[arg(long, default_value_t = DEFAULT_ADMIN_PORT, env = "MB_PORT")]
     port: u16,
 
     /// Hostname to bind the admin API to
@@ -473,7 +475,7 @@ fn apply_rcfile_defaults(cli: &mut Cli, rcfile: &std::path::Path) -> Result<(), 
     for (key, val) in map {
         match key.as_str() {
             "port" => {
-                if cli.port == 2525 {
+                if cli.port == DEFAULT_ADMIN_PORT {
                     if let Some(p) = val.as_u64() {
                         cli.port = p as u16;
                     }
