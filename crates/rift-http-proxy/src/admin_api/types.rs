@@ -216,13 +216,18 @@ pub fn imposter_not_found(port: u16) -> Response<Full<Bytes>> {
     )
 }
 
+/// Error reading a request body into bytes. Its `Display` is surfaced as the
+/// `400 Bad Request` body, so the wording is part of the admin API contract.
+#[derive(Debug, thiserror::Error)]
+pub enum BodyError {
+    #[error("Failed to read request body: {0}")]
+    Read(#[from] hyper::Error),
+}
+
 /// Collect request body into bytes
-pub async fn collect_body(req: Request<Incoming>) -> Result<Bytes, String> {
+pub async fn collect_body(req: Request<Incoming>) -> Result<Bytes, BodyError> {
     use http_body_util::BodyExt;
-    req.collect()
-        .await
-        .map(|c| c.to_bytes())
-        .map_err(|e| format!("Failed to read request body: {e}"))
+    Ok(req.collect().await?.to_bytes())
 }
 
 #[cfg(test)]

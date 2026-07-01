@@ -27,7 +27,7 @@ pub async fn handle_create(
 ) -> Response<Full<Bytes>> {
     let body = match collect_body(req).await {
         Ok(b) => b,
-        Err(e) => return error_response(StatusCode::BAD_REQUEST, &e),
+        Err(e) => return error_response(StatusCode::BAD_REQUEST, &e.to_string()),
     };
 
     let config: ImposterConfig = match serde_json::from_slice(&body) {
@@ -133,7 +133,7 @@ pub async fn handle_replace_all(
 ) -> Response<Full<Bytes>> {
     let body = match collect_body(req).await {
         Ok(b) => b,
-        Err(e) => return error_response(StatusCode::BAD_REQUEST, &e),
+        Err(e) => return error_response(StatusCode::BAD_REQUEST, &e.to_string()),
     };
 
     #[derive(Deserialize)]
@@ -358,7 +358,7 @@ pub async fn handle_get_requests(
 ) -> Response<Full<Bytes>> {
     let clauses = match parse_match_clauses(query) {
         Ok(c) => c,
-        Err(msg) => return error_response(StatusCode::BAD_REQUEST, &msg),
+        Err(e) => return error_response(StatusCode::BAD_REQUEST, &e.to_string()),
     };
     match manager.get_imposter(port) {
         Ok(imposter) => {
@@ -385,7 +385,7 @@ pub async fn handle_clear_requests(
 ) -> Response<Full<Bytes>> {
     let clauses = match parse_match_clauses(query) {
         Ok(c) => c,
-        Err(msg) => return error_response(StatusCode::BAD_REQUEST, &msg),
+        Err(e) => return error_response(StatusCode::BAD_REQUEST, &e.to_string()),
     };
     match manager.get_imposter(port) {
         Ok(imposter) => {

@@ -8,8 +8,8 @@ use super::types::{
     StubResponse,
 };
 use crate::behaviors::{
-    apply_decorate, is_js_config_decorate, rewrite_js_config_to_rhai, HasRepeatBehavior,
-    RequestContext,
+    apply_decorate, is_js_config_decorate, rewrite_js_config_to_rhai, DecorateError,
+    HasRepeatBehavior, RequestContext,
 };
 use crate::imposter::Predicate;
 use std::collections::HashMap;
@@ -282,7 +282,7 @@ pub fn apply_js_or_rhai_decorate(
     body: &str,
     status: u16,
     headers: &mut HashMap<String, String>,
-) -> Result<(String, u16), String> {
+) -> Result<(String, u16), DecorateError> {
     // Mountebank's JS `config =>` convention (issue #191): rewrite simple field access onto the
     // Rhai request/response maps. Checked before the `function` route since arrow scripts don't
     // start with "function" and `function(config)` uses the config model, not (request, response).
@@ -318,7 +318,7 @@ pub fn apply_js_or_rhai_decorate(
                     }
                     Ok((result.body, result.status_code))
                 }
-                Err(e) => Err(format!("JavaScript decorate error: {e}")),
+                Err(e) => Err(DecorateError::JavaScript(e.to_string())),
             }
         }
 
@@ -332,7 +332,7 @@ pub fn apply_js_or_rhai_decorate(
                     return apply_decorate(&rhai_script, request, body, status, headers);
                 }
             }
-            Err("Could not parse JavaScript decorate function".to_string())
+            Err(DecorateError::JsParseFailure)
         }
     } else {
         // Assume it's Rhai script

@@ -37,6 +37,7 @@ pub use lookup::{
 pub use request::{header_to_title_case, RequestContext};
 pub use transform::{
     apply_decorate, apply_shell_transform, is_js_config_decorate, rewrite_js_config_to_rhai,
+    DecorateError,
 };
 pub use types::ResponseBehaviors;
 #[allow(unused_imports)]

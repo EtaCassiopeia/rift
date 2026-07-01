@@ -23,7 +23,7 @@ async fn parse_json_body(
 ) -> Result<serde_json::Value, Response<Full<Bytes>>> {
     let body = collect_body(req)
         .await
-        .map_err(|e| error_response(StatusCode::BAD_REQUEST, &e))?;
+        .map_err(|e| error_response(StatusCode::BAD_REQUEST, &e.to_string()))?;
     serde_json::from_slice(&body)
         .map_err(|e| error_response(StatusCode::BAD_REQUEST, &format!("Invalid JSON: {e}")))
 }
@@ -107,7 +107,7 @@ pub async fn handle_reset_scenarios(
 ) -> Response<Full<Bytes>> {
     let body = match collect_body(req).await {
         Ok(b) => b,
-        Err(e) => return error_response(StatusCode::BAD_REQUEST, &e),
+        Err(e) => return error_response(StatusCode::BAD_REQUEST, &e.to_string()),
     };
     let flow_id_opt = if body.is_empty() {
         None

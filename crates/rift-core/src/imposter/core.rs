@@ -16,8 +16,9 @@ use super::response::{
     get_rift_script_config,
 };
 use super::types::{
-    DebugImposter, DebugResponsePreview, DebugStubInfo, ImposterConfig, ProxyResponse,
-    RecordedRequest, ResponseMode, RiftResponseExtension, RiftScriptConfig, Stub, StubResponse,
+    DebugImposter, DebugResponsePreview, DebugStubInfo, ImposterConfig, ImposterError,
+    ProxyResponse, RecordedRequest, ResponseMode, RiftResponseExtension, RiftScriptConfig, Stub,
+    StubResponse,
 };
 use crate::backends::InMemoryFlowStore;
 use crate::behaviors::{HasRepeatBehavior, RuleCycler};
@@ -1227,20 +1228,20 @@ impl Imposter {
     }
 
     /// Replace a stub at a specific index
-    pub fn replace_stub(&self, index: usize, stub: Stub) -> Result<(), String> {
+    pub fn replace_stub(&self, index: usize, stub: Stub) -> Result<(), ImposterError> {
         let mut stubs = self.stubs.write();
         if index >= stubs.len() {
-            return Err(format!("Stub index {index} out of bounds"));
+            return Err(ImposterError::StubIndexOutOfBounds(index));
         }
         stubs[index].stub = stub;
         Ok(())
     }
 
     /// Delete a stub at a specific index
-    pub fn delete_stub(&self, index: usize) -> Result<(), String> {
+    pub fn delete_stub(&self, index: usize) -> Result<(), ImposterError> {
         let mut stubs = self.stubs.write();
         if index >= stubs.len() {
-            return Err(format!("Stub index {index} out of bounds"));
+            return Err(ImposterError::StubIndexOutOfBounds(index));
         }
         stubs.remove(index);
         Ok(())

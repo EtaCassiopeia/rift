@@ -24,7 +24,7 @@ pub async fn handle_add(
 ) -> Response<Full<Bytes>> {
     let body = match collect_body(req).await {
         Ok(b) => b,
-        Err(e) => return error_response(StatusCode::BAD_REQUEST, &e),
+        Err(e) => return error_response(StatusCode::BAD_REQUEST, &e.to_string()),
     };
 
     let mut add_req: AddStubRequest = match serde_json::from_slice(&body) {
@@ -97,7 +97,7 @@ pub async fn handle_replace_all(
 ) -> Response<Full<Bytes>> {
     let body = match collect_body(req).await {
         Ok(b) => b,
-        Err(e) => return error_response(StatusCode::BAD_REQUEST, &e),
+        Err(e) => return error_response(StatusCode::BAD_REQUEST, &e.to_string()),
     };
 
     let replace_req: ReplaceStubsRequest = match serde_json::from_slice(&body) {
@@ -192,7 +192,7 @@ pub async fn handle_replace(
 ) -> Response<Full<Bytes>> {
     let body = match collect_body(req).await {
         Ok(b) => b,
-        Err(e) => return error_response(StatusCode::BAD_REQUEST, &e),
+        Err(e) => return error_response(StatusCode::BAD_REQUEST, &e.to_string()),
     };
 
     let stub: Stub = match serde_json::from_slice(&body) {
@@ -257,7 +257,7 @@ pub async fn handle_replace_by_id(
 ) -> Response<Full<Bytes>> {
     let body = match collect_body(req).await {
         Ok(b) => b,
-        Err(e) => return error_response(StatusCode::BAD_REQUEST, &e),
+        Err(e) => return error_response(StatusCode::BAD_REQUEST, &e.to_string()),
     };
     let stub: Stub = match serde_json::from_slice(&body) {
         Ok(s) => s,
