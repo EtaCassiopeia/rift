@@ -23,6 +23,14 @@ repository = "https://github.com/EtaCassiopeia/rift"
 homepage = "https://github.com/EtaCassiopeia/rift"
 rust-version = "1.92"
 
+# Centralized lint policy inherited by every crate via `[lints] workspace = true`.
+# Kept intentionally conservative: CI runs `clippy -- -D warnings`, which promotes any
+# `warn` to a hard error, so stricter lints (e.g. clippy::unwrap_used / expect_used) are
+# deliberately left out here — enabling them would fail the build on ~650 pre-existing
+# sites. This table centralizes the existing policy and makes new crates inherit it.
+[workspace.lints.clippy]
+all = "warn"
+
 [workspace.dependencies]
 # Async runtime
 tokio = { version = "1.35", features = ["full"] }

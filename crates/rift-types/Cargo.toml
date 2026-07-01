@@ -9,6 +9,9 @@ repository.workspace = true
 homepage.workspace = true
 description = "Shared core types for the Rift workspace (imposters, stubs, predicates)."
 
+[lints]
+workspace = true
+
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
