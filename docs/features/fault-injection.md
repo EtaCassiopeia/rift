@@ -177,6 +177,19 @@ Simulate network-level failures:
 TCP fault types:
 - `CONNECTION_RESET_BY_PEER` - RST packet (connection reset)
 
+### Fault Precedence
+
+When a single `_rift.fault` block combines `latency`, `tcp`, and `error`, they are evaluated in
+this order:
+
+1. **`latency`** — applied first (the response is delayed), then evaluation continues.
+2. **`tcp`** — if it fires, the connection is reset and no HTTP response is sent. A `tcp` fault
+   is a transport-level event, so it takes precedence over `error`.
+3. **`error`** — applied only when no `tcp` fault fired.
+
+So `latency` + `tcp` is a *delay-then-drop*, and a configured `tcp` fault always wins over an
+`error` fault rather than being silently dropped.
+
 ---
 
 ## Scripted Faults
