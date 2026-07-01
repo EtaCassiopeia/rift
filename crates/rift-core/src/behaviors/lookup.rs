@@ -187,7 +187,7 @@ impl CsvData {
 /// Apply lookup behaviors to response body
 pub fn apply_lookup_behaviors(
     body: &str,
-    headers: &mut HashMap<String, String>,
+    headers: &mut HashMap<String, Vec<String>>,
     behaviors: &[LookupBehavior],
     request: &RequestContext,
     csv_cache: &CsvCache,
@@ -215,7 +215,9 @@ pub fn apply_lookup_behaviors(
                 for (token, value) in replacements {
                     let full_token = format!("{}{}", behavior.into, token);
                     result = result.replace(&full_token, &value);
-                    for header_value in headers.values_mut() {
+                    // Per value, so multi-value headers keep their multiplicity (RFC 7230 §3.2.2
+                    // forbids folding Set-Cookie).
+                    for header_value in headers.values_mut().flatten() {
                         *header_value = header_value.replace(&full_token, &value);
                     }
                 }
@@ -224,4 +226,61 @@ pub fn apply_lookup_behaviors(
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lookup_preserves_multi_value_headers_and_substitutes_each() {
+        let path = std::env::temp_dir().join(format!("rift_lookup_272_{}.csv", std::process::id()));
+        std::fs::write(&path, "id,name\nhi,World\n").expect("write csv");
+
+        let mut query = HashMap::new();
+        query.insert("q".to_string(), "hi".to_string());
+        let request = RequestContext {
+            method: "GET".to_string(),
+            path: "/x".to_string(),
+            query,
+            headers: HashMap::new(),
+            body: None,
+        };
+
+        let behaviors = vec![LookupBehavior {
+            key: LookupKey {
+                from: {
+                    let mut map = HashMap::new();
+                    map.insert("query".to_string(), "q".to_string());
+                    CopySource::Nested(map)
+                },
+                extraction: ExtractionMethod::Regex {
+                    selector: ".*".to_string(),
+                    options: None,
+                },
+            },
+            from_data_source: DataSource {
+                csv: CsvDataSource {
+                    path: path.to_string_lossy().into_owned(),
+                    key_column: "id".to_string(),
+                    delimiter: ',',
+                },
+            },
+            into: "${row}".to_string(),
+        }];
+
+        let mut headers: HashMap<String, Vec<String>> = HashMap::new();
+        headers.insert(
+            "Set-Cookie".to_string(),
+            vec!["a=1".to_string(), "n=${row}[name]".to_string()],
+        );
+
+        apply_lookup_behaviors("", &mut headers, &behaviors, &request, &CsvCache::default());
+
+        assert_eq!(
+            headers["Set-Cookie"],
+            vec!["a=1".to_string(), "n=World".to_string()]
+        );
+        let _ = std::fs::remove_file(&path);
+    }
 }

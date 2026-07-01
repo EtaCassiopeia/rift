@@ -515,69 +515,81 @@ async fn handle_request_inner(
                         }
                     }
 
-                    // Behaviors (copy/lookup/decorate) operate on single-value headers (Mountebank
-                    // semantics). Collapse the multi-value map to a single-value view for them and
-                    // fold the result back, so a plain multi-value `is` response (no behaviors)
-                    // keeps its multiple values while a response that also uses behaviors degrades
-                    // to single-value (issue #238).
-                    let has_behaviors = !parsed_behaviors.copy.is_empty()
-                        || !parsed_behaviors.lookup.is_empty()
-                        || parsed_behaviors.decorate.is_some();
-                    if has_behaviors {
-                        if headers.values().any(|v| v.len() > 1) {
+                    // copy/lookup are pure token substitution — apply them across each value of
+                    // multi-value headers so multiplicity survives (e.g. multiple Set-Cookie;
+                    // RFC 7230 §3.2.2 forbids folding Set-Cookie). decorate uses a single-value
+                    // JS/Rhai object model, so only that path collapses — and even there Set-Cookie
+                    // is held aside, never comma-folded.
+                    if !parsed_behaviors.copy.is_empty() {
+                        body = apply_copy_behaviors(
+                            &body,
+                            &mut headers,
+                            &parsed_behaviors.copy,
+                            &request_context,
+                        );
+                    }
+                    if !parsed_behaviors.lookup.is_empty() {
+                        body = apply_lookup_behaviors(
+                            &body,
+                            &mut headers,
+                            &parsed_behaviors.lookup,
+                            &request_context,
+                            csv_cache(),
+                        );
+                    }
+                    if let Some(ref decorate_script) = parsed_behaviors.decorate {
+                        // decorate uses a single-value JS/Rhai object model. Set-Cookie is held
+                        // aside and never folded (RFC 7230 §3.2.2); other multi-value headers
+                        // degrade to single-value for the script (issue #238 boundary) — warn so
+                        // the collapse is not silent (e.g. WWW-Authenticate is also corrupted by
+                        // comma-folding).
+                        let is_set_cookie = |k: &str| k.eq_ignore_ascii_case("set-cookie");
+                        let folded: Vec<&String> = headers
+                            .iter()
+                            .filter(|(k, v)| v.len() > 1 && !is_set_cookie(k))
+                            .map(|(k, _)| k)
+                            .collect();
+                        if !folded.is_empty() {
                             warn!(
-                                "response uses behaviors (copy/lookup/decorate); multi-value \
-                                 headers are collapsed to single-value (comma-joined), so e.g. \
-                                 multiple Set-Cookie become one line (issue #238 boundary). \
-                                 Affected: {:?}",
-                                headers
-                                    .iter()
-                                    .filter(|(_, v)| v.len() > 1)
-                                    .map(|(k, _)| k)
-                                    .collect::<Vec<_>>()
+                                "decorate uses a single-value object model; multi-value headers \
+                                 {folded:?} are comma-folded (issue #238 boundary). Set-Cookie is \
+                                 exempt; other headers that forbid list-folding will be corrupted."
                             );
                         }
+
+                        let set_cookie: Vec<(String, Vec<String>)> = headers
+                            .iter()
+                            .filter(|(k, _)| is_set_cookie(k))
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect();
                         let mut single: HashMap<String, String> = headers
                             .iter()
+                            .filter(|(k, _)| !is_set_cookie(k))
                             .map(|(k, v)| (k.clone(), v.join(", ")))
                             .collect();
-
-                        if !parsed_behaviors.copy.is_empty() {
-                            body = apply_copy_behaviors(
-                                &body,
-                                &mut single,
-                                &parsed_behaviors.copy,
-                                &request_context,
-                            );
-                        }
-                        if !parsed_behaviors.lookup.is_empty() {
-                            body = apply_lookup_behaviors(
-                                &body,
-                                &mut single,
-                                &parsed_behaviors.lookup,
-                                &request_context,
-                                csv_cache(),
-                            );
-                        }
-                        if let Some(ref decorate_script) = parsed_behaviors.decorate {
-                            match apply_js_or_rhai_decorate(
-                                decorate_script,
-                                &request_context,
-                                &body,
-                                status,
-                                &mut single,
-                            ) {
-                                Ok((new_body, new_status)) => {
-                                    body = new_body;
-                                    status = new_status;
-                                }
-                                Err(e) => {
-                                    warn!("Decorate script error: {}", e);
+                        match apply_js_or_rhai_decorate(
+                            decorate_script,
+                            &request_context,
+                            &body,
+                            status,
+                            &mut single,
+                        ) {
+                            Ok((new_body, new_status)) => {
+                                body = new_body;
+                                status = new_status;
+                                // Restore the held-aside Set-Cookie lines unless the script set its
+                                // own (case-insensitively) — a script override wins deterministically.
+                                let script_set_cookie = single.keys().any(|k| is_set_cookie(k));
+                                headers = single.into_iter().map(|(k, v)| (k, vec![v])).collect();
+                                if !script_set_cookie {
+                                    headers.extend(set_cookie);
                                 }
                             }
+                            // Behave as if decorate was absent: keep the original multi-value
+                            // `headers` and pre-decorate body/status rather than serving a folded,
+                            // undecorated response.
+                            Err(e) => warn!("Decorate script error: {e}"),
                         }
-
-                        headers = single.into_iter().map(|(k, v)| (k, vec![v])).collect();
                     }
 
                     // shellTransform (issue #269): pipe the body through external command(s);
