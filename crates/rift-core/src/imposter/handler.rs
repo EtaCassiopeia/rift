@@ -900,6 +900,30 @@ async fn apply_rift_fault(
         tokio::time::sleep(Duration::from_millis(latency_delay_ms)).await;
     }
 
+    // Check for TCP fault before the HTTP error fault. A `tcp` fault is a transport-level event:
+    // the connection is reset before any HTTP response can be written, so it must win over an
+    // `error` fault — otherwise a configured `tcp` is silently dropped whenever `error` also fires
+    // (issue #271). Latency above still applies first, keeping delay-then-drop coherent.
+    if let Some(ref tcp_fault) = fault_config.tcp {
+        if let Some(kind) = super::fault_io::TcpFaultKind::parse(tcp_fault) {
+            debug!("Applying _rift.fault.tcp: {:?}", kind);
+            if apply_error {
+                debug!("_rift.fault.error preempted by tcp fault (connection reset)");
+            }
+            // Carrier response: the serve loop's `FaultIo` aborts the connection before this is
+            // ever sent. The `TcpFaultKind` extension tells it which real transport fault to apply
+            // (issue #239) — the status/body here are never observed by the client.
+            let mut response = build_response_with_headers(
+                StatusCode::BAD_GATEWAY,
+                [("x-rift-fault", tcp_fault.as_str())],
+                Bytes::new(),
+            );
+            response.extensions_mut().insert(kind);
+            return Some(response);
+        }
+        warn!("Unknown TCP fault type: {}", tcp_fault);
+    }
+
     // Apply error fault
     if apply_error {
         if let Some(ref error) = fault_config.error {
@@ -926,23 +950,134 @@ async fn apply_rift_fault(
         }
     }
 
-    // Check for TCP fault
-    if let Some(ref tcp_fault) = fault_config.tcp {
-        if let Some(kind) = super::fault_io::TcpFaultKind::parse(tcp_fault) {
-            debug!("Applying _rift.fault.tcp: {:?}", kind);
-            // Carrier response: the serve loop's `FaultIo` aborts the connection before this is
-            // ever sent. The `TcpFaultKind` extension tells it which real transport fault to apply
-            // (issue #239) — the status/body here are never observed by the client.
-            let mut response = build_response_with_headers(
-                StatusCode::BAD_GATEWAY,
-                [("x-rift-fault", tcp_fault.as_str())],
-                Bytes::new(),
-            );
-            response.extensions_mut().insert(kind);
-            return Some(response);
+    None
+}
+
+#[cfg(test)]
+mod fault_precedence_tests {
+    use super::super::fault_io::TcpFaultKind;
+    use super::super::types::{RiftErrorFault, RiftFaultConfig, RiftLatencyFault};
+    use super::{apply_rift_fault, Bytes, Full, Response};
+    use std::time::Instant;
+
+    fn error_fault(status: u16) -> RiftErrorFault {
+        RiftErrorFault {
+            probability: 1.0,
+            status,
+            body: None,
+            headers: Default::default(),
         }
-        warn!("Unknown TCP fault type: {}", tcp_fault);
     }
 
-    None
+    fn latency_fault(ms: u64) -> RiftLatencyFault {
+        RiftLatencyFault {
+            probability: 1.0,
+            min_ms: 0,
+            max_ms: 0,
+            ms: Some(ms),
+        }
+    }
+
+    async fn apply(config: &RiftFaultConfig) -> Response<Full<Bytes>> {
+        let mut status = 200;
+        let mut body = String::new();
+        apply_rift_fault(config, &mut status, &mut body)
+            .await
+            .expect("a fault response")
+    }
+
+    /// A configured `tcp` fault must win over a certain `error` fault: the response is the TCP
+    /// carrier (parsed `TcpFaultKind` in extensions), never the HTTP error status (issue #271).
+    #[tokio::test]
+    async fn tcp_takes_precedence_over_error() {
+        let config = RiftFaultConfig {
+            latency: Some(latency_fault(0)),
+            error: Some(error_fault(503)),
+            tcp: Some("CONNECTION_RESET_BY_PEER".to_string()),
+        };
+        let response = apply(&config).await;
+
+        assert_eq!(
+            response.extensions().get::<TcpFaultKind>().copied(),
+            Some(TcpFaultKind::Reset),
+            "tcp carrier must drive the connection reset"
+        );
+        assert_ne!(
+            response.status(),
+            503,
+            "error fault must not win over the tcp fault"
+        );
+        assert_eq!(
+            response.headers().get("x-rift-fault").unwrap(),
+            "CONNECTION_RESET_BY_PEER"
+        );
+    }
+
+    /// With no `tcp` fault, a certain `error` fault still produces the HTTP error response.
+    #[tokio::test]
+    async fn error_fault_applies_when_no_tcp() {
+        let config = RiftFaultConfig {
+            latency: Some(latency_fault(0)),
+            error: Some(error_fault(503)),
+            tcp: None,
+        };
+        let response = apply(&config).await;
+
+        assert_eq!(response.status(), 503);
+        assert_eq!(response.headers().get("x-rift-fault").unwrap(), "error");
+        assert!(response.extensions().get::<TcpFaultKind>().is_none());
+    }
+
+    /// An unparseable `tcp` string must not swallow a configured `error` fault: it warns and falls
+    /// through to the HTTP error response (guards the path most adjacent to the issue #271 drop).
+    #[tokio::test]
+    async fn unparseable_tcp_falls_through_to_error() {
+        let config = RiftFaultConfig {
+            latency: None,
+            error: Some(error_fault(503)),
+            tcp: Some("NONSENSE".to_string()),
+        };
+        let response = apply(&config).await;
+
+        assert_eq!(response.status(), 503);
+        assert_eq!(response.headers().get("x-rift-fault").unwrap(), "error");
+        assert!(response.extensions().get::<TcpFaultKind>().is_none());
+    }
+
+    /// A `tcp` fault on its own still resets (regression guard).
+    #[tokio::test]
+    async fn tcp_fault_alone_resets() {
+        let config = RiftFaultConfig {
+            latency: None,
+            error: None,
+            tcp: Some("CONNECTION_RESET_BY_PEER".to_string()),
+        };
+        let response = apply(&config).await;
+
+        assert_eq!(
+            response.extensions().get::<TcpFaultKind>().copied(),
+            Some(TcpFaultKind::Reset)
+        );
+    }
+
+    /// Latency is still applied before the tcp fault wins (delay-then-drop stays coherent).
+    #[tokio::test]
+    async fn latency_applies_before_tcp() {
+        let config = RiftFaultConfig {
+            latency: Some(latency_fault(60)),
+            error: Some(error_fault(503)),
+            tcp: Some("CONNECTION_RESET_BY_PEER".to_string()),
+        };
+        let start = Instant::now();
+        let response = apply(&config).await;
+
+        assert!(
+            start.elapsed().as_millis() >= 50,
+            "latency must be applied before the tcp reset"
+        );
+        assert_eq!(
+            response.extensions().get::<TcpFaultKind>().copied(),
+            Some(TcpFaultKind::Reset)
+        );
+    }
 }
