@@ -2,6 +2,14 @@ use anyhow::{Context, Result, anyhow};
 use serde_json::Value;
 use std::sync::Arc;
 
+/// Outcome of [`FlowStore::compare_and_set`]: either the write applied, or the key's
+/// current value (at decision time) is returned so the caller can react to who won.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CasOutcome {
+    Applied,
+    Conflict(Option<Value>),
+}
+
 /// Backend-agnostic trait for flow state storage
 ///
 /// This trait is intentionally synchronous to avoid async bridging issues
@@ -25,6 +33,31 @@ pub trait FlowStore: Send + Sync {
 
     /// Set TTL for all keys under a flow_id
     fn set_ttl(&self, flow_id: &str, ttl_seconds: i64) -> Result<()>;
+
+    /// Atomically set `key` to `new` iff its current value equals `expected`
+    /// (`None` = "not present"). Returns the winning current value on conflict.
+    ///
+    /// Backends may compare by canonical JSON serialization rather than structurally
+    /// (the two agree for anything this crate writes; `preserve_order` is off).
+    ///
+    /// The provided default is a NON-ATOMIC get-then-set fallback kept so existing
+    /// third-party impls keep compiling (issue #311); real backends should override
+    /// with a genuinely atomic implementation.
+    fn compare_and_set(
+        &self,
+        flow_id: &str,
+        key: &str,
+        expected: Option<&Value>,
+        new: Value,
+    ) -> Result<CasOutcome> {
+        let current = self.get(flow_id, key)?;
+        if current.as_ref() == expected {
+            self.set(flow_id, key, new)?;
+            Ok(CasOutcome::Applied)
+        } else {
+            Ok(CasOutcome::Conflict(current))
+        }
+    }
 }
 
 /// No-op flow store that does nothing
@@ -412,5 +445,100 @@ impl FlowStore for FailingFlowStore {
     }
     fn set_ttl(&self, flow_id: &str, _ttl_seconds: i64) -> Result<()> {
         self.fail("flowStore.setTtl", flow_id, "")
+    }
+}
+
+#[cfg(test)]
+mod cas_tests {
+    use super::*;
+    use serde_json::json;
+    use std::sync::Mutex;
+
+    /// A third-party-style store that does NOT override compare_and_set — proves the
+    /// provided default keeps existing impls compiling and gives get-then-set semantics.
+    struct MinimalStore {
+        data: Mutex<std::collections::HashMap<String, Value>>,
+    }
+
+    impl MinimalStore {
+        fn new() -> Self {
+            Self {
+                data: Mutex::new(std::collections::HashMap::new()),
+            }
+        }
+    }
+
+    impl FlowStore for MinimalStore {
+        fn get(&self, flow_id: &str, key: &str) -> Result<Option<Value>> {
+            Ok(self
+                .data
+                .lock()
+                .expect("test lock")
+                .get(&format!("{flow_id}:{key}"))
+                .cloned())
+        }
+        fn set(&self, flow_id: &str, key: &str, value: Value) -> Result<()> {
+            self.data
+                .lock()
+                .expect("test lock")
+                .insert(format!("{flow_id}:{key}"), value);
+            Ok(())
+        }
+        fn exists(&self, flow_id: &str, key: &str) -> Result<bool> {
+            Ok(self.get(flow_id, key)?.is_some())
+        }
+        fn delete(&self, flow_id: &str, key: &str) -> Result<()> {
+            self.data
+                .lock()
+                .expect("test lock")
+                .remove(&format!("{flow_id}:{key}"));
+            Ok(())
+        }
+        fn increment(&self, _flow_id: &str, _key: &str) -> Result<i64> {
+            Ok(1)
+        }
+        fn set_ttl(&self, _flow_id: &str, _ttl_seconds: i64) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn default_cas_applies_when_expected_matches() {
+        let store = MinimalStore::new();
+        let outcome = store
+            .compare_and_set("f", "k", None, json!("v1"))
+            .expect("cas");
+        assert!(matches!(outcome, CasOutcome::Applied));
+        assert_eq!(store.get("f", "k").expect("get"), Some(json!("v1")));
+
+        let outcome = store
+            .compare_and_set("f", "k", Some(&json!("v1")), json!("v2"))
+            .expect("cas");
+        assert!(matches!(outcome, CasOutcome::Applied));
+        assert_eq!(store.get("f", "k").expect("get"), Some(json!("v2")));
+    }
+
+    #[test]
+    fn default_cas_conflicts_with_current_value() {
+        let store = MinimalStore::new();
+        store.set("f", "k", json!("actual")).expect("set");
+
+        let outcome = store
+            .compare_and_set("f", "k", Some(&json!("expected")), json!("new"))
+            .expect("cas");
+        match outcome {
+            CasOutcome::Conflict(current) => assert_eq!(current, Some(json!("actual"))),
+            CasOutcome::Applied => panic!("must conflict"),
+        }
+        assert_eq!(
+            store.get("f", "k").expect("get"),
+            Some(json!("actual")),
+            "conflict must not write"
+        );
+
+        let outcome = store
+            .compare_and_set("f", "k", None, json!("new"))
+            .expect("cas");
+        assert!(matches!(outcome, CasOutcome::Conflict(Some(_))));
     }
 }

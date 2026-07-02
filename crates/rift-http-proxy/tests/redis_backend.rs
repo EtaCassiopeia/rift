@@ -74,4 +74,74 @@ mod tests {
         store.delete("flow1", "key1").unwrap();
         assert!(!store.exists("flow1", "key1").unwrap());
     }
+
+    // ===== compare_and_set (issue #311) — single-round-trip Lua CAS =====
+
+    use rift_http_proxy::flow_state::CasOutcome;
+
+    #[tokio::test]
+    async fn test_redis_cas_expected_absent_applies() {
+        let (_container, store) = setup(300).await;
+
+        let outcome = store
+            .compare_and_set("casf", "state", None, json!("paid"))
+            .unwrap();
+        assert!(matches!(outcome, CasOutcome::Applied));
+        assert_eq!(store.get("casf", "state").unwrap(), Some(json!("paid")));
+
+        store.delete("casf", "state").unwrap();
+    }
+
+    // SETEX inside the CAS script must carry the store TTL: a CAS-applied key expires
+    // like a set() key (a dropped TTL arg would mean unbounded key growth in Redis).
+    #[tokio::test]
+    async fn test_redis_cas_applied_key_expires() {
+        let (_container, store) = setup(2).await;
+
+        let outcome = store
+            .compare_and_set("casttl", "state", None, json!("paid"))
+            .unwrap();
+        assert!(matches!(outcome, CasOutcome::Applied));
+        assert!(store.exists("casttl", "state").unwrap());
+
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        assert_eq!(
+            store.get("casttl", "state").unwrap(),
+            None,
+            "CAS-applied key must expire with the store TTL"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_redis_cas_expected_present_and_conflict() {
+        let (_container, store) = setup(300).await;
+        store.set("casf2", "state", json!("Started")).unwrap();
+
+        let outcome = store
+            .compare_and_set("casf2", "state", Some(&json!("Started")), json!("paid"))
+            .unwrap();
+        assert!(matches!(outcome, CasOutcome::Applied));
+
+        // Now the state is "paid": expecting "Started" must conflict and return "paid".
+        let outcome = store
+            .compare_and_set("casf2", "state", Some(&json!("Started")), json!("shipped"))
+            .unwrap();
+        match outcome {
+            CasOutcome::Conflict(current) => assert_eq!(current, Some(json!("paid"))),
+            CasOutcome::Applied => panic!("must conflict"),
+        }
+        assert_eq!(
+            store.get("casf2", "state").unwrap(),
+            Some(json!("paid")),
+            "conflict must not write"
+        );
+
+        // Expecting absent while present also conflicts.
+        let outcome = store
+            .compare_and_set("casf2", "state", None, json!("shipped"))
+            .unwrap();
+        assert!(matches!(outcome, CasOutcome::Conflict(Some(_))));
+
+        store.delete("casf2", "state").unwrap();
+    }
 }

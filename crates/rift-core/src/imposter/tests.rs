@@ -3596,3 +3596,173 @@ mod backend_errors {
         manager.delete_all().await;
     }
 }
+
+// =========================================================================
+// Issue #311: scenario transitions are compare-and-set, not get-then-set
+// =========================================================================
+mod cas_transitions {
+    use super::*;
+    use crate::imposter::core::Imposter;
+    use serde_json::json;
+
+    fn imposter_with(stub: serde_json::Value) -> Imposter {
+        let config: ImposterConfig = serde_json::from_value(json!({
+            "protocol": "http", "port": 19506,
+            "stubs": [stub]
+        }))
+        .expect("config");
+        Imposter::new(config)
+    }
+
+    fn gated_stub() -> serde_json::Value {
+        json!({
+            "scenarioName": "order",
+            "requiredScenarioState": "Started",
+            "newScenarioState": "paid",
+            "predicates": [{"equals": {"path": "/pay"}}],
+            "responses": [{"is": {"statusCode": 200}}]
+        })
+    }
+
+    // The deterministic red for the lost-update class: a transition whose gate state has
+    // moved underneath must NOT clobber the newer state (old code overwrote it).
+    #[test]
+    fn transition_conflict_does_not_clobber() {
+        let imposter = imposter_with(gated_stub());
+        let stub: Stub = serde_json::from_value(gated_stub()).expect("stub");
+        imposter
+            .set_scenario_state("f", "order", "shipped")
+            .expect("seed moved state");
+
+        imposter
+            .apply_scenario_transition("f", &stub)
+            .expect("conflict is not an error");
+        assert_eq!(
+            imposter.scenario_state("f", "order").expect("state"),
+            "shipped",
+            "a stale transition must not overwrite a state that moved underneath"
+        );
+    }
+
+    #[test]
+    fn transition_from_stored_initial_state_applies() {
+        let imposter = imposter_with(gated_stub());
+        let stub: Stub = serde_json::from_value(gated_stub()).expect("stub");
+        imposter
+            .set_scenario_state("f", "order", "Started")
+            .expect("seed explicit initial");
+
+        imposter
+            .apply_scenario_transition("f", &stub)
+            .expect("transition");
+        assert_eq!(
+            imposter.scenario_state("f", "order").expect("state"),
+            "paid"
+        );
+    }
+
+    #[test]
+    fn transition_from_absent_initial_applies() {
+        let imposter = imposter_with(gated_stub());
+        let stub: Stub = serde_json::from_value(gated_stub()).expect("stub");
+
+        imposter
+            .apply_scenario_transition("f", &stub)
+            .expect("transition");
+        assert_eq!(
+            imposter.scenario_state("f", "order").expect("state"),
+            "paid",
+            "initial state stored as absence must satisfy the gate expectation"
+        );
+    }
+
+    // The retry-then-lose sub-arm: a racer writes between the two CAS calls of the
+    // absent-initial path. Losing must be a silent no-write Ok, never an error or a set.
+    #[test]
+    fn losing_the_initial_state_retry_is_a_silent_no_write() {
+        use crate::extensions::flow_state::{CasOutcome, FlowStore};
+        use serde_json::Value;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Default)]
+        struct RetryLoserStore {
+            writes: AtomicUsize,
+        }
+
+        impl FlowStore for RetryLoserStore {
+            fn get(&self, _f: &str, _k: &str) -> anyhow::Result<Option<Value>> {
+                Ok(None)
+            }
+            fn set(&self, _f: &str, _k: &str, _v: Value) -> anyhow::Result<()> {
+                self.writes.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+            fn exists(&self, _f: &str, _k: &str) -> anyhow::Result<bool> {
+                Ok(false)
+            }
+            fn delete(&self, _f: &str, _k: &str) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn increment(&self, _f: &str, _k: &str) -> anyhow::Result<i64> {
+                Ok(1)
+            }
+            fn set_ttl(&self, _f: &str, _t: i64) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn compare_and_set(
+                &self,
+                _f: &str,
+                _k: &str,
+                expected: Option<&Value>,
+                _new: Value,
+            ) -> anyhow::Result<CasOutcome> {
+                match expected {
+                    // First CAS (expecting "Started"): key looks absent.
+                    Some(_) => Ok(CasOutcome::Conflict(None)),
+                    // Retry (expecting absent): a racer won in between.
+                    None => Ok(CasOutcome::Conflict(Some(serde_json::json!(
+                        "paid-elsewhere"
+                    )))),
+                }
+            }
+        }
+
+        let mut imposter = imposter_with(gated_stub());
+        let store = std::sync::Arc::new(RetryLoserStore::default());
+        imposter.flow_store = store.clone();
+        let stub: Stub = serde_json::from_value(gated_stub()).expect("stub");
+
+        imposter
+            .apply_scenario_transition("f", &stub)
+            .expect("losing the retry is not an error");
+        assert_eq!(
+            store.writes.load(Ordering::SeqCst),
+            0,
+            "the losing retry must not write"
+        );
+    }
+
+    #[test]
+    fn ungated_transition_still_unconditional() {
+        let stub_json = json!({
+            "scenarioName": "order",
+            "newScenarioState": "paid",
+            "predicates": [{"equals": {"path": "/pay"}}],
+            "responses": [{"is": {"statusCode": 200}}]
+        });
+        let imposter = imposter_with(stub_json.clone());
+        let stub: Stub = serde_json::from_value(stub_json).expect("stub");
+        imposter
+            .set_scenario_state("f", "order", "shipped")
+            .expect("seed");
+
+        imposter
+            .apply_scenario_transition("f", &stub)
+            .expect("transition");
+        assert_eq!(
+            imposter.scenario_state("f", "order").expect("state"),
+            "paid",
+            "an ungated transition keeps today's unconditional overwrite semantics"
+        );
+    }
+}
