@@ -5,8 +5,8 @@
 
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full};
-use hyper::body::Bytes;
 use hyper::Response;
+use hyper::body::Bytes;
 use std::convert::Infallible;
 
 /// Extension trait for `Response<Full<Bytes>>` providing common transformations.

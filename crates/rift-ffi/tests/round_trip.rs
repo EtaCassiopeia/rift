@@ -4,17 +4,19 @@
 //! use-after-free are undefined behaviour, so they belong under Miri/ASan, not a normal test.)
 
 use rift_ffi::*;
-use std::ffi::{c_char, CStr, CString};
+use std::ffi::{CStr, CString, c_char};
 
 fn cstr(s: &str) -> CString {
     CString::new(s).expect("no interior NUL in test input")
 }
 
 unsafe fn take_json(p: *mut c_char) -> String {
-    assert!(!p.is_null(), "expected JSON, got null");
-    let s = CStr::from_ptr(p).to_str().expect("utf8").to_owned();
-    rift_free(p);
-    s
+    unsafe {
+        assert!(!p.is_null(), "expected JSON, got null");
+        let s = CStr::from_ptr(p).to_str().expect("utf8").to_owned();
+        rift_free(p);
+        s
+    }
 }
 
 #[test]

@@ -1,7 +1,7 @@
 use crate::config::{HeaderMatch, PathMatch, Rule};
 use crate::predicate::{
-    compile_header_matcher, compile_query_matcher, parse_query_string, CompiledBodyMatcher,
-    CompiledFieldMatcher,
+    CompiledBodyMatcher, CompiledFieldMatcher, compile_header_matcher, compile_query_matcher,
+    parse_query_string,
 };
 use hyper::{HeaderMap, Method, Uri};
 use regex::Regex;

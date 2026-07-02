@@ -1,7 +1,7 @@
 //! Unified request predicate for matching against request fields.
 
 use super::body_matcher::{BodyMatcher, CompiledBodyMatcher};
-use super::field_matcher::{compile_header_matcher, compile_query_matcher, FieldMatcher};
+use super::field_matcher::{FieldMatcher, compile_header_matcher, compile_query_matcher};
 use super::options::PredicateOptions;
 use super::path_matcher::{CompiledPathMatch, PathMatcher};
 use super::string_matcher::{CompiledStringMatcher, StringMatcher};

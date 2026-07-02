@@ -85,10 +85,10 @@ impl App {
             if let Some(home) = dirs::home_dir() {
                 return home.join(rest).to_string_lossy().to_string();
             }
-        } else if path == "~" {
-            if let Some(home) = dirs::home_dir() {
-                return home.to_string_lossy().to_string();
-            }
+        } else if path == "~"
+            && let Some(home) = dirs::home_dir()
+        {
+            return home.to_string_lossy().to_string();
         }
         path.to_string()
     }
@@ -230,20 +230,20 @@ impl App {
         if let Ok(entries) = std::fs::read_dir(path) {
             for entry in entries.flatten() {
                 let file_path = entry.path();
-                if file_path.extension().map(|e| e == "json").unwrap_or(false) {
-                    if let Ok(content) = std::fs::read_to_string(&file_path) {
-                        if let Ok(config) = serde_json::from_str::<serde_json::Value>(&content) {
-                            let url = format!("{}/imposters", self.client.base_url());
-                            let resp = self.client.client().post(url).json(&config).send().await;
+                if file_path.extension().map(|e| e == "json").unwrap_or(false)
+                    && let Ok(content) = std::fs::read_to_string(&file_path)
+                {
+                    if let Ok(config) = serde_json::from_str::<serde_json::Value>(&content) {
+                        let url = format!("{}/imposters", self.client.base_url());
+                        let resp = self.client.client().post(url).json(&config).send().await;
 
-                            if resp.map(|r| r.status().is_success()).unwrap_or(false) {
-                                imported += 1;
-                            } else {
-                                failed += 1;
-                            }
+                        if resp.map(|r| r.status().is_success()).unwrap_or(false) {
+                            imported += 1;
                         } else {
                             failed += 1;
                         }
+                    } else {
+                        failed += 1;
                     }
                 }
             }

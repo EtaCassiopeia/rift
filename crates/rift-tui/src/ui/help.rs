@@ -1,11 +1,11 @@
 //! Help overlay with scroll support
 
 use ratatui::{
+    Frame,
     layout::Alignment,
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
-    Frame,
 };
 
 /// Draw the help overlay with scrolling

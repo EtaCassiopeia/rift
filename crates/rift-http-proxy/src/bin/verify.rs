@@ -259,18 +259,30 @@ impl FailureReason {
                     format!("Hint: HTTP request failed - {err}")
                 }
             }
-            FailureReason::StatusMismatch { expected, actual } => {
-                match *actual {
-                    404 => format!("Hint: Got 404 instead of {expected}. The stub predicate may not match the test request path/method."),
-                    500 => format!("Hint: Got 500 instead of {expected}. Check server logs for errors."),
-                    _ => format!("Hint: Expected status {expected} but got {actual}. Verify the stub response configuration."),
+            FailureReason::StatusMismatch { expected, actual } => match *actual {
+                404 => format!(
+                    "Hint: Got 404 instead of {expected}. The stub predicate may not match the test request path/method."
+                ),
+                500 => {
+                    format!("Hint: Got 500 instead of {expected}. Check server logs for errors.")
                 }
-            }
+                _ => format!(
+                    "Hint: Expected status {expected} but got {actual}. Verify the stub response configuration."
+                ),
+            },
             FailureReason::HeaderMissing { header_name } => {
-                format!("Hint: Expected header '{header_name}' is missing from the response. Add it to the stub's response headers.")
+                format!(
+                    "Hint: Expected header '{header_name}' is missing from the response. Add it to the stub's response headers."
+                )
             }
-            FailureReason::HeaderMismatch { header_name, expected, actual } => {
-                format!("Hint: Header '{header_name}' has wrong value.\n       Expected: \"{expected}\"\n       Actual:   \"{actual}\"")
+            FailureReason::HeaderMismatch {
+                header_name,
+                expected,
+                actual,
+            } => {
+                format!(
+                    "Hint: Header '{header_name}' has wrong value.\n       Expected: \"{expected}\"\n       Actual:   \"{actual}\""
+                )
             }
             FailureReason::BodyMismatch { .. } => {
                 "Hint: Response body doesn't match. See diff below for details.".to_string()
@@ -279,7 +291,9 @@ impl FailureReason {
                 "Hint: Expected a response body but got an empty response.".to_string()
             }
             FailureReason::TransportResetExpected { actual } => {
-                format!("Hint: This stub injects a _rift.fault.tcp reset, so the connection should drop; instead it answered HTTP {actual}. The fault did not fire.")
+                format!(
+                    "Hint: This stub injects a _rift.fault.tcp reset, so the connection should drop; instead it answered HTTP {actual}. The fault did not fire."
+                )
             }
         }
     }
@@ -637,10 +651,10 @@ async fn fetch_imposters(
     let mut imposters = Vec::new();
 
     for link in imposter_links {
-        if let Some(port) = filter_port {
-            if link.port != port {
-                continue;
-            }
+        if let Some(port) = filter_port
+            && link.port != port
+        {
+            continue;
         }
 
         // Fetch full imposter details
@@ -880,10 +894,11 @@ fn check_if_dynamic(responses: &[serde_json::Value]) -> (bool, Option<String>) {
 
     // Only treat as proxy if it's a real proxy config (object with "to" field)
     // Many stubs have "proxy": null which should not be treated as dynamic
-    if let Some(proxy) = first.get("proxy") {
-        if proxy.is_object() && proxy.get("to").is_some() {
-            return (true, Some("proxy response".to_string()));
-        }
+    if let Some(proxy) = first.get("proxy")
+        && proxy.is_object()
+        && proxy.get("to").is_some()
+    {
+        return (true, Some("proxy response".to_string()));
     }
 
     if first.get("fault").is_some() {
@@ -1051,13 +1066,11 @@ fn extract_expected_response(
     let has_is_response = first.get("is").is_some();
 
     // Handle proxy response - only if it's a real proxy config (not null) and there's no "is" response
-    if !has_is_response {
-        if let Some(proxy) = first.get("proxy") {
-            // proxy must be an object with a "to" field to be a real proxy
-            if proxy.is_object() && proxy.get("to").is_some() {
-                // For proxy, we just verify connectivity - any 2xx is fine, no specific body expected
-                return (200, HashMap::new(), None);
-            }
+    if !has_is_response && let Some(proxy) = first.get("proxy") {
+        // proxy must be an object with a "to" field to be a real proxy
+        if proxy.is_object() && proxy.get("to").is_some() {
+            // For proxy, we just verify connectivity - any 2xx is fine, no specific body expected
+            return (200, HashMap::new(), None);
         }
     }
 
@@ -1153,51 +1166,48 @@ fn parse_predicates(
 
     // First pass: extract startsWith to set base path (regardless of predicate order)
     for predicate in predicates {
-        if let Some(starts_with) = predicate.get("startsWith") {
-            if let Some(p) = starts_with.get("path").and_then(|v| v.as_str()) {
-                path = p.to_string();
-            }
+        if let Some(starts_with) = predicate.get("startsWith")
+            && let Some(p) = starts_with.get("path").and_then(|v| v.as_str())
+        {
+            path = p.to_string();
         }
     }
 
     // Second pass: process all other predicates
     for predicate in predicates {
         // Handle jsonpath predicates - build a JSON body based on the selector
-        if let Some(jsonpath) = predicate.get("jsonpath") {
-            if let Some(selector) = jsonpath.get("selector").and_then(|v| v.as_str()) {
-                // Get the expected value from equals.body
-                if let Some(equals) = predicate.get("equals") {
-                    if let Some(value) = equals.get("body") {
-                        let json_value = if let Some(s) = value.as_str() {
-                            serde_json::Value::String(s.to_string())
-                        } else {
-                            value.clone()
-                        };
+        if let Some(jsonpath) = predicate.get("jsonpath")
+            && let Some(selector) = jsonpath.get("selector").and_then(|v| v.as_str())
+        {
+            // Get the expected value from equals.body
+            if let Some(equals) = predicate.get("equals")
+                && let Some(value) = equals.get("body")
+            {
+                let json_value = if let Some(s) = value.as_str() {
+                    serde_json::Value::String(s.to_string())
+                } else {
+                    value.clone()
+                };
 
-                        // Build or merge into jsonpath_body
-                        let new_obj = build_json_from_jsonpath(selector, json_value);
-                        jsonpath_body = Some(match jsonpath_body {
-                            Some(existing) => merge_json_objects(existing, new_obj),
-                            None => new_obj,
-                        });
-                    }
-                }
+                // Build or merge into jsonpath_body
+                let new_obj = build_json_from_jsonpath(selector, json_value);
+                jsonpath_body = Some(match jsonpath_body {
+                    Some(existing) => merge_json_objects(existing, new_obj),
+                    None => new_obj,
+                });
             }
         }
         // Handle xpath predicates - build a matching XML body from the selector and the
         // expected `equals.body` value (mirrors the jsonpath handling above). Issue #249 finding #1.
-        if let Some(xpath) = predicate.get("xpath") {
-            if let Some(selector) = xpath.get("selector").and_then(|v| v.as_str()) {
-                if let Some(value) = predicate
-                    .get("equals")
-                    .and_then(|e| e.get("body"))
-                    .and_then(|v| v.as_str())
-                {
-                    if let Some(xml) = build_xml_from_xpath(selector, value) {
-                        body = Some(xml);
-                    }
-                }
-            }
+        if let Some(xpath) = predicate.get("xpath")
+            && let Some(selector) = xpath.get("selector").and_then(|v| v.as_str())
+            && let Some(value) = predicate
+                .get("equals")
+                .and_then(|e| e.get("body"))
+                .and_then(|v| v.as_str())
+            && let Some(xml) = build_xml_from_xpath(selector, value)
+        {
+            body = Some(xml);
         }
 
         // Handle various predicate formats
@@ -1274,17 +1284,17 @@ fn parse_predicates(
         }
 
         // "endsWith" predicate - append to path if needed
-        if let Some(ends_with) = predicate.get("endsWith") {
-            if let Some(p) = ends_with.get("path").and_then(|v| v.as_str()) {
-                // If path doesn't end with the required suffix, append it
-                if !path.ends_with(p) {
-                    if path == "/" {
-                        path = format!("/prefix{p}");
-                    } else if !path.ends_with('/') && !p.starts_with('/') {
-                        path = format!("{path}/{p}");
-                    } else {
-                        path = format!("{path}{p}");
-                    }
+        if let Some(ends_with) = predicate.get("endsWith")
+            && let Some(p) = ends_with.get("path").and_then(|v| v.as_str())
+        {
+            // If path doesn't end with the required suffix, append it
+            if !path.ends_with(p) {
+                if path == "/" {
+                    path = format!("/prefix{p}");
+                } else if !path.ends_with('/') && !p.starts_with('/') {
+                    path = format!("{path}/{p}");
+                } else {
+                    path = format!("{path}{p}");
                 }
             }
         }
@@ -1307,21 +1317,21 @@ fn parse_predicates(
         }
 
         // "or" predicate - use first inner predicate
-        if let Some(or_predicates) = predicate.get("or").and_then(|v| v.as_array()) {
-            if let Some(first) = or_predicates.first() {
-                let inner = vec![first.clone()];
-                let (m, p, h, q, b) = parse_predicates(&inner);
-                if m != "GET" {
-                    method = m;
-                }
-                if p != "/" {
-                    path = p;
-                }
-                headers.extend(h);
-                query_params.extend(q);
-                if b.is_some() {
-                    body = b;
-                }
+        if let Some(or_predicates) = predicate.get("or").and_then(|v| v.as_array())
+            && let Some(first) = or_predicates.first()
+        {
+            let inner = vec![first.clone()];
+            let (m, p, h, q, b) = parse_predicates(&inner);
+            if m != "GET" {
+                method = m;
+            }
+            if p != "/" {
+                path = p;
+            }
+            headers.extend(h);
+            query_params.extend(q);
+            if b.is_some() {
+                body = b;
             }
         }
 
@@ -1378,14 +1388,13 @@ fn predicate_mentions_field(value: &serde_json::Value, field: &str) -> bool {
 fn unwrap_xpath_function(selector: &str) -> &str {
     let s = selector.trim();
     for func in ["string", "boolean", "number", "normalize-space"] {
-        if let Some(rest) = s.strip_prefix(func) {
-            if let Some(inner) = rest
+        if let Some(rest) = s.strip_prefix(func)
+            && let Some(inner) = rest
                 .trim_start()
                 .strip_prefix('(')
                 .and_then(|r| r.strip_suffix(')'))
-            {
-                return inner.trim();
-            }
+        {
+            return inner.trim();
         }
     }
     s
@@ -1471,10 +1480,11 @@ fn unsynthesizable_xpath(predicates: &[serde_json::Value]) -> Option<String> {
             .get("equals")
             .and_then(|e| e.get("body"))
             .is_some();
-        if let Some(selector) = selector {
-            if has_body && build_xml_from_xpath(selector, "probe").is_none() {
-                return Some(selector.to_string());
-            }
+        if let Some(selector) = selector
+            && has_body
+            && build_xml_from_xpath(selector, "probe").is_none()
+        {
+            return Some(selector.to_string());
         }
     }
     None
@@ -1577,16 +1587,14 @@ fn parse_equals_predicate(
     }
 
     // Skip body if it's being handled by jsonpath
-    if !skip_body {
-        if let Some(b) = equals.get("body") {
-            if let Some(s) = b.as_str() {
-                // Don't set body if it's an empty string (means "body should be absent")
-                if !s.is_empty() {
-                    *body = Some(s.to_string());
-                }
-            } else {
-                *body = Some(serde_json::to_string(b).unwrap_or_default());
+    if !skip_body && let Some(b) = equals.get("body") {
+        if let Some(s) = b.as_str() {
+            // Don't set body if it's an empty string (means "body should be absent")
+            if !s.is_empty() {
+                *body = Some(s.to_string());
             }
+        } else {
+            *body = Some(serde_json::to_string(b).unwrap_or_default());
         }
     }
 }
@@ -1650,12 +1658,12 @@ fn parse_contains_predicate(
 /// can be sampled into a literal — the global flags don't change the generated sample. A scoped
 /// group such as `(?:...)` or `(?i:...)` (flags followed by `:`) is left intact.
 fn strip_leading_inline_flags(pattern: &str) -> &str {
-    if let Some(rest) = pattern.strip_prefix("(?") {
-        if let Some(close) = rest.find(')') {
-            let flags = &rest[..close];
-            if !flags.is_empty() && flags.chars().all(|c| c.is_ascii_alphabetic()) {
-                return &rest[close + 1..];
-            }
+    if let Some(rest) = pattern.strip_prefix("(?")
+        && let Some(close) = rest.find(')')
+    {
+        let flags = &rest[..close];
+        if !flags.is_empty() && flags.chars().all(|c| c.is_ascii_alphabetic()) {
+            return &rest[close + 1..];
         }
     }
     pattern
@@ -2125,10 +2133,8 @@ fn print_summary(summary: &VerificationSummary, show_curl: bool) {
             println!("   Expected: {}", failure.expected);
             println!("   {}Actual:   {}{}", RED, failure.actual, RESET);
 
-            if show_curl {
-                if let Some(ref curl) = failure.curl_command {
-                    println!("   Curl:     {curl}");
-                }
+            if show_curl && let Some(ref curl) = failure.curl_command {
+                println!("   Curl:     {curl}");
             }
 
             // Print failure reasons with hints
@@ -2158,7 +2164,9 @@ fn print_summary(summary: &VerificationSummary, show_curl: bool) {
 fn print_failure_reason(reason: &FailureReason) {
     match reason {
         FailureReason::StatusMismatch { expected, actual } => {
-            println!("   - {YELLOW}Status mismatch:{RESET} expected {GREEN}{expected}{RESET}, got {RED}{actual}{RESET}");
+            println!(
+                "   - {YELLOW}Status mismatch:{RESET} expected {GREEN}{expected}{RESET}, got {RED}{actual}{RESET}"
+            );
             println!("     {DIM}{}{RESET}", reason.hint());
         }
         FailureReason::HeaderMissing { header_name } => {
@@ -2198,7 +2206,9 @@ fn print_failure_reason(reason: &FailureReason) {
             println!("     {DIM}{}{RESET}", reason.hint());
         }
         FailureReason::TransportResetExpected { actual } => {
-            println!("   - {YELLOW}Fault not triggered:{RESET} expected connection reset, got HTTP {actual}");
+            println!(
+                "   - {YELLOW}Fault not triggered:{RESET} expected connection reset, got HTTP {actual}"
+            );
             println!("     {DIM}{}{RESET}", reason.hint());
         }
     }
@@ -2794,11 +2804,13 @@ mod verify_tests {
         .unwrap();
         // No flow header resolved → the space-gated stub is a visible SKIP, not a silent degraded run.
         let cases = generate_test_cases(0, &stub, false, "http", None);
-        assert!(cases[0]
-            .skip_reason
-            .as_deref()
-            .unwrap_or("")
-            .contains("flowIdSource"));
+        assert!(
+            cases[0]
+                .skip_reason
+                .as_deref()
+                .unwrap_or("")
+                .contains("flowIdSource")
+        );
         // With a header resolved, it is verified normally (no skip).
         let cases = generate_test_cases(0, &stub, false, "http", Some("X-Mock-Space"));
         assert!(cases[0].skip_reason.is_none());

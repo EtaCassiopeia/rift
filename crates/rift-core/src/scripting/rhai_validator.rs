@@ -1,5 +1,5 @@
 use super::validator::{ScriptValidationError, ScriptValidator};
-use rhai::{Engine, AST};
+use rhai::{AST, Engine};
 use std::error::Error;
 use std::fmt;
 

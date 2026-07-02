@@ -1,9 +1,9 @@
 use rift_lint::{
-    lint_directory, lint_json, lint_value, validate_behavior, validate_imposter,
-    validate_is_response, validate_predicate, validate_proxy_response, validate_response,
-    validate_stub, LintOptions, LintResult,
+    LintOptions, LintResult, lint_directory, lint_json, lint_value, validate_behavior,
+    validate_imposter, validate_is_response, validate_predicate, validate_proxy_response,
+    validate_response, validate_stub,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::path::Path;
 
 // ─── Helpers ────────────────────────────────────────────────────────────────

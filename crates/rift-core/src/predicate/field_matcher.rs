@@ -142,11 +142,7 @@ impl CompiledFieldMatcher {
                 .iter()
                 .any(|m| m.matches_with_except(value, self.case_sensitive, self.except.as_ref())),
         };
-        if self.not {
-            !result
-        } else {
-            result
-        }
+        if self.not { !result } else { result }
     }
 }
 

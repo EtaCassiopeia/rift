@@ -116,7 +116,7 @@ async fn handle_gateway(
             return error_response(
                 StatusCode::NOT_FOUND,
                 &format!("no imposter on port {port}"),
-            )
+            );
         }
     };
 
@@ -168,7 +168,7 @@ async fn route_by_path(
         (&Method::GET, "/config") => return system::handle_config(),
         (&Method::GET, "/logs") => return system::handle_logs(query),
         (&Method::POST, "/admin/reload") => {
-            return system::handle_reload(manager, config_source).await
+            return system::handle_reload(manager, config_source).await;
         }
         (&Method::GET, "/metrics") => return system::handle_metrics(manager).await,
         _ => {}

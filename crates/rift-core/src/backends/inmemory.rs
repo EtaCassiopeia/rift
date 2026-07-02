@@ -45,10 +45,10 @@ impl InMemoryFlowStore {
         key: &str,
         is_expired_fn: impl Fn(&Option<SystemTime>) -> bool,
     ) {
-        if let Some((_, expiry)) = data.get(key) {
-            if is_expired_fn(expiry) {
-                data.remove(key);
-            }
+        if let Some((_, expiry)) = data.get(key)
+            && is_expired_fn(expiry)
+        {
+            data.remove(key);
         }
     }
 }

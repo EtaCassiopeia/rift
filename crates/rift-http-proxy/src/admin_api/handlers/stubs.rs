@@ -2,8 +2,8 @@
 
 use crate::admin_api::handlers::imposters::handle_get as handle_get_imposter;
 use crate::admin_api::types::{
-    collect_body, error_response, json_response, make_stub_links, AddStubRequest,
-    ReplaceStubsRequest, StubWithLinks,
+    AddStubRequest, ReplaceStubsRequest, StubWithLinks, collect_body, error_response,
+    json_response, make_stub_links,
 };
 use crate::extensions::stub_analysis::{analyze_new_stub, analyze_stubs};
 use crate::imposter::{ImposterManager, Stub};
@@ -30,7 +30,7 @@ pub async fn handle_add(
     let mut add_req: AddStubRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
         Err(e) => {
-            return error_response(StatusCode::BAD_REQUEST, &format!("Invalid stub JSON: {e}"))
+            return error_response(StatusCode::BAD_REQUEST, &format!("Invalid stub JSON: {e}"));
         }
     };
 
@@ -103,7 +103,7 @@ pub async fn handle_replace_all(
     let replace_req: ReplaceStubsRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
         Err(e) => {
-            return error_response(StatusCode::BAD_REQUEST, &format!("Invalid stubs JSON: {e}"))
+            return error_response(StatusCode::BAD_REQUEST, &format!("Invalid stubs JSON: {e}"));
         }
     };
 
@@ -198,7 +198,7 @@ pub async fn handle_replace(
     let stub: Stub = match serde_json::from_slice(&body) {
         Ok(s) => s,
         Err(e) => {
-            return error_response(StatusCode::BAD_REQUEST, &format!("Invalid stub JSON: {e}"))
+            return error_response(StatusCode::BAD_REQUEST, &format!("Invalid stub JSON: {e}"));
         }
     };
 
@@ -262,7 +262,7 @@ pub async fn handle_replace_by_id(
     let stub: Stub = match serde_json::from_slice(&body) {
         Ok(s) => s,
         Err(e) => {
-            return error_response(StatusCode::BAD_REQUEST, &format!("Invalid stub JSON: {e}"))
+            return error_response(StatusCode::BAD_REQUEST, &format!("Invalid stub JSON: {e}"));
         }
     };
     let validation_result = validate_stub(&stub, 0);

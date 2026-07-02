@@ -3,22 +3,22 @@
 //! This module contains the ProxyServer struct which holds all state,
 //! and the main run loop that accepts connections and handles requests.
 
-use super::client::{create_http_client, should_skip_tls_verify, HttpClient};
+use super::client::{HttpClient, create_http_client, should_skip_tls_verify};
 use super::handler::handle_request;
 use super::network::create_reusable_listener;
 use super::tls::create_tls_acceptor;
 use crate::behaviors::{CsvCache, ResponseCycler};
 use crate::config::{Config, Protocol as RiftProtocol, Upstream};
-use crate::extensions::flow_state::{create_flow_store, FlowStore};
+use crate::extensions::flow_state::{FlowStore, create_flow_store};
 use crate::extensions::matcher::CompiledRule;
 use crate::extensions::routing::Router;
 use crate::proxy::context::RequestHandlerContext;
 use crate::recording::{ProxyMode, RecordingStore};
+use crate::scripting::RhaiEngine;
 #[cfg(feature = "javascript")]
 use crate::scripting::compile_js_to_bytecode;
 #[cfg(feature = "lua")]
 use crate::scripting::compile_to_bytecode;
-use crate::scripting::RhaiEngine;
 use crate::scripting::{
     CompiledScript, DecisionCache, DecisionCacheConfig, ScriptPool, ScriptPoolConfig,
 };
@@ -95,7 +95,9 @@ impl ProxyServer {
             // For reverse proxy mode, use first upstream as fallback
             config.upstreams[0].url.clone()
         } else {
-            anyhow::bail!("Config must specify either 'upstream' (sidecar mode) or 'upstreams' (reverse proxy mode)");
+            anyhow::bail!(
+                "Config must specify either 'upstream' (sidecar mode) or 'upstreams' (reverse proxy mode)"
+            );
         };
 
         // Create router for multi-upstream mode

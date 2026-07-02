@@ -165,20 +165,20 @@ pub fn analyze_stubs(stubs: &[Stub]) -> StubAnalysisResult {
     }
 
     // Warn if catch-all is not at the end
-    if let Some(&catch_all_idx) = catch_all_indices.first() {
-        if catch_all_idx < stubs.len() - 1 {
-            result.add_warning(StubWarning {
-                warning_type: WarningType::CatchAllNotLast,
-                message: format!(
-                    "Catch-all stub at index {} will shadow {} stub(s) after it",
-                    catch_all_idx,
-                    stubs.len() - catch_all_idx - 1
-                ),
-                stub_index: Some(catch_all_idx),
-                stub_id: stubs[catch_all_idx].id.clone(),
-                shadowed_by_index: None,
-            });
-        }
+    if let Some(&catch_all_idx) = catch_all_indices.first()
+        && catch_all_idx < stubs.len() - 1
+    {
+        result.add_warning(StubWarning {
+            warning_type: WarningType::CatchAllNotLast,
+            message: format!(
+                "Catch-all stub at index {} will shadow {} stub(s) after it",
+                catch_all_idx,
+                stubs.len() - catch_all_idx - 1
+            ),
+            stub_index: Some(catch_all_idx),
+            stub_id: stubs[catch_all_idx].id.clone(),
+            shadowed_by_index: None,
+        });
     }
 
     result
@@ -449,10 +449,12 @@ mod tests {
 
         let result = analyze_stubs(&stubs);
         assert!(result.has_warnings());
-        assert!(result
-            .warnings
-            .iter()
-            .any(|w| w.warning_type == WarningType::DuplicateId));
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.warning_type == WarningType::DuplicateId)
+        );
     }
 
     #[test]
@@ -463,10 +465,12 @@ mod tests {
         ];
 
         let result = analyze_stubs(&stubs);
-        assert!(result
-            .warnings
-            .iter()
-            .any(|w| w.warning_type == WarningType::CatchAll));
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.warning_type == WarningType::CatchAll)
+        );
     }
 
     #[test]
@@ -477,14 +481,18 @@ mod tests {
         ];
 
         let result = analyze_stubs(&stubs);
-        assert!(result
-            .warnings
-            .iter()
-            .any(|w| w.warning_type == WarningType::CatchAllNotLast));
-        assert!(result
-            .warnings
-            .iter()
-            .any(|w| w.warning_type == WarningType::PotentiallyShadowed));
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.warning_type == WarningType::CatchAllNotLast)
+        );
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.warning_type == WarningType::PotentiallyShadowed)
+        );
     }
 
     #[test]
@@ -495,10 +503,12 @@ mod tests {
         ];
 
         let result = analyze_stubs(&stubs);
-        assert!(result
-            .warnings
-            .iter()
-            .any(|w| w.warning_type == WarningType::ExactDuplicate));
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.warning_type == WarningType::ExactDuplicate)
+        );
     }
 
     #[test]
@@ -510,14 +520,18 @@ mod tests {
 
         let result = analyze_stubs(&stubs);
         // May have warnings about different things, but not duplicates
-        assert!(!result
-            .warnings
-            .iter()
-            .any(|w| w.warning_type == WarningType::DuplicateId));
-        assert!(!result
-            .warnings
-            .iter()
-            .any(|w| w.warning_type == WarningType::ExactDuplicate));
+        assert!(
+            !result
+                .warnings
+                .iter()
+                .any(|w| w.warning_type == WarningType::DuplicateId)
+        );
+        assert!(
+            !result
+                .warnings
+                .iter()
+                .any(|w| w.warning_type == WarningType::ExactDuplicate)
+        );
     }
 
     #[test]
@@ -528,10 +542,12 @@ mod tests {
         ];
 
         let result = analyze_stubs(&stubs);
-        assert!(result
-            .warnings
-            .iter()
-            .any(|w| w.warning_type == WarningType::PotentiallyShadowed));
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.warning_type == WarningType::PotentiallyShadowed)
+        );
     }
 
     #[test]
@@ -544,10 +560,12 @@ mod tests {
             stub_with_id_and_predicates("stub1", vec![json!({"equals": {"path": "/b"}})]);
 
         let result = analyze_new_stub(&existing, &new_stub, 1);
-        assert!(result
-            .warnings
-            .iter()
-            .any(|w| w.warning_type == WarningType::DuplicateId));
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.warning_type == WarningType::DuplicateId)
+        );
     }
 
     #[test]
@@ -558,10 +576,12 @@ mod tests {
         let new_stub = stub_with_predicates(vec![json!({"equals": {"path": "/specific"}})]);
 
         let result = analyze_new_stub(&existing, &new_stub, 1);
-        assert!(result
-            .warnings
-            .iter()
-            .any(|w| w.warning_type == WarningType::PotentiallyShadowed));
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.warning_type == WarningType::PotentiallyShadowed)
+        );
     }
 
     #[test]

@@ -40,7 +40,9 @@ pub fn create_http_client(config: &Config, skip_tls_verify: bool) -> HttpClient 
 
     // Build HTTPS connector for HTTP/1.1 only
     let https_connector = if skip_tls_verify {
-        warn!("TLS certificate verification DISABLED for one or more upstreams (development/testing only)");
+        warn!(
+            "TLS certificate verification DISABLED for one or more upstreams (development/testing only)"
+        );
         hyper_rustls::HttpsConnectorBuilder::new()
             .with_tls_config(
                 rustls::ClientConfig::builder()

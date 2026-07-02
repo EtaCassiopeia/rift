@@ -1,5 +1,5 @@
 use crate::extensions::flow_state::FlowStore;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use rhai::Dynamic;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -20,19 +20,19 @@ pub use decision_cache::{CacheKey, DecisionCache, DecisionCacheConfig};
 #[cfg(feature = "lua")]
 mod lua_engine;
 #[cfg(feature = "lua")]
-pub use lua_engine::{compile_to_bytecode, LuaEngine};
+pub use lua_engine::{LuaEngine, compile_to_bytecode};
 
 #[cfg(feature = "javascript")]
 mod js_engine;
 #[cfg(feature = "javascript")]
 pub use js_engine::{
-    clear_imposter_state, compile_js_to_bytecode, execute_mountebank_decorate,
-    execute_mountebank_inject, execute_predicate_generator_inject, execute_predicate_inject,
-    JsEngine, MountebankRequest,
+    JsEngine, MountebankRequest, clear_imposter_state, compile_js_to_bytecode,
+    execute_mountebank_decorate, execute_mountebank_inject, execute_predicate_generator_inject,
+    execute_predicate_inject,
 };
 #[cfg(feature = "javascript")]
 #[allow(unused_imports)]
-pub use js_engine::{execute_js_bytecode, MountebankDecorateResponse, MountebankInjectResponse};
+pub use js_engine::{MountebankDecorateResponse, MountebankInjectResponse, execute_js_bytecode};
 
 // Validator trait and unified error types
 mod validator;

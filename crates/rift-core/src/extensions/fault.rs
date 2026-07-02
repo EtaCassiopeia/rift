@@ -3,7 +3,7 @@ use crate::config::{FaultConfig, TcpFault};
 use crate::response::builder::ErrorResponseBuilder;
 use http_body_util::Full;
 use hyper::body::Bytes;
-use hyper::header::{HeaderName, CONTENT_LENGTH, CONTENT_TYPE, TRANSFER_ENCODING};
+use hyper::header::{CONTENT_LENGTH, CONTENT_TYPE, HeaderName, TRANSFER_ENCODING};
 use hyper::http::HeaderValue;
 use hyper::{HeaderMap, Response, StatusCode};
 use rand::Rng;
@@ -44,34 +44,34 @@ pub fn decide_fault(fault_config: &FaultConfig, rule_id: &str) -> FaultDecision 
     }
 
     // Check error fault (higher priority than latency)
-    if let Some(error_fault) = &fault_config.error {
-        if should_inject(error_fault.probability, &mut rng) {
-            return FaultDecision::Error {
-                status: error_fault.status,
-                body: error_fault.body.clone(),
-                rule_id: rule_id.to_string(),
-                headers: error_fault.headers.clone(),
-                behaviors: error_fault.behaviors.clone(),
-            };
-        }
+    if let Some(error_fault) = &fault_config.error
+        && should_inject(error_fault.probability, &mut rng)
+    {
+        return FaultDecision::Error {
+            status: error_fault.status,
+            body: error_fault.body.clone(),
+            rule_id: rule_id.to_string(),
+            headers: error_fault.headers.clone(),
+            behaviors: error_fault.behaviors.clone(),
+        };
     }
 
     // Check latency fault
-    if let Some(latency_fault) = &fault_config.latency {
-        if should_inject(latency_fault.probability, &mut rng) {
-            let duration_ms = rng.gen_range(latency_fault.min_ms..=latency_fault.max_ms);
-            return FaultDecision::Latency {
-                duration_ms,
-                rule_id: rule_id.to_string(),
-            };
-        }
+    if let Some(latency_fault) = &fault_config.latency
+        && should_inject(latency_fault.probability, &mut rng)
+    {
+        let duration_ms = rng.gen_range(latency_fault.min_ms..=latency_fault.max_ms);
+        return FaultDecision::Latency {
+            duration_ms,
+            rule_id: rule_id.to_string(),
+        };
     }
 
     FaultDecision::None
 }
 
 fn should_inject(probability: f64, rng: &mut impl Rng) -> bool {
-    rng.gen::<f64>() < probability
+    rng.r#gen::<f64>() < probability
 }
 
 pub async fn apply_latency(duration_ms: u64) {

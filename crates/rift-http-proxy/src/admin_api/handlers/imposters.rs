@@ -2,9 +2,9 @@
 
 use crate::admin_api::request_filter::{parse_match_clauses, request_matches};
 use crate::admin_api::types::{
-    collect_body, error_response, json_response, make_imposter_links, make_stub_links,
     ImposterDetail, ImposterListEntry, ImposterQueryParams, ImposterSummary, ListImpostersResponse,
-    RiftImposterExtensions, StubWithLinks,
+    RiftImposterExtensions, StubWithLinks, collect_body, error_response, json_response,
+    make_imposter_links, make_stub_links,
 };
 use crate::extensions::stub_analysis::analyze_stubs;
 use crate::imposter::{
@@ -36,7 +36,7 @@ pub async fn handle_create(
             return error_response(
                 StatusCode::BAD_REQUEST,
                 &format!("Invalid imposter JSON: {e}"),
-            )
+            );
         }
     };
 
@@ -144,7 +144,7 @@ pub async fn handle_replace_all(
     let batch: BatchRequest = match serde_json::from_slice(&body) {
         Ok(b) => b,
         Err(e) => {
-            return error_response(StatusCode::BAD_REQUEST, &format!("Invalid batch JSON: {e}"))
+            return error_response(StatusCode::BAD_REQUEST, &format!("Invalid batch JSON: {e}"));
         }
     };
 
@@ -560,12 +560,13 @@ mod requests_filter_tests {
         let resp = handle_get_requests(19732, Some("match=header:X-Mock-Space=A"), m.clone()).await;
         let got = requests(resp).await;
         assert_eq!(got.len(), 2, "only the two X-Mock-Space=A requests");
-        assert!(got.iter().all(|r| r
-            .headers
-            .get("X-Mock-Space")
-            .and_then(|v| v.first())
-            .map(String::as_str)
-            == Some("A")));
+        assert!(got.iter().all(|r| {
+            r.headers
+                .get("X-Mock-Space")
+                .and_then(|v| v.first())
+                .map(String::as_str)
+                == Some("A")
+        }));
         let _ = m.delete_imposter(19732).await;
     }
 

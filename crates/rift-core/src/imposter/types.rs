@@ -9,9 +9,9 @@ use std::collections::HashMap;
 /// `"k": ["v1", "v2"]` on the wire; serializes a single value back as a plain string and multiple
 /// values as an array, so existing single-value consumers are unaffected.
 pub(crate) mod multi_value_headers {
+    use serde::Deserialize;
     use serde::de::Deserializer;
     use serde::ser::{SerializeMap, Serializer};
-    use serde::Deserialize;
     use std::collections::HashMap;
 
     pub fn serialize<S: Serializer>(

@@ -157,12 +157,12 @@ pub fn get_base_url(req: &Request<Incoming>) -> String {
 /// Rejects Host header values containing `/` or `://` to prevent link-injection via a
 /// malformed Host header (e.g. `attacker.com/evil`).
 fn base_url_from_headers(headers: &hyper::HeaderMap) -> String {
-    if let Some(host) = headers.get("host") {
-        if let Ok(host_str) = host.to_str() {
-            if !host_str.contains('/') && !host_str.contains("://") {
-                return format!("http://{}", host_str);
-            }
-        }
+    if let Some(host) = headers.get("host")
+        && let Ok(host_str) = host.to_str()
+        && !host_str.contains('/')
+        && !host_str.contains("://")
+    {
+        return format!("http://{}", host_str);
     }
     format!("http://localhost:{}", super::DEFAULT_ADMIN_PORT)
 }

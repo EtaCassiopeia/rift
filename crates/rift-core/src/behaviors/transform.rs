@@ -157,32 +157,33 @@ pub fn apply_decorate(
     match engine.eval_with_scope::<Dynamic>(&mut scope, script) {
         Ok(_) => {
             // Extract modified response from scope
-            if let Some(response) = scope.get_value::<Map>("response") {
-                let new_body = response
-                    .get("body")
-                    .and_then(|v| v.clone().try_cast::<String>())
-                    .unwrap_or_else(|| response_body.to_string());
+            match scope.get_value::<Map>("response") {
+                Some(response) => {
+                    let new_body = response
+                        .get("body")
+                        .and_then(|v| v.clone().try_cast::<String>())
+                        .unwrap_or_else(|| response_body.to_string());
 
-                let new_status = response
-                    .get("statusCode")
-                    .and_then(|v| v.clone().try_cast::<i64>())
-                    .map(|s| s as u16)
-                    .unwrap_or(response_status);
+                    let new_status = response
+                        .get("statusCode")
+                        .and_then(|v| v.clone().try_cast::<i64>())
+                        .map(|s| s as u16)
+                        .unwrap_or(response_status);
 
-                // Update headers from response map
-                if let Some(headers) = response.get("headers") {
-                    if let Some(headers_map) = headers.clone().try_cast::<Map>() {
+                    // Update headers from response map
+                    if let Some(headers) = response.get("headers")
+                        && let Some(headers_map) = headers.clone().try_cast::<Map>()
+                    {
                         for (k, v) in headers_map {
                             if let Some(value) = v.try_cast::<String>() {
                                 response_headers.insert(k.to_string(), value);
                             }
                         }
                     }
-                }
 
-                Ok((new_body, new_status))
-            } else {
-                Ok((response_body.to_string(), response_status))
+                    Ok((new_body, new_status))
+                }
+                _ => Ok((response_body.to_string(), response_status)),
             }
         }
         Err(e) => Err(DecorateError::Rhai(e.to_string())),
@@ -347,10 +348,12 @@ mod tests {
 
         let result = apply_decorate(script, &request, "body", 200, &mut headers);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Decorate script error"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Decorate script error")
+        );
     }
 
     // Issue #191: JS `config =>` decorate convention detection + rewrite.

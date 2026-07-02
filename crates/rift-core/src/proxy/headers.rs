@@ -7,9 +7,9 @@
 //! keeping call sites clean while the clones themselves are cheap (just copying
 //! a pointer for `from_static` headers).
 
+use hyper::Response;
 use hyper::header::{HeaderName, HeaderValue};
 use hyper::http::response::Parts;
-use hyper::Response;
 
 // Static header names for Rift custom headers
 pub static X_RIFT_FAULT: HeaderName = HeaderName::from_static("x-rift-fault");

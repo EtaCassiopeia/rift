@@ -119,7 +119,7 @@ fn validate_response(
         }
         // Is responses with optional _rift extension
         StubResponse::Is { rift, .. } => {
-            if let Some(ref rift_ext) = rift {
+            if let Some(rift_ext) = rift {
                 if let Some(ref script_config) = rift_ext.script {
                     validate_rift_script(
                         &script_config.engine,

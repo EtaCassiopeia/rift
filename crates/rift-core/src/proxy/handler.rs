@@ -13,22 +13,22 @@ use super::headers::{
 };
 use super::response_ext::ResponseExt;
 use crate::behaviors::{
-    apply_copy_behaviors, apply_decorate, apply_lookup_behaviors, apply_shell_transform,
-    RequestContext,
+    RequestContext, apply_copy_behaviors, apply_decorate, apply_lookup_behaviors,
+    apply_shell_transform,
 };
 use crate::config::TcpFault;
-use crate::extensions::fault::{apply_latency, create_error_response, decide_fault, FaultDecision};
+use crate::extensions::fault::{FaultDecision, apply_latency, create_error_response, decide_fault};
 use crate::extensions::matcher::CompiledRule;
 use crate::extensions::metrics;
 use crate::extensions::routing::Router;
-use crate::extensions::template::{has_template_variables, process_template, RequestData};
+use crate::extensions::template::{RequestData, has_template_variables, process_template};
 use crate::proxy::context::{
     ForwardingContext, RequestHandlerContext, RequestInfo, ScriptingContext, UpstreamService,
 };
 use crate::scripting::{CacheKey, FaultDecision as ScriptFaultDecision, ScriptRequest};
 
-use http_body_util::combinators::BoxBody;
 use http_body_util::BodyExt;
+use http_body_util::combinators::BoxBody;
 use hyper::body::Bytes;
 use hyper::{Request, Response};
 use std::collections::HashMap;
@@ -480,12 +480,12 @@ async fn handle_yaml_rule(
             warn!("Injecting error fault: status={}, rule={}", status, rule_id);
 
             // Apply wait behavior if present (Mountebank-compatible)
-            if let Some(ref bhvs) = behaviors {
-                if let Some(ref wait) = bhvs.wait {
-                    let wait_ms = wait.get_duration_ms();
-                    debug!("Applying wait behavior: {}ms", wait_ms);
-                    apply_latency(wait_ms).await;
-                }
+            if let Some(ref bhvs) = behaviors
+                && let Some(ref wait) = bhvs.wait
+            {
+                let wait_ms = wait.get_duration_ms();
+                debug!("Applying wait behavior: {}ms", wait_ms);
+                apply_latency(wait_ms).await;
             }
 
             // Record metrics
@@ -520,34 +520,33 @@ async fn handle_yaml_rule(
             // fault responses are single-value, so wrap losslessly for the substitution and fold
             // the (still single) result back for decorate / response building.
             let mut response_headers = fault_headers.clone();
-            if let Some(ref bhvs) = behaviors {
-                if !bhvs.copy.is_empty() || !bhvs.lookup.is_empty() {
-                    let mut multi: std::collections::HashMap<String, Vec<String>> =
-                        response_headers
-                            .drain()
-                            .map(|(k, v)| (k, vec![v]))
-                            .collect();
-                    if !bhvs.copy.is_empty() {
-                        debug!("Applying {} copy behaviors", bhvs.copy.len());
-                        processed_body = apply_copy_behaviors(
-                            &processed_body,
-                            &mut multi,
-                            &bhvs.copy,
-                            &request_context,
-                        );
-                    }
-                    if !bhvs.lookup.is_empty() {
-                        debug!("Applying {} lookup behaviors", bhvs.lookup.len());
-                        processed_body = apply_lookup_behaviors(
-                            &processed_body,
-                            &mut multi,
-                            &bhvs.lookup,
-                            &request_context,
-                            ctx.csv_cache,
-                        );
-                    }
-                    response_headers = multi.into_iter().map(|(k, v)| (k, v.join(", "))).collect();
+            if let Some(ref bhvs) = behaviors
+                && (!bhvs.copy.is_empty() || !bhvs.lookup.is_empty())
+            {
+                let mut multi: std::collections::HashMap<String, Vec<String>> = response_headers
+                    .drain()
+                    .map(|(k, v)| (k, vec![v]))
+                    .collect();
+                if !bhvs.copy.is_empty() {
+                    debug!("Applying {} copy behaviors", bhvs.copy.len());
+                    processed_body = apply_copy_behaviors(
+                        &processed_body,
+                        &mut multi,
+                        &bhvs.copy,
+                        &request_context,
+                    );
                 }
+                if !bhvs.lookup.is_empty() {
+                    debug!("Applying {} lookup behaviors", bhvs.lookup.len());
+                    processed_body = apply_lookup_behaviors(
+                        &processed_body,
+                        &mut multi,
+                        &bhvs.lookup,
+                        &request_context,
+                        ctx.csv_cache,
+                    );
+                }
+                response_headers = multi.into_iter().map(|(k, v)| (k, v.join(", "))).collect();
             }
 
             // Apply shell transform (Mountebank-compatible)
@@ -567,23 +566,23 @@ async fn handle_yaml_rule(
 
             // Apply decorate behavior (Mountebank-compatible Rhai script)
             let mut final_status = status;
-            if let Some(ref bhvs) = behaviors {
-                if let Some(ref script) = bhvs.decorate {
-                    debug!("Applying decorate behavior");
-                    match apply_decorate(
-                        script,
-                        &request_context,
-                        &processed_body,
-                        status,
-                        &mut response_headers,
-                    ) {
-                        Ok((new_body, new_status)) => {
-                            processed_body = new_body;
-                            final_status = new_status;
-                        }
-                        Err(e) => {
-                            warn!("Decorate behavior failed: {}", e);
-                        }
+            if let Some(ref bhvs) = behaviors
+                && let Some(ref script) = bhvs.decorate
+            {
+                debug!("Applying decorate behavior");
+                match apply_decorate(
+                    script,
+                    &request_context,
+                    &processed_body,
+                    status,
+                    &mut response_headers,
+                ) {
+                    Ok((new_body, new_status)) => {
+                        processed_body = new_body;
+                        final_status = new_status;
+                    }
+                    Err(e) => {
+                        warn!("Decorate behavior failed: {}", e);
                     }
                 }
             }

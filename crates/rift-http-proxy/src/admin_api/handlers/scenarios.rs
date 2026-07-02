@@ -115,7 +115,7 @@ pub async fn handle_reset_scenarios(
         match serde_json::from_slice::<serde_json::Value>(&body) {
             Ok(v) => v.get("flowId").and_then(|v| v.as_str()).map(String::from),
             Err(e) => {
-                return error_response(StatusCode::BAD_REQUEST, &format!("Invalid JSON: {e}"))
+                return error_response(StatusCode::BAD_REQUEST, &format!("Invalid JSON: {e}"));
             }
         }
     };

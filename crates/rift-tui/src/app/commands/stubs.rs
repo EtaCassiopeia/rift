@@ -17,15 +17,15 @@ impl App {
             _ => return,
         };
 
-        if let Some(imp) = &self.current_imposter {
-            if let Some(stub) = imp.stubs.get(idx) {
-                let json = serde_json::to_string_pretty(stub).unwrap_or_default();
-                self.stub_editor = Some(StubEditor::new(&json));
-                self.navigate(View::StubEdit {
-                    port,
-                    index: Some(idx),
-                });
-            }
+        if let Some(imp) = &self.current_imposter
+            && let Some(stub) = imp.stubs.get(idx)
+        {
+            let json = serde_json::to_string_pretty(stub).unwrap_or_default();
+            self.stub_editor = Some(StubEditor::new(&json));
+            self.navigate(View::StubEdit {
+                port,
+                index: Some(idx),
+            });
         }
     }
 
@@ -52,28 +52,28 @@ impl App {
                 return;
             }
 
-            if let Some(stub) = editor.get_stub() {
-                if let View::StubEdit { port, index } = self.view {
-                    self.is_loading = true;
-                    let result = if let Some(idx) = index {
-                        self.client.update_stub(port, idx, stub).await
-                    } else {
-                        self.client.add_stub(port, stub, None).await
-                    };
+            if let Some(stub) = editor.get_stub()
+                && let View::StubEdit { port, index } = self.view
+            {
+                self.is_loading = true;
+                let result = if let Some(idx) = index {
+                    self.client.update_stub(port, idx, stub).await
+                } else {
+                    self.client.add_stub(port, stub, None).await
+                };
 
-                    match result {
-                        Ok(_) => {
-                            self.set_status("Stub saved".to_string(), StatusLevel::Success);
-                            self.stub_editor = None;
-                            self.go_back();
-                            self.refresh().await;
-                        }
-                        Err(e) => {
-                            self.set_status(format!("Failed to save: {}", e), StatusLevel::Error);
-                        }
+                match result {
+                    Ok(_) => {
+                        self.set_status("Stub saved".to_string(), StatusLevel::Success);
+                        self.stub_editor = None;
+                        self.go_back();
+                        self.refresh().await;
                     }
-                    self.is_loading = false;
+                    Err(e) => {
+                        self.set_status(format!("Failed to save: {}", e), StatusLevel::Error);
+                    }
                 }
+                self.is_loading = false;
             }
         }
     }
@@ -111,13 +111,13 @@ impl App {
 
     /// Confirm delete stub
     pub fn confirm_delete_stub(&mut self) {
-        if let View::ImposterDetail { port } = self.view {
-            if let Some(idx) = self.stub_list_state.selected() {
-                self.overlay = Overlay::Confirm {
-                    message: format!("Delete stub #{} from :{}?", idx, port),
-                    action: PendingAction::DeleteStub { port, index: idx },
-                };
-            }
+        if let View::ImposterDetail { port } = self.view
+            && let Some(idx) = self.stub_list_state.selected()
+        {
+            self.overlay = Overlay::Confirm {
+                message: format!("Delete stub #{} from :{}?", idx, port),
+                action: PendingAction::DeleteStub { port, index: idx },
+            };
         }
     }
 
@@ -184,25 +184,24 @@ impl App {
             View::ImposterDetail { .. } => self.stub_list_state.selected(),
             _ => None,
         };
-        if let Some(idx) = idx {
-            if let Some(stub) = self
+        if let Some(idx) = idx
+            && let Some(stub) = self
                 .current_imposter
                 .as_ref()
                 .and_then(|imp| imp.stubs.get(idx))
                 .cloned()
-            {
-                self.is_loading = true;
-                match self.client.add_stub(port, stub, None).await {
-                    Ok(_) => {
-                        self.set_status("Stub duplicated".to_string(), StatusLevel::Success);
-                        self.refresh().await;
-                    }
-                    Err(e) => {
-                        self.set_status(format!("Failed to duplicate: {}", e), StatusLevel::Error)
-                    }
+        {
+            self.is_loading = true;
+            match self.client.add_stub(port, stub, None).await {
+                Ok(_) => {
+                    self.set_status("Stub duplicated".to_string(), StatusLevel::Success);
+                    self.refresh().await;
                 }
-                self.is_loading = false;
+                Err(e) => {
+                    self.set_status(format!("Failed to duplicate: {}", e), StatusLevel::Error)
+                }
             }
+            self.is_loading = false;
         }
     }
 }

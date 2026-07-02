@@ -2212,8 +2212,8 @@ fn test_exists_predicate_headers_key_case_sensitive() {
 
 #[test]
 fn test_header_map_to_hashmap_title_case() {
-    use hyper::header::HeaderValue;
     use hyper::HeaderMap;
+    use hyper::header::HeaderValue;
 
     let mut headers = HeaderMap::new();
     headers.insert("content-type", HeaderValue::from_static("application/json"));

@@ -2,11 +2,11 @@
 
 use crate::app::{App, FocusArea};
 use ratatui::{
+    Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, Paragraph},
-    Frame,
 };
 
 /// Draw the imposter detail view

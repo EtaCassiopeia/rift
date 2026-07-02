@@ -8,15 +8,18 @@ impl App {
         if let Some(imp) = self.selected_imposter() {
             let port = imp.port;
             self.is_loading = true;
-            if let Ok(detail) = self.client.get_imposter(port).await {
-                self.current_imposter = Some(detail);
-                self.stub_list_state.select(Some(0));
-                self.navigate(View::ImposterDetail { port });
-            } else {
-                self.set_status(
-                    format!("Failed to load imposter :{}", port),
-                    StatusLevel::Error,
-                );
+            match self.client.get_imposter(port).await {
+                Ok(detail) => {
+                    self.current_imposter = Some(detail);
+                    self.stub_list_state.select(Some(0));
+                    self.navigate(View::ImposterDetail { port });
+                }
+                _ => {
+                    self.set_status(
+                        format!("Failed to load imposter :{}", port),
+                        StatusLevel::Error,
+                    );
+                }
             }
             self.is_loading = false;
         }

@@ -3,13 +3,13 @@
 use crate::app::{App, InputAction, ValidationAction};
 use crate::validation::{IssueSeverity, ValidationReport};
 use ratatui::{
+    Frame,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{
         Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
     },
-    Frame,
 };
 use tui_popup::Popup;
 

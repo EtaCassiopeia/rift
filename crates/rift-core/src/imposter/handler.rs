@@ -10,13 +10,13 @@ use super::types::{
     DebugMatchResult, DebugRequest, DebugResponse, ProxyResponse, RecordedRequest, ResponseMode,
 };
 use crate::behaviors::{
-    apply_copy_behaviors, apply_lookup_behaviors, apply_shell_transform, header_to_title_case,
-    CsvCache, RequestContext, ResponseBehaviors,
+    CsvCache, RequestContext, ResponseBehaviors, apply_copy_behaviors, apply_lookup_behaviors,
+    apply_shell_transform, header_to_title_case,
 };
-use crate::extensions::template::{has_template_variables, process_template, RequestData};
-#[cfg(feature = "javascript")]
-use crate::scripting::{execute_mountebank_inject, MountebankRequest};
+use crate::extensions::template::{RequestData, has_template_variables, process_template};
 use crate::scripting::{FaultDecision, ScriptEngine, ScriptRequest};
+#[cfg(feature = "javascript")]
+use crate::scripting::{MountebankRequest, execute_mountebank_inject};
 use crate::util::{build_response, build_response_with_headers};
 use base64::Engine;
 use bytes::Bytes;
@@ -459,14 +459,11 @@ async fn handle_request_inner(
             }
 
             // Apply _rift.fault extensions (probabilistic faults)
-            if let Some(ref rift) = rift_ext {
-                if let Some(ref fault_config) = rift.fault {
-                    if let Some(response) =
-                        apply_rift_fault(fault_config, &mut status, &mut body).await
-                    {
-                        return Ok(response);
-                    }
-                }
+            if let Some(ref rift) = rift_ext
+                && let Some(ref fault_config) = rift.fault
+                && let Some(response) = apply_rift_fault(fault_config, &mut status, &mut body).await
+            {
+                return Ok(response);
             }
 
             // Expand `${request.*}` request templates (issue #269) BEFORE behaviors — matching the
@@ -880,7 +877,7 @@ async fn apply_rift_fault(
     let (apply_latency, latency_delay_ms) = {
         let mut rng = rand::thread_rng();
         if let Some(ref latency) = fault_config.latency {
-            if rng.gen::<f64>() < latency.probability {
+            if rng.r#gen::<f64>() < latency.probability {
                 let delay_ms = if let Some(fixed_ms) = latency.ms {
                     fixed_ms
                 } else if latency.max_ms > latency.min_ms {
@@ -900,7 +897,7 @@ async fn apply_rift_fault(
     let apply_error = {
         let mut rng = rand::thread_rng();
         if let Some(ref error) = fault_config.error {
-            rng.gen::<f64>() < error.probability
+            rng.r#gen::<f64>() < error.probability
         } else {
             false
         }
@@ -937,29 +934,27 @@ async fn apply_rift_fault(
     }
 
     // Apply error fault
-    if apply_error {
-        if let Some(ref error) = fault_config.error {
-            debug!("Applying _rift.fault error: status {}", error.status);
+    if apply_error && let Some(ref error) = fault_config.error {
+        debug!("Applying _rift.fault error: status {}", error.status);
 
-            let mut response = Response::builder().status(error.status);
+        let mut response = Response::builder().status(error.status);
 
-            // Apply custom headers
-            for (k, v) in &error.headers {
-                response = response.header(k, v);
-            }
-
-            response = response.header("x-rift-imposter", "true");
-            response = response.header("x-rift-fault", "error");
-
-            let error_body = error.body.clone().unwrap_or_default();
-            return Some(
-                response
-                    .body(Full::new(Bytes::from(error_body)))
-                    .unwrap_or_else(|_| {
-                        build_response(StatusCode::INTERNAL_SERVER_ERROR, "Response build error")
-                    }),
-            );
+        // Apply custom headers
+        for (k, v) in &error.headers {
+            response = response.header(k, v);
         }
+
+        response = response.header("x-rift-imposter", "true");
+        response = response.header("x-rift-fault", "error");
+
+        let error_body = error.body.clone().unwrap_or_default();
+        return Some(
+            response
+                .body(Full::new(Bytes::from(error_body)))
+                .unwrap_or_else(|_| {
+                    build_response(StatusCode::INTERNAL_SERVER_ERROR, "Response build error")
+                }),
+        );
     }
 
     None
@@ -969,7 +964,7 @@ async fn apply_rift_fault(
 mod fault_precedence_tests {
     use super::super::fault_io::TcpFaultKind;
     use super::super::types::{RiftErrorFault, RiftFaultConfig, RiftLatencyFault};
-    use super::{apply_rift_fault, Bytes, Full, Response};
+    use super::{Bytes, Full, Response, apply_rift_fault};
     use std::time::Instant;
 
     fn error_fault(status: u16) -> RiftErrorFault {

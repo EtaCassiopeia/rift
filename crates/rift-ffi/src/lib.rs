@@ -18,7 +18,7 @@
 //! and emits a `tracing` event with the dropped error so the reason is not lost.
 
 use rift_core::imposter::{ImposterConfig, ImposterManager, Stub};
-use std::ffi::{c_char, CStr, CString};
+use std::ffi::{CStr, CString, c_char};
 use std::sync::Arc;
 use tokio::runtime::Runtime;
 use tracing::warn;
@@ -34,7 +34,7 @@ pub struct RiftHandle {
 /// # Safety
 /// `h` must be null or a pointer returned by [`rift_start`] and not yet passed to [`rift_stop`].
 unsafe fn handle<'a>(h: *mut RiftHandle) -> Option<&'a RiftHandle> {
-    h.as_ref()
+    unsafe { h.as_ref() }
 }
 
 /// Read a borrowed UTF-8 string from a C string pointer, or `None` if null/invalid.
@@ -42,10 +42,12 @@ unsafe fn handle<'a>(h: *mut RiftHandle) -> Option<&'a RiftHandle> {
 /// # Safety
 /// `p` must be null or a valid NUL-terminated C string that outlives the borrow.
 unsafe fn c_str<'a>(p: *const c_char) -> Option<&'a str> {
-    if p.is_null() {
-        return None;
+    unsafe {
+        if p.is_null() {
+            return None;
+        }
+        CStr::from_ptr(p).to_str().ok()
     }
-    CStr::from_ptr(p).to_str().ok()
 }
 
 /// Move a `String` across the boundary as an owned `*mut c_char` the caller frees with
@@ -58,7 +60,7 @@ fn into_c_string(s: String) -> *mut c_char {
 }
 
 /// Start the engine. Returns an opaque handle, or null if the runtime could not be created.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rift_start() -> *mut RiftHandle {
     match Runtime::new() {
         Ok(runtime) => Box::into_raw(Box::new(RiftHandle {
@@ -74,57 +76,61 @@ pub extern "C" fn rift_start() -> *mut RiftHandle {
 ///
 /// # Safety
 /// `h` must be a live handle and `json` a valid C string (or null).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rift_create_imposter(h: *mut RiftHandle, json: *const c_char) -> u16 {
-    let (Some(handle), Some(s)) = (handle(h), c_str(json)) else {
-        warn!("rift_create_imposter: null handle or config pointer");
-        return 0;
-    };
-    let config = match serde_json::from_str::<ImposterConfig>(s) {
-        Ok(c) => c,
-        Err(e) => {
-            warn!(error = %e, "rift_create_imposter: invalid config JSON");
+    unsafe {
+        let (Some(handle), Some(s)) = (handle(h), c_str(json)) else {
+            warn!("rift_create_imposter: null handle or config pointer");
             return 0;
-        }
-    };
-    handle
-        .runtime
-        .block_on(handle.manager.create_imposter(config))
-        .unwrap_or_else(|e| {
-            warn!(error = %e, "rift_create_imposter failed");
-            0
-        })
+        };
+        let config = match serde_json::from_str::<ImposterConfig>(s) {
+            Ok(c) => c,
+            Err(e) => {
+                warn!(error = %e, "rift_create_imposter: invalid config JSON");
+                return 0;
+            }
+        };
+        handle
+            .runtime
+            .block_on(handle.manager.create_imposter(config))
+            .unwrap_or_else(|e| {
+                warn!(error = %e, "rift_create_imposter failed");
+                0
+            })
+    }
 }
 
 /// Replace all stubs on `port` from a JSON array. Returns `0` on success, `-1` on any error.
 ///
 /// # Safety
 /// `h` must be a live handle and `json` a valid C string (or null).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rift_replace_stubs(
     h: *mut RiftHandle,
     port: u16,
     json: *const c_char,
 ) -> i32 {
-    let (Some(handle), Some(s)) = (handle(h), c_str(json)) else {
-        warn!("rift_replace_stubs: null handle or stubs pointer");
-        return -1;
-    };
-    let stubs = match serde_json::from_str::<Vec<Stub>>(s) {
-        Ok(v) => v,
-        Err(e) => {
-            warn!(error = %e, "rift_replace_stubs: invalid stubs JSON");
+    unsafe {
+        let (Some(handle), Some(s)) = (handle(h), c_str(json)) else {
+            warn!("rift_replace_stubs: null handle or stubs pointer");
             return -1;
-        }
-    };
-    match handle
-        .runtime
-        .block_on(handle.manager.replace_stubs(port, stubs))
-    {
-        Ok(()) => 0,
-        Err(e) => {
-            warn!(error = %e, port, "rift_replace_stubs failed");
-            -1
+        };
+        let stubs = match serde_json::from_str::<Vec<Stub>>(s) {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(error = %e, "rift_replace_stubs: invalid stubs JSON");
+                return -1;
+            }
+        };
+        match handle
+            .runtime
+            .block_on(handle.manager.replace_stubs(port, stubs))
+        {
+            Ok(()) => 0,
+            Err(e) => {
+                warn!(error = %e, port, "rift_replace_stubs failed");
+                -1
+            }
         }
     }
 }
@@ -133,13 +139,15 @@ pub unsafe extern "C" fn rift_replace_stubs(
 ///
 /// # Safety
 /// `h` must be a live handle (or null).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rift_delete_all(h: *mut RiftHandle) -> i32 {
-    let Some(handle) = handle(h) else {
-        return -1;
-    };
-    handle.runtime.block_on(handle.manager.delete_all());
-    0
+    unsafe {
+        let Some(handle) = handle(h) else {
+            return -1;
+        };
+        handle.runtime.block_on(handle.manager.delete_all());
+        0
+    }
 }
 
 /// Return the recorded requests for `port` as a JSON array string the caller must free with
@@ -147,23 +155,25 @@ pub unsafe extern "C" fn rift_delete_all(h: *mut RiftHandle) -> i32 {
 ///
 /// # Safety
 /// `h` must be a live handle (or null).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rift_recorded(h: *mut RiftHandle, port: u16) -> *mut c_char {
-    let Some(handle) = handle(h) else {
-        return std::ptr::null_mut();
-    };
-    let imposter = match handle.manager.get_imposter(port) {
-        Ok(i) => i,
-        Err(e) => {
-            warn!(error = %e, port, "rift_recorded: no such imposter");
+    unsafe {
+        let Some(handle) = handle(h) else {
             return std::ptr::null_mut();
-        }
-    };
-    match serde_json::to_string(&imposter.get_recorded_requests()) {
-        Ok(json) => into_c_string(json),
-        Err(e) => {
-            warn!(error = %e, port, "rift_recorded: failed to encode recorded requests");
-            std::ptr::null_mut()
+        };
+        let imposter = match handle.manager.get_imposter(port) {
+            Ok(i) => i,
+            Err(e) => {
+                warn!(error = %e, port, "rift_recorded: no such imposter");
+                return std::ptr::null_mut();
+            }
+        };
+        match serde_json::to_string(&imposter.get_recorded_requests()) {
+            Ok(json) => into_c_string(json),
+            Err(e) => {
+                warn!(error = %e, port, "rift_recorded: failed to encode recorded requests");
+                std::ptr::null_mut()
+            }
         }
     }
 }
@@ -172,10 +182,12 @@ pub unsafe extern "C" fn rift_recorded(h: *mut RiftHandle, port: u16) -> *mut c_
 ///
 /// # Safety
 /// `p` must be null or a pointer returned by a `rift-ffi` function and not yet freed.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rift_free(p: *mut c_char) {
-    if !p.is_null() {
-        drop(CString::from_raw(p));
+    unsafe {
+        if !p.is_null() {
+            drop(CString::from_raw(p));
+        }
     }
 }
 
@@ -184,11 +196,13 @@ pub unsafe extern "C" fn rift_free(p: *mut c_char) {
 ///
 /// # Safety
 /// `h` must be null or a pointer returned by [`rift_start`] and not previously stopped.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rift_stop(h: *mut RiftHandle) {
-    if h.is_null() {
-        return;
+    unsafe {
+        if h.is_null() {
+            return;
+        }
+        let handle = Box::from_raw(h);
+        handle.runtime.block_on(handle.manager.shutdown());
     }
-    let handle = Box::from_raw(h);
-    handle.runtime.block_on(handle.manager.shutdown());
 }

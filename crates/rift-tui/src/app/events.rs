@@ -303,16 +303,16 @@ impl App {
                         self.copy_to_clipboard(&text);
                     }
                     Some(EditorAction::PasteRequest) => {
-                        if let Some(text) = self.paste_from_clipboard() {
-                            if let Some(editor) = &mut self.stub_editor {
-                                editor.editor.set_yank_text(text.clone());
-                                editor.editor.input(ratatui_textarea::Input {
-                                    key: ratatui_textarea::Key::Char('y'),
-                                    ctrl: true,
-                                    alt: false,
-                                    shift: false,
-                                });
-                            }
+                        if let Some(text) = self.paste_from_clipboard()
+                            && let Some(editor) = &mut self.stub_editor
+                        {
+                            editor.editor.set_yank_text(text.clone());
+                            editor.editor.input(ratatui_textarea::Input {
+                                key: ratatui_textarea::Key::Char('y'),
+                                ctrl: true,
+                                alt: false,
+                                shift: false,
+                            });
                         }
                     }
                     None => {}

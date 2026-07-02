@@ -8,8 +8,8 @@ use super::types::{
     StubResponse,
 };
 use crate::behaviors::{
-    apply_decorate, is_js_config_decorate, rewrite_js_config_to_rhai, DecorateError,
-    HasRepeatBehavior, RequestContext,
+    DecorateError, HasRepeatBehavior, RequestContext, apply_decorate, is_js_config_decorate,
+    rewrite_js_config_to_rhai,
 };
 use crate::imposter::Predicate;
 use std::collections::HashMap;

@@ -24,9 +24,9 @@ pub mod template;
 
 // Re-export commonly used types for library consumers
 #[allow(unused_imports)]
-pub use fault::{create_error_response, decide_fault, FaultDecision};
+pub use fault::{FaultDecision, create_error_response, decide_fault};
 #[allow(unused_imports)]
-pub use flow_state::{create_flow_store, FlowStore, NoOpFlowStore};
+pub use flow_state::{FlowStore, NoOpFlowStore, create_flow_store};
 #[allow(unused_imports)]
 pub use matcher::{CompiledMatch, CompiledRule};
 #[allow(unused_imports)]
@@ -37,7 +37,7 @@ pub use routing::Router;
 pub use rule_index::{IndexedRule, RuleIndex};
 #[allow(unused_imports)]
 pub use stub_analysis::{
-    analyze_new_stub, analyze_stubs, StubAnalysisResult, StubWarning, WarningType,
+    StubAnalysisResult, StubWarning, WarningType, analyze_new_stub, analyze_stubs,
 };
 #[allow(unused_imports)]
-pub use template::{apply_date_templates, process_template, RequestData};
+pub use template::{RequestData, apply_date_templates, process_template};

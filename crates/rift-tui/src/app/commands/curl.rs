@@ -41,12 +41,11 @@ impl App {
             let has_content_type = headers
                 .iter()
                 .any(|(k, _)| k.to_lowercase() == "content-type");
-            if !has_content_type {
-                if let Some(ref b) = body {
-                    if b.trim_start().starts_with('{') || b.trim_start().starts_with('[') {
-                        parts.push("-H 'Content-Type: application/json'".to_string());
-                    }
-                }
+            if !has_content_type
+                && let Some(ref b) = body
+                && (b.trim_start().starts_with('{') || b.trim_start().starts_with('['))
+            {
+                parts.push("-H 'Content-Type: application/json'".to_string());
             }
         }
 
@@ -296,10 +295,10 @@ impl App {
                 }
                 (Some(serde_json::Value::Array(t)), serde_json::Value::Array(s)) => {
                     // Merge array contents - for arrays of objects, merge first elements
-                    if let Some(serde_json::Value::Object(t_obj)) = t.first_mut() {
-                        if let Some(serde_json::Value::Object(s_obj)) = s.into_iter().next() {
-                            self.deep_merge(t_obj, s_obj);
-                        }
+                    if let Some(serde_json::Value::Object(t_obj)) = t.first_mut()
+                        && let Some(serde_json::Value::Object(s_obj)) = s.into_iter().next()
+                    {
+                        self.deep_merge(t_obj, s_obj);
                     }
                 }
                 (_, v) => {
@@ -323,17 +322,16 @@ impl App {
             _ => None,
         };
 
-        if let Some(idx) = stub_index {
-            if let Some(imp) = &self.current_imposter {
-                if let Some(stub) = imp.stubs.get(idx) {
-                    let curl_cmd = self.generate_curl_command(stub, port);
-                    self.copy_to_clipboard(&curl_cmd);
-                    self.set_status(
-                        "Curl command copied to clipboard".to_string(),
-                        StatusLevel::Success,
-                    );
-                }
-            }
+        if let Some(idx) = stub_index
+            && let Some(imp) = &self.current_imposter
+            && let Some(stub) = imp.stubs.get(idx)
+        {
+            let curl_cmd = self.generate_curl_command(stub, port);
+            self.copy_to_clipboard(&curl_cmd);
+            self.set_status(
+                "Curl command copied to clipboard".to_string(),
+                StatusLevel::Success,
+            );
         }
     }
 }

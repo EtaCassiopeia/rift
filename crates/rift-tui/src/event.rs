@@ -39,20 +39,18 @@ impl EventHandler {
                     }
                     _ = tokio::time::sleep(Duration::from_millis(50)) => {
                         // Poll for crossterm events
-                        if event::poll(Duration::from_millis(0)).unwrap_or(false) {
-                            if let Ok(evt) = event::read() {
+                        if event::poll(Duration::from_millis(0)).unwrap_or(false)
+                            && let Ok(evt) = event::read() {
                                 let event = match evt {
                                     CrosstermEvent::Key(key) => Some(Event::Key(key)),
                                     CrosstermEvent::Resize(w, h) => Some(Event::Resize(w, h)),
                                     _ => None,
                                 };
-                                if let Some(e) = event {
-                                    if tx_clone.send(e).is_err() {
+                                if let Some(e) = event
+                                    && tx_clone.send(e).is_err() {
                                         break;
                                     }
-                                }
                             }
-                        }
                     }
                 }
             }

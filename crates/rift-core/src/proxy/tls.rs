@@ -3,9 +3,9 @@
 //! This module provides TLS-related functionality including certificate loading
 //! and a no-op certificate verifier for development/testing.
 
+use rustls::DigitallySignedStruct;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
-use rustls::DigitallySignedStruct;
 use std::sync::Arc;
 use tokio_rustls::TlsAcceptor;
 

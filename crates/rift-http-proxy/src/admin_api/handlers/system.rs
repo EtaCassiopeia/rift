@@ -139,7 +139,7 @@ pub async fn handle_reload(
             return error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 &format!("Reload failed (imposters unchanged): {e}"),
-            )
+            );
         }
     };
 

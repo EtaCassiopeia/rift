@@ -133,10 +133,10 @@ pub(crate) fn check_exists_predicate(
     }
 
     // Check body exists - supports both boolean and object values
-    if let Some(expected) = obj.get("body") {
-        if !check_exists_json_recursive(expected, body) {
-            return false;
-        }
+    if let Some(expected) = obj.get("body")
+        && !check_exists_json_recursive(expected, body)
+    {
+        return false;
     }
 
     // Check query parameters exist

@@ -1,6 +1,6 @@
 use crate::extensions::flow_state::FlowStore;
 use crate::scripting::{FaultDecision, ScriptRequest};
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use mlua::prelude::*;
 use serde_json::Value;
 use std::sync::Arc;

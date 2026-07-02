@@ -11,11 +11,11 @@ mod stubs;
 
 use crate::app::{App, Overlay, StatusLevel, View};
 use ratatui::{
+    Frame,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph},
-    Frame,
 };
 
 /// Main draw function
@@ -374,7 +374,7 @@ pub fn format_uptime(duration: std::time::Duration) -> String {
 mod tests {
     use super::*;
     use crate::app::tests::{make_imposter, make_test_app};
-    use ratatui::{backend::TestBackend, Terminal};
+    use ratatui::{Terminal, backend::TestBackend};
 
     // ─── format_number ────────────────────────────────────────────────────────
 

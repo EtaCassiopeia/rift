@@ -511,13 +511,13 @@ impl ApiClient {
     /// Handle error responses
     async fn handle_error<T>(&self, resp: reqwest::Response) -> Result<T, ApiError> {
         let status = resp.status();
-        if let Ok(error_body) = resp.json::<ErrorResponse>().await {
-            if let Some(err) = error_body.errors.first() {
-                return Err(ApiError::Server {
-                    code: err.code.clone(),
-                    message: err.message.clone(),
-                });
-            }
+        if let Ok(error_body) = resp.json::<ErrorResponse>().await
+            && let Some(err) = error_body.errors.first()
+        {
+            return Err(ApiError::Server {
+                code: err.code.clone(),
+                message: err.message.clone(),
+            });
         }
         Err(ApiError::Server {
             code: status.as_str().to_string(),
@@ -537,31 +537,30 @@ fn parse_prometheus_metrics(text: &str) -> MetricsData {
         }
 
         // Parse rift_imposters_total
-        if line.starts_with("rift_imposters_total") {
-            if let Some(value) = line.split_whitespace().last() {
-                data.imposter_count = value.parse().unwrap_or(0);
-            }
+        if line.starts_with("rift_imposters_total")
+            && let Some(value) = line.split_whitespace().last()
+        {
+            data.imposter_count = value.parse().unwrap_or(0);
         }
 
         // Parse rift_imposter_requests_total{port="..."} VALUE
-        if line.starts_with("rift_imposter_requests_total") {
-            if let Some(port_start) = line.find("port=\"") {
-                let port_str = &line[port_start + 6..];
-                if let Some(port_end) = port_str.find('"') {
-                    if let Ok(port) = port_str[..port_end].parse::<u16>() {
-                        if let Some(value) = line.split_whitespace().last() {
-                            let count: u64 = value.parse().unwrap_or(0);
-                            data.total_requests += count;
-                            data.per_imposter.insert(
-                                port,
-                                ImposterMetrics {
-                                    request_count: count,
-                                    requests_per_second: 0.0,
-                                },
-                            );
-                        }
-                    }
-                }
+        if line.starts_with("rift_imposter_requests_total")
+            && let Some(port_start) = line.find("port=\"")
+        {
+            let port_str = &line[port_start + 6..];
+            if let Some(port_end) = port_str.find('"')
+                && let Ok(port) = port_str[..port_end].parse::<u16>()
+                && let Some(value) = line.split_whitespace().last()
+            {
+                let count: u64 = value.parse().unwrap_or(0);
+                data.total_requests += count;
+                data.per_imposter.insert(
+                    port,
+                    ImposterMetrics {
+                        request_count: count,
+                        requests_per_second: 0.0,
+                    },
+                );
             }
         }
     }

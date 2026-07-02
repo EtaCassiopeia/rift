@@ -250,7 +250,7 @@ fn navigate_json<'a>(value: &'a serde_json::Value, path: &str) -> Option<&'a ser
 /// - `/root/element/text()` - text content
 pub fn extract_xpath(body: &str, path: &str) -> Option<String> {
     use sxd_document::parser;
-    use sxd_xpath::{evaluate_xpath, Value};
+    use sxd_xpath::{Value, evaluate_xpath};
 
     // Parse the XML document
     let package = parser::parse(body).ok()?;

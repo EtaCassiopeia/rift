@@ -1,9 +1,9 @@
 use crate::extensions::flow_state::FlowStore;
 use crate::scripting::{FaultDecision, ScriptRequest};
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use boa_engine::{
-    js_string, native_function::NativeFunction, object::builtins::JsArray, property::PropertyKey,
-    Context, JsNativeError, JsObject, JsResult, JsValue, Source,
+    Context, JsNativeError, JsObject, JsResult, JsValue, Source, js_string,
+    native_function::NativeFunction, object::builtins::JsArray, property::PropertyKey,
 };
 
 /// Create a JavaScript object with proper Object.prototype
@@ -559,28 +559,28 @@ fn parse_fault_decision(
 
             // Extract optional headers
             let mut headers = std::collections::HashMap::new();
-            if let Ok(headers_val) = obj.get(js_string!("headers"), context) {
-                if let Some(headers_obj) = headers_val.as_object() {
-                    // Get all enumerable properties
-                    if let Ok(keys) = headers_obj.own_property_keys(context) {
-                        for key in keys {
-                            let key_str = match &key {
-                                PropertyKey::String(s) => s.to_std_string_escaped(),
-                                PropertyKey::Index(i) => i.get().to_string(),
-                                PropertyKey::Symbol(_) => continue, // Skip symbols
+            if let Ok(headers_val) = obj.get(js_string!("headers"), context)
+                && let Some(headers_obj) = headers_val.as_object()
+            {
+                // Get all enumerable properties
+                if let Ok(keys) = headers_obj.own_property_keys(context) {
+                    for key in keys {
+                        let key_str = match &key {
+                            PropertyKey::String(s) => s.to_std_string_escaped(),
+                            PropertyKey::Index(i) => i.get().to_string(),
+                            PropertyKey::Symbol(_) => continue, // Skip symbols
+                        };
+                        if let Ok(val) = headers_obj.get(key.clone(), context) {
+                            let val_str = if let Some(s) = val.as_string() {
+                                s.to_std_string_escaped()
+                            } else if let Some(n) = val.as_number() {
+                                n.to_string()
+                            } else if let Some(b) = val.as_boolean() {
+                                b.to_string()
+                            } else {
+                                continue;
                             };
-                            if let Ok(val) = headers_obj.get(key.clone(), context) {
-                                let val_str = if let Some(s) = val.as_string() {
-                                    s.to_std_string_escaped()
-                                } else if let Some(n) = val.as_number() {
-                                    n.to_string()
-                                } else if let Some(b) = val.as_boolean() {
-                                    b.to_string()
-                                } else {
-                                    continue;
-                                };
-                                headers.insert(key_str, val_str);
-                            }
+                            headers.insert(key_str, val_str);
                         }
                     }
                 }
@@ -860,10 +860,10 @@ pub fn execute_predicate_inject(
     };
 
     // Update state
-    if let Ok(updated_state) = global.get(js_string!("__state"), &mut context) {
-        if let Ok(Value::Object(map)) = js_to_json(&mut context, &updated_state) {
-            save_imposter_state(imposter_port, map);
-        }
+    if let Ok(updated_state) = global.get(js_string!("__state"), &mut context)
+        && let Ok(Value::Object(map)) = js_to_json(&mut context, &updated_state)
+    {
+        save_imposter_state(imposter_port, map);
     }
 
     result.to_boolean()
@@ -1046,21 +1046,20 @@ fn parse_mountebank_response(
 
     // Get headers (optional)
     let mut headers = std::collections::HashMap::new();
-    if let Ok(headers_val) = obj.get(js_string!("headers"), context) {
-        if let Some(headers_obj) = headers_val.as_object() {
-            if let Ok(keys) = headers_obj.own_property_keys(context) {
-                for key in keys {
-                    let key_str = match &key {
-                        PropertyKey::String(s) => s.to_std_string_escaped(),
-                        PropertyKey::Index(i) => i.get().to_string(),
-                        PropertyKey::Symbol(_) => continue,
-                    };
-                    if let Ok(val) = headers_obj.get(key.clone(), context) {
-                        if let Some(s) = val.as_string() {
-                            headers.insert(key_str, s.to_std_string_escaped());
-                        }
-                    }
-                }
+    if let Ok(headers_val) = obj.get(js_string!("headers"), context)
+        && let Some(headers_obj) = headers_val.as_object()
+        && let Ok(keys) = headers_obj.own_property_keys(context)
+    {
+        for key in keys {
+            let key_str = match &key {
+                PropertyKey::String(s) => s.to_std_string_escaped(),
+                PropertyKey::Index(i) => i.get().to_string(),
+                PropertyKey::Symbol(_) => continue,
+            };
+            if let Ok(val) = headers_obj.get(key.clone(), context)
+                && let Some(s) = val.as_string()
+            {
+                headers.insert(key_str, s.to_std_string_escaped());
             }
         }
     }
@@ -1202,21 +1201,20 @@ pub fn execute_mountebank_decorate(
 
     // Get headers
     let mut headers = response_headers.clone();
-    if let Ok(headers_val) = obj.get(js_string!("headers"), &mut context) {
-        if let Some(headers_obj) = headers_val.as_object() {
-            if let Ok(keys) = headers_obj.own_property_keys(&mut context) {
-                for key in keys {
-                    let key_str = match &key {
-                        PropertyKey::String(s) => s.to_std_string_escaped(),
-                        PropertyKey::Index(i) => i.get().to_string(),
-                        PropertyKey::Symbol(_) => continue,
-                    };
-                    if let Ok(val) = headers_obj.get(key.clone(), &mut context) {
-                        if let Some(s) = val.as_string() {
-                            headers.insert(key_str, s.to_std_string_escaped());
-                        }
-                    }
-                }
+    if let Ok(headers_val) = obj.get(js_string!("headers"), &mut context)
+        && let Some(headers_obj) = headers_val.as_object()
+        && let Ok(keys) = headers_obj.own_property_keys(&mut context)
+    {
+        for key in keys {
+            let key_str = match &key {
+                PropertyKey::String(s) => s.to_std_string_escaped(),
+                PropertyKey::Index(i) => i.get().to_string(),
+                PropertyKey::Symbol(_) => continue,
+            };
+            if let Ok(val) = headers_obj.get(key.clone(), &mut context)
+                && let Some(s) = val.as_string()
+            {
+                headers.insert(key_str, s.to_std_string_escaped());
             }
         }
     }

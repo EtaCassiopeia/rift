@@ -26,18 +26,18 @@ mod wait;
 
 // Re-export main types for library consumers
 #[allow(unused_imports)]
-pub use copy::{apply_copy_behaviors, CopyBehavior, CopySource};
+pub use copy::{CopyBehavior, CopySource, apply_copy_behaviors};
 pub use cycler::{HasRepeatBehavior, ResponseCycler, RuleCycler};
 #[allow(unused_imports)]
-pub use extraction::{extract_jsonpath, extract_xpath, extract_xpath_with_ns, ExtractionMethod};
+pub use extraction::{ExtractionMethod, extract_jsonpath, extract_xpath, extract_xpath_with_ns};
 #[allow(unused_imports)]
 pub use lookup::{
-    apply_lookup_behaviors, CsvCache, CsvData, CsvDataSource, DataSource, LookupBehavior, LookupKey,
+    CsvCache, CsvData, CsvDataSource, DataSource, LookupBehavior, LookupKey, apply_lookup_behaviors,
 };
-pub use request::{header_to_title_case, RequestContext};
+pub use request::{RequestContext, header_to_title_case};
 pub use transform::{
-    apply_decorate, apply_shell_transform, is_js_config_decorate, rewrite_js_config_to_rhai,
-    DecorateError,
+    DecorateError, apply_decorate, apply_shell_transform, is_js_config_decorate,
+    rewrite_js_config_to_rhai,
 };
 pub use types::ResponseBehaviors;
 #[allow(unused_imports)]
