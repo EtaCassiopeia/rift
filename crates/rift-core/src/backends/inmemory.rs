@@ -1,4 +1,4 @@
-use crate::extensions::flow_state::FlowStore;
+use crate::extensions::flow_state::{CasOutcome, FlowStore};
 use anyhow::Result;
 use parking_lot::RwLock;
 use serde_json::Value;
@@ -125,6 +125,29 @@ impl FlowStore for InMemoryFlowStore {
         }
 
         Ok(())
+    }
+
+    /// Atomic under the single write lock (issue #311): compare and write happen with no
+    /// interleaving window, unlike the trait's get-then-set default.
+    fn compare_and_set(
+        &self,
+        flow_id: &str,
+        key: &str,
+        expected: Option<&Value>,
+        new: Value,
+    ) -> Result<CasOutcome> {
+        let key_str = self.make_key(flow_id, key);
+        let mut data = self.data.write();
+        Self::cleanup_on_write(&mut data, &key_str, |exp| self.is_expired(exp));
+
+        let current = data.get(&key_str).map(|(value, _)| value);
+        if current == expected {
+            let expiry = SystemTime::now() + self.default_ttl;
+            data.insert(key_str, (new, Some(expiry)));
+            Ok(CasOutcome::Applied)
+        } else {
+            Ok(CasOutcome::Conflict(current.cloned()))
+        }
     }
 }
 
@@ -289,5 +312,94 @@ mod tests {
             Some(json!(expected)),
             "Concurrent increments lost updates: expected {expected}, got {final_value:?}"
         );
+    }
+
+    // ===== compare_and_set (issue #311) =====
+
+    #[test]
+    fn cas_expected_absent_applies() {
+        let store = InMemoryFlowStore::new(300);
+        let outcome = store
+            .compare_and_set("f", "state", None, json!("paid"))
+            .expect("cas");
+        assert!(matches!(outcome, CasOutcome::Applied));
+        assert_eq!(store.get("f", "state").expect("get"), Some(json!("paid")));
+    }
+
+    #[test]
+    fn cas_expected_present_applies() {
+        let store = InMemoryFlowStore::new(300);
+        store.set("f", "state", json!("Started")).expect("set");
+        let outcome = store
+            .compare_and_set("f", "state", Some(&json!("Started")), json!("paid"))
+            .expect("cas");
+        assert!(matches!(outcome, CasOutcome::Applied));
+        assert_eq!(store.get("f", "state").expect("get"), Some(json!("paid")));
+    }
+
+    #[test]
+    fn cas_conflict_returns_current() {
+        let store = InMemoryFlowStore::new(300);
+        store.set("f", "state", json!("shipped")).expect("set");
+        let outcome = store
+            .compare_and_set("f", "state", Some(&json!("Started")), json!("paid"))
+            .expect("cas");
+        match outcome {
+            CasOutcome::Conflict(current) => assert_eq!(current, Some(json!("shipped"))),
+            CasOutcome::Applied => panic!("must conflict"),
+        }
+        assert_eq!(
+            store.get("f", "state").expect("get"),
+            Some(json!("shipped")),
+            "conflict must not write"
+        );
+
+        let outcome = store
+            .compare_and_set("f", "absent", Some(&json!("Started")), json!("paid"))
+            .expect("cas");
+        assert!(matches!(outcome, CasOutcome::Conflict(None)));
+    }
+
+    // AC1: N racers, one CAS each on the same expected state — exactly one Applied,
+    // the rest Conflict, final state legal.
+    #[test]
+    fn cas_race_exactly_one_winner() {
+        use std::sync::Barrier;
+        use std::thread;
+
+        let store = Arc::new(InMemoryFlowStore::new(300));
+        store.set("f", "state", json!("Started")).expect("seed");
+        let racers = 64;
+        let barrier = Arc::new(Barrier::new(racers));
+
+        let handles: Vec<_> = (0..racers)
+            .map(|i| {
+                let store = Arc::clone(&store);
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    barrier.wait();
+                    let outcome = store
+                        .compare_and_set(
+                            "f",
+                            "state",
+                            Some(&json!("Started")),
+                            json!(format!("paid-by-{i}")),
+                        )
+                        .expect("cas");
+                    matches!(outcome, CasOutcome::Applied)
+                })
+            })
+            .collect();
+
+        let applied = handles
+            .into_iter()
+            .map(|h| h.join().expect("thread"))
+            .filter(|won| *won)
+            .count();
+        assert_eq!(applied, 1, "exactly one racer must win the CAS");
+
+        let final_state = store.get("f", "state").expect("get").expect("present");
+        let s = final_state.as_str().expect("string state");
+        assert!(s.starts_with("paid-by-"), "final state legal, got {s}");
     }
 }

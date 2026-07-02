@@ -177,12 +177,66 @@ impl Imposter {
     /// Apply a matched stub's `newScenarioState` transition (no-op if unset). A backend
     /// write error propagates (issue #318): a lost transition would silently desync the
     /// FSM, so the request must fail loudly instead.
+    ///
+    /// A gated stub (`requiredScenarioState`) transitions via compare-and-set expecting
+    /// the state its gate observed (issue #311): if the state moved underneath — a
+    /// concurrent request won — the stale write is dropped rather than clobbering the
+    /// newer state. Conflict is normal concurrency, not an error. Ungated stubs keep
+    /// today's unconditional overwrite (there is no gate read to race against).
     pub fn apply_scenario_transition(&self, flow_id: &str, stub: &Stub) -> anyhow::Result<()> {
-        if let Some(next) = &stub.new_scenario_state {
-            let scenario = stub.scenario_name.as_deref().unwrap_or("");
-            self.set_scenario_state(flow_id, scenario, next)?;
+        use crate::extensions::flow_state::CasOutcome;
+
+        let Some(next) = &stub.new_scenario_state else {
+            return Ok(());
+        };
+        let scenario = stub.scenario_name.as_deref().unwrap_or("");
+        let Some(required) = &stub.required_scenario_state else {
+            return self.set_scenario_state(flow_id, scenario, next);
+        };
+
+        let new_value = serde_json::Value::String(next.to_string());
+        let expected = serde_json::Value::String(required.to_string());
+        match self.flow_store.compare_and_set(
+            flow_id,
+            scenario,
+            Some(&expected),
+            new_value.clone(),
+        )? {
+            CasOutcome::Applied => Ok(()),
+            // The initial state is normally stored as ABSENCE — retry expecting that
+            // representation before concluding the state moved.
+            CasOutcome::Conflict(None) if required == INITIAL_SCENARIO_STATE => {
+                match self
+                    .flow_store
+                    .compare_and_set(flow_id, scenario, None, new_value)?
+                {
+                    CasOutcome::Applied => Ok(()),
+                    CasOutcome::Conflict(current) => {
+                        Self::log_dropped_transition(flow_id, scenario, required, next, &current);
+                        Ok(())
+                    }
+                }
+            }
+            CasOutcome::Conflict(current) => {
+                Self::log_dropped_transition(flow_id, scenario, required, next, &current);
+                Ok(())
+            }
         }
-        Ok(())
+    }
+
+    /// A dropped transition is correct behavior but must not be invisible: without this,
+    /// "my scenario stopped advancing" under concurrency has zero diagnostic signal.
+    fn log_dropped_transition(
+        flow_id: &str,
+        scenario: &str,
+        required: &str,
+        next: &str,
+        current: &Option<serde_json::Value>,
+    ) {
+        debug!(
+            "scenario transition dropped ({flow_id}/{scenario} {required} -> {next}): \
+             state moved underneath, current {current:?}"
+        );
     }
 
     /// Read a raw flow-state value (admin flow-state inspection).

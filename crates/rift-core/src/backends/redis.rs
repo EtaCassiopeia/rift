@@ -1,4 +1,4 @@
-use crate::extensions::flow_state::FlowStore;
+use crate::extensions::flow_state::{CasOutcome, FlowStore};
 use anyhow::{Context, Result};
 use redis::{Commands, Connection};
 use serde_json::Value;
@@ -208,6 +208,67 @@ impl FlowStore for RedisFlowStore {
             .map_err(|e| backend_err("flowStore.expire", e))?;
 
         Ok(new_value)
+    }
+
+    /// Single-round-trip atomic CAS via a server-side Lua script (issue #311): compare
+    /// and SETEX happen inside one EVAL, so no WATCH/MULTI and no interleaving window.
+    /// Values compare as their canonical JSON strings — the same encoding `set` writes.
+    fn compare_and_set(
+        &self,
+        flow_id: &str,
+        key: &str,
+        expected: Option<&Value>,
+        new: Value,
+    ) -> Result<CasOutcome> {
+        // Lua false/nil TERMINATES a Redis table reply, so absence is encoded as '' —
+        // unambiguous because stored payloads are always JSON (never the empty string).
+        const CAS_SCRIPT: &str = r#"
+local current = redis.call('GET', KEYS[1])
+local matches
+if ARGV[1] == '0' then
+  matches = (current == false)
+else
+  matches = (current == ARGV[2])
+end
+if matches then
+  redis.call('SETEX', KEYS[1], tonumber(ARGV[4]), ARGV[3])
+  return {1, current or ''}
+else
+  return {0, current or ''}
+end
+"#;
+        let key_str = self.make_key(flow_id, key);
+        let expected_json = expected
+            .map(|v| serde_json::to_string(v).context("Failed to serialize expected to JSON"))
+            .transpose()?
+            .unwrap_or_default();
+        let new_json = serde_json::to_string(&new).context("Failed to serialize value to JSON")?;
+
+        let conn = self
+            .pool
+            .get()
+            .map_err(|e| backend_err("flowStore.pool", e))?;
+        let (applied, current): (i64, String) = redis::cmd("EVAL")
+            .arg(CAS_SCRIPT)
+            .arg(1)
+            .arg(&key_str)
+            .arg(if expected.is_some() { "1" } else { "0" })
+            .arg(&expected_json)
+            .arg(&new_json)
+            .arg(self.default_ttl_seconds)
+            .query(&mut *conn.lock().unwrap())
+            .map_err(|e| backend_err("flowStore.compareAndSet", e))?;
+
+        if applied == 1 {
+            Ok(CasOutcome::Applied)
+        } else {
+            let current = if current.is_empty() {
+                None
+            } else {
+                Some(serde_json::from_str(&current).context("Failed to parse JSON from Redis")?)
+            };
+            Ok(CasOutcome::Conflict(current))
+        }
     }
 
     fn set_ttl(&self, flow_id: &str, ttl_seconds: i64) -> Result<()> {
