@@ -72,16 +72,16 @@ impl AdminApiServer {
                         // (which would otherwise force app-under-test traffic to carry the admin
                         // key and would leak that Authorization header into imposter predicates).
                         let is_gateway = req.uri().path().starts_with("/__rift/");
-                        if let Some(ref key) = api_key {
-                            if !is_gateway {
-                                let auth = req
-                                    .headers()
-                                    .get("authorization")
-                                    .and_then(|v| v.to_str().ok())
-                                    .unwrap_or("");
-                                if auth != key.as_str() {
-                                    return Ok::<_, hyper::Error>(unauthorized_response());
-                                }
+                        if let Some(ref key) = api_key
+                            && !is_gateway
+                        {
+                            let auth = req
+                                .headers()
+                                .get("authorization")
+                                .and_then(|v| v.to_str().ok())
+                                .unwrap_or("");
+                            if auth != key.as_str() {
+                                return Ok::<_, hyper::Error>(unauthorized_response());
                             }
                         }
                         route_request(req, manager, config_source).await

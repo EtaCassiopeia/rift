@@ -94,8 +94,8 @@ fn matches_route<B>(req: &Request<B>, route: &CompiledRoute) -> bool {
             .or_else(|| req.headers().get("host").and_then(|h| h.to_str().ok()));
 
         let matches = match (req_host, host_match) {
-            (Some(req_host), CompiledHost::Exact(ref pattern)) => req_host == pattern,
-            (Some(req_host), CompiledHost::Wildcard(ref pattern)) => {
+            (Some(req_host), CompiledHost::Exact(pattern)) => req_host == pattern,
+            (Some(req_host), CompiledHost::Wildcard(pattern)) => {
                 // Simple wildcard matching (*.example.com)
                 if let Some(suffix) = pattern.strip_prefix("*.") {
                     req_host.ends_with(suffix)
@@ -114,22 +114,22 @@ fn matches_route<B>(req: &Request<B>, route: &CompiledRoute) -> bool {
     // Check path
     let path = req.uri().path();
 
-    if let Some(ref exact) = route.path_exact {
-        if path != exact {
-            return false;
-        }
+    if let Some(ref exact) = route.path_exact
+        && path != exact
+    {
+        return false;
     }
 
-    if let Some(ref prefix) = route.path_prefix {
-        if !path.starts_with(prefix) {
-            return false;
-        }
+    if let Some(ref prefix) = route.path_prefix
+        && !path.starts_with(prefix)
+    {
+        return false;
     }
 
-    if let Some(ref regex) = route.path_regex {
-        if !regex.is_match(path) {
-            return false;
-        }
+    if let Some(ref regex) = route.path_regex
+        && !regex.is_match(path)
+    {
+        return false;
     }
 
     // Check headers

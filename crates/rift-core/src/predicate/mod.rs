@@ -39,13 +39,13 @@ mod string_matcher;
 // Re-export all public types for external consumers
 // Some are not yet used internally but are part of the public API
 #[allow(unused_imports)]
-pub use body_matcher::{extract_json_path, extract_xpath, BodyMatcher, CompiledBodyMatcher};
+pub use body_matcher::{BodyMatcher, CompiledBodyMatcher, extract_json_path, extract_xpath};
 #[allow(unused_imports)]
-pub use deep_equals::{parse_query_string, CompiledDeepEquals, DeepEquals};
+pub use deep_equals::{CompiledDeepEquals, DeepEquals, parse_query_string};
 #[allow(unused_imports)]
 pub use field_matcher::{
-    compile_header_matcher, compile_query_matcher, CompiledFieldMatcher, CompiledFieldMatcherInner,
-    CompiledHeaderMatcher, CompiledQueryMatcher, FieldMatcher, HeaderMatcher, QueryMatcher,
+    CompiledFieldMatcher, CompiledFieldMatcherInner, CompiledHeaderMatcher, CompiledQueryMatcher,
+    FieldMatcher, HeaderMatcher, QueryMatcher, compile_header_matcher, compile_query_matcher,
 };
 #[allow(unused_imports)]
 pub use logical::{CompiledLogicalMatcher, LogicalMatcher};

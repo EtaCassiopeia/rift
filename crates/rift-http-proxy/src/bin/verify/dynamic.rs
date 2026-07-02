@@ -140,29 +140,29 @@ pub enum ExpectMismatch {
 /// Check an observed (status, body) against a declared expectation. Returns `Ok(())` on a match
 /// or `Err` describing the first mismatch.
 pub fn check_expect(expect: &VerifyExpect, status: u16, body: &str) -> Result<(), ExpectMismatch> {
-    if let Some(want) = expect.status {
-        if status != want {
-            return Err(ExpectMismatch::Status {
-                actual: status,
-                expected: want,
-            });
-        }
+    if let Some(want) = expect.status
+        && status != want
+    {
+        return Err(ExpectMismatch::Status {
+            actual: status,
+            expected: want,
+        });
     }
-    if let Some(want) = &expect.body_equals {
-        if body != want {
-            return Err(ExpectMismatch::BodyEquals {
-                actual: body.to_string(),
-                expected: want.clone(),
-            });
-        }
+    if let Some(want) = &expect.body_equals
+        && body != want
+    {
+        return Err(ExpectMismatch::BodyEquals {
+            actual: body.to_string(),
+            expected: want.clone(),
+        });
     }
-    if let Some(want) = &expect.body_contains {
-        if !body.contains(want.as_str()) {
-            return Err(ExpectMismatch::BodyContains {
-                actual: body.to_string(),
-                expected: want.clone(),
-            });
-        }
+    if let Some(want) = &expect.body_contains
+        && !body.contains(want.as_str())
+    {
+        return Err(ExpectMismatch::BodyContains {
+            actual: body.to_string(),
+            expected: want.clone(),
+        });
     }
     Ok(())
 }
@@ -190,17 +190,17 @@ pub fn fault_expectation(response: &serde_json::Value) -> Option<FaultExpectatio
     if fault.get("tcp").is_some() {
         return Some(FaultExpectation::TransportReset);
     }
-    if let Some(latency) = fault.get("latency") {
-        if is_certain(latency) {
-            let ms = latency.get("ms").and_then(|v| v.as_u64())?;
-            return Some(FaultExpectation::Latency { ms });
-        }
+    if let Some(latency) = fault.get("latency")
+        && is_certain(latency)
+    {
+        let ms = latency.get("ms").and_then(|v| v.as_u64())?;
+        return Some(FaultExpectation::Latency { ms });
     }
-    if let Some(error) = fault.get("error") {
-        if is_certain(error) {
-            let status = error.get("status").and_then(|v| v.as_u64())? as u16;
-            return Some(FaultExpectation::ErrorStatus { status });
-        }
+    if let Some(error) = fault.get("error")
+        && is_certain(error)
+    {
+        let status = error.get("status").and_then(|v| v.as_u64())? as u16;
+        return Some(FaultExpectation::ErrorStatus { status });
     }
     None
 }
@@ -291,9 +291,8 @@ impl<'a> DynamicVerifier<'a> {
             Ok(s) => s,
             Err(e) => return vec![DynCheck::fail(label, e)],
         };
-        let port = match free_port() {
-            Some(p) => p,
-            None => return vec![DynCheck::fail(label, "no free port".to_string())],
+        let Some(port) = free_port() else {
+            return vec![DynCheck::fail(label, "no free port".to_string())];
         };
         let mut config = imposter.clone();
         config["port"] = port.into();
@@ -331,9 +330,8 @@ impl<'a> DynamicVerifier<'a> {
             Ok(m) => m,
             Err(e) => return vec![DynCheck::fail(label, e)],
         };
-        let port = match free_port() {
-            Some(p) => p,
-            None => return vec![DynCheck::fail(label, "no free port".to_string())],
+        let Some(port) = free_port() else {
+            return vec![DynCheck::fail(label, "no free port".to_string())];
         };
 
         let mut proxy_cfg = serde_json::json!({ "to": mock.url(), "mode": mode });
@@ -394,9 +392,8 @@ impl<'a> DynamicVerifier<'a> {
         expectation: FaultExpectation,
     ) -> Vec<DynCheck> {
         let label = format!("stub #{stub_idx} fault");
-        let port = match free_port() {
-            Some(p) => p,
-            None => return vec![DynCheck::fail(label, "no free port".to_string())],
+        let Some(port) = free_port() else {
+            return vec![DynCheck::fail(label, "no free port".to_string())];
         };
         let path = "/__rift_verify_fault";
         let config = serde_json::json!({
@@ -455,7 +452,9 @@ impl<'a> DynamicVerifier<'a> {
                             }
                             Ok(_) => DynCheck::fail(
                                 format!("{label} latency"),
-                                format!("{elapsed}ms over {baseline_ms}ms baseline does not show the configured {ms}ms delay"),
+                                format!(
+                                    "{elapsed}ms over {baseline_ms}ms baseline does not show the configured {ms}ms delay"
+                                ),
                             ),
                         }
                     }
@@ -475,7 +474,9 @@ impl<'a> DynamicVerifier<'a> {
                 if base_status == Some(want) {
                     DynCheck::skip(
                         format!("stub #{stub_idx} fault"),
-                        format!("error-fault status {want} equals the base response status; cannot prove the fault fired"),
+                        format!(
+                            "error-fault status {want} equals the base response status; cannot prove the fault fired"
+                        ),
                     )
                 } else {
                     match self.drive_step(port, &get_request(path)).await {

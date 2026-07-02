@@ -1,6 +1,6 @@
 use crate::extensions::flow_state::FlowStore;
-use anyhow::{anyhow, Result};
-use rhai::{Dynamic, Engine, Map, Scope, AST};
+use anyhow::{Result, anyhow};
+use rhai::{AST, Dynamic, Engine, Map, Scope};
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -315,29 +315,34 @@ impl RhaiEngine {
                     .map(|v| {
                         if let Some(s) = v.clone().try_cast::<String>() {
                             s
-                        } else if let Some(m) = v.clone().try_cast::<Map>() {
-                            // Convert map to JSON string
-                            serde_json::to_string(&dynamic_to_json(Dynamic::from(m)))
-                                .unwrap_or_else(|_| "{}".to_string())
                         } else {
-                            format!("{v}")
+                            match v.clone().try_cast::<Map>() {
+                                Some(m) => {
+                                    // Convert map to JSON string
+                                    serde_json::to_string(&dynamic_to_json(Dynamic::from(m)))
+                                        .unwrap_or_else(|_| "{}".to_string())
+                                }
+                                _ => {
+                                    format!("{v}")
+                                }
+                            }
                         }
                     })
                     .unwrap_or_else(|| "{}".to_string());
 
                 // Extract optional headers map
                 let mut headers = std::collections::HashMap::new();
-                if let Some(headers_value) = map.get("headers") {
-                    if let Some(headers_map) = headers_value.clone().try_cast::<Map>() {
-                        for (key, value) in headers_map {
-                            // Try to convert value to string
-                            let value_str = if let Some(s) = value.clone().try_cast::<String>() {
-                                s
-                            } else {
-                                format!("{value}")
-                            };
-                            headers.insert(key.to_string(), value_str);
-                        }
+                if let Some(headers_value) = map.get("headers")
+                    && let Some(headers_map) = headers_value.clone().try_cast::<Map>()
+                {
+                    for (key, value) in headers_map {
+                        // Try to convert value to string
+                        let value_str = if let Some(s) = value.clone().try_cast::<String>() {
+                            s
+                        } else {
+                            format!("{value}")
+                        };
+                        headers.insert(key.to_string(), value_str);
                     }
                 }
 
@@ -438,29 +443,34 @@ fn parse_fault_decision_with_rule_id(result: Dynamic, rule_id: &str) -> Result<F
                 .map(|v| {
                     if let Some(s) = v.clone().try_cast::<String>() {
                         s
-                    } else if let Some(m) = v.clone().try_cast::<Map>() {
-                        // Convert map to JSON string
-                        serde_json::to_string(&dynamic_to_json(Dynamic::from(m)))
-                            .unwrap_or_else(|_| "{}".to_string())
                     } else {
-                        format!("{v}")
+                        match v.clone().try_cast::<Map>() {
+                            Some(m) => {
+                                // Convert map to JSON string
+                                serde_json::to_string(&dynamic_to_json(Dynamic::from(m)))
+                                    .unwrap_or_else(|_| "{}".to_string())
+                            }
+                            _ => {
+                                format!("{v}")
+                            }
+                        }
                     }
                 })
                 .unwrap_or_else(|| "{}".to_string());
 
             // Extract optional headers map
             let mut headers = std::collections::HashMap::new();
-            if let Some(headers_value) = map.get("headers") {
-                if let Some(headers_map) = headers_value.clone().try_cast::<Map>() {
-                    for (key, value) in headers_map {
-                        // Try to convert value to string
-                        let value_str = if let Some(s) = value.clone().try_cast::<String>() {
-                            s
-                        } else {
-                            format!("{value}")
-                        };
-                        headers.insert(key.to_string(), value_str);
-                    }
+            if let Some(headers_value) = map.get("headers")
+                && let Some(headers_map) = headers_value.clone().try_cast::<Map>()
+            {
+                for (key, value) in headers_map {
+                    // Try to convert value to string
+                    let value_str = if let Some(s) = value.clone().try_cast::<String>() {
+                        s
+                    } else {
+                        format!("{value}")
+                    };
+                    headers.insert(key.to_string(), value_str);
                 }
             }
 
@@ -516,16 +526,20 @@ pub(super) fn dynamic_to_json(value: Dynamic) -> Value {
         Value::Number(serde_json::Number::from_f64(f).unwrap_or(0.into()))
     } else if let Some(s) = value.clone().try_cast::<String>() {
         Value::String(s)
-    } else if let Some(arr) = value.clone().try_cast::<Vec<Dynamic>>() {
-        Value::Array(arr.into_iter().map(dynamic_to_json).collect())
-    } else if let Some(map) = value.clone().try_cast::<Map>() {
-        let mut obj = serde_json::Map::new();
-        for (k, v) in map {
-            obj.insert(k.to_string(), dynamic_to_json(v));
-        }
-        Value::Object(obj)
     } else {
-        Value::String(format!("{value}"))
+        match value.clone().try_cast::<Vec<Dynamic>>() {
+            Some(arr) => Value::Array(arr.into_iter().map(dynamic_to_json).collect()),
+            _ => match value.clone().try_cast::<Map>() {
+                Some(map) => {
+                    let mut obj = serde_json::Map::new();
+                    for (k, v) in map {
+                        obj.insert(k.to_string(), dynamic_to_json(v));
+                    }
+                    Value::Object(obj)
+                }
+                _ => Value::String(format!("{value}")),
+            },
+        }
     }
 }
 

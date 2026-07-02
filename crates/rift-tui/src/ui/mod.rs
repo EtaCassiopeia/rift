@@ -11,11 +11,11 @@ mod stubs;
 
 use crate::app::{App, Overlay, StatusLevel, View};
 use ratatui::{
+    Frame,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph},
-    Frame,
 };
 
 /// Main draw function
@@ -138,12 +138,9 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
             StatusLevel::Warning => app.theme.warning,
             StatusLevel::Error => app.theme.error,
         };
-        let paragraph = Paragraph::new(Span::styled(
-            format!(" {}", msg),
-            Style::default().fg(color),
-        ))
-        .block(block)
-        .alignment(Alignment::Left);
+        let paragraph = Paragraph::new(Span::styled(format!(" {msg}"), Style::default().fg(color)))
+            .block(block)
+            .alignment(Alignment::Left);
         frame.render_widget(paragraph, area);
     } else {
         let (commands1, commands2) = get_commands(&app.view);
@@ -174,14 +171,14 @@ fn build_command_line(commands: &[Command], app: &App) -> Line<'static> {
         }
         // Key in brackets with accent color
         spans.push(Span::styled(
-            format!("[{}]", key),
+            format!("[{key}]"),
             Style::default()
                 .fg(app.theme.key_fg)
                 .add_modifier(Modifier::BOLD),
         ));
         // Label in muted color
         spans.push(Span::styled(
-            format!(" {}", label),
+            format!(" {label}"),
             Style::default().fg(app.theme.cmd_fg),
         ));
     }
@@ -362,11 +359,11 @@ pub fn format_uptime(duration: std::time::Duration) -> String {
     let secs = secs % 60;
 
     if hours > 0 {
-        format!("{}h {}m {}s", hours, mins, secs)
+        format!("{hours}h {mins}m {secs}s")
     } else if mins > 0 {
-        format!("{}m {}s", mins, secs)
+        format!("{mins}m {secs}s")
     } else {
-        format!("{}s", secs)
+        format!("{secs}s")
     }
 }
 
@@ -374,7 +371,7 @@ pub fn format_uptime(duration: std::time::Duration) -> String {
 mod tests {
     use super::*;
     use crate::app::tests::{make_imposter, make_test_app};
-    use ratatui::{backend::TestBackend, Terminal};
+    use ratatui::{Terminal, backend::TestBackend};
 
     // ─── format_number ────────────────────────────────────────────────────────
 

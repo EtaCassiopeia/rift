@@ -1,7 +1,7 @@
 use crate::config::{HeaderMatch, PathMatch, Rule};
 use crate::predicate::{
-    compile_header_matcher, compile_query_matcher, parse_query_string, CompiledBodyMatcher,
-    CompiledFieldMatcher,
+    CompiledBodyMatcher, CompiledFieldMatcher, compile_header_matcher, compile_query_matcher,
+    parse_query_string,
 };
 use hyper::{HeaderMap, Method, Uri};
 use regex::Regex;
@@ -165,14 +165,12 @@ impl CompiledRule {
 
         // Match simple headers (backward compatible)
         for header_match in &self.match_config.headers {
-            let header_value = match headers.get(&header_match.name) {
-                Some(value) => value,
-                None => return false,
+            let Some(header_value) = headers.get(&header_match.name) else {
+                return false;
             };
 
-            let value_str = match header_value.to_str() {
-                Ok(s) => s,
-                Err(_) => return false,
+            let Ok(value_str) = header_value.to_str() else {
+                return false;
             };
 
             if value_str != header_match.value {

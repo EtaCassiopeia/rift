@@ -2,11 +2,11 @@
 
 use crate::app::App;
 use ratatui::{
+    Frame,
     layout::Rect,
     style::Style,
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Wrap},
-    Frame,
 };
 
 /// Draw the full request detail for a single recorded request

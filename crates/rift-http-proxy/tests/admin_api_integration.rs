@@ -685,7 +685,10 @@ mod https {
             .create_imposter(serde_json::from_value(stub_config(19847, "https", None)).unwrap())
             .await;
         assert!(
-            matches!(result, Err(rift_http_proxy::imposter::ImposterError::Tls(_))),
+            matches!(
+                result,
+                Err(rift_http_proxy::imposter::ImposterError::Tls(_))
+            ),
             "half-configured server default must error, not downgrade to self-signed, got {result:?}"
         );
     }
@@ -960,7 +963,7 @@ mod multi_value_headers {
 // Issue #197: POST /admin/reload re-reads the config source and replaces imposters.
 mod reload {
     use super::*;
-    use rift_http_proxy::config_loader::{load_configs, ConfigSource};
+    use rift_http_proxy::config_loader::{ConfigSource, load_configs};
 
     fn cfg(port: u16, body: &str) -> String {
         format!(

@@ -182,8 +182,7 @@ mod tests {
             let duration = wait.get_duration_ms();
             assert!(
                 (50..=100).contains(&duration),
-                "Duration {} not in range 50-100",
-                duration
+                "Duration {duration} not in range 50-100"
             );
         }
     }
@@ -197,8 +196,7 @@ mod tests {
             let duration = wait.get_duration_ms();
             assert!(
                 (50..=150).contains(&duration),
-                "Duration {} not in range 50-150",
-                duration
+                "Duration {duration} not in range 50-150"
             );
         }
     }

@@ -1,5 +1,5 @@
 use super::validator::{ScriptValidationError, ScriptValidator};
-use boa_engine::{js_string, Context, Source};
+use boa_engine::{Context, Source, js_string};
 use std::error::Error;
 use std::fmt;
 

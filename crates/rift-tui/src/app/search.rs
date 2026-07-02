@@ -194,11 +194,10 @@ impl App {
                 let filtered = self.filtered_imposters();
                 if !filtered.is_empty() {
                     // Find the index of the first matching imposter in the original list
-                    if let Some(first) = filtered.first() {
-                        if let Some(idx) = self.imposters.iter().position(|i| i.port == first.port)
-                        {
-                            self.imposter_list_state.select(Some(idx));
-                        }
+                    if let Some(first) = filtered.first()
+                        && let Some(idx) = self.imposters.iter().position(|i| i.port == first.port)
+                    {
+                        self.imposter_list_state.select(Some(idx));
                     }
                 }
             }

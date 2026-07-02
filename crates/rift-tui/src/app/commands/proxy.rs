@@ -59,14 +59,14 @@ impl App {
         {
             Ok(port) => {
                 self.set_status(
-                    format!("Created proxy imposter :{}", port),
+                    format!("Created proxy imposter :{port}"),
                     StatusLevel::Success,
                 );
                 self.overlay = Overlay::None;
                 self.refresh().await;
             }
             Err(e) => {
-                self.set_status(format!("Failed to create: {}", e), StatusLevel::Error);
+                self.set_status(format!("Failed to create: {e}"), StatusLevel::Error);
             }
         }
         self.is_loading = false;
@@ -81,8 +81,7 @@ impl App {
 
         self.overlay = Overlay::Confirm {
             message: format!(
-                "Apply recorded stubs to :{}?\nThis will remove proxy stubs and replace with recorded responses.",
-                port
+                "Apply recorded stubs to :{port}?\nThis will remove proxy stubs and replace with recorded responses."
             ),
             action: PendingAction::ApplyRecordedStubs { port },
         };
@@ -108,7 +107,7 @@ impl App {
 
                         // Delete and recreate imposter with new stubs
                         if let Err(e) = self.client.delete_imposter(port).await {
-                            self.set_status(format!("Failed to apply: {}", e), StatusLevel::Error);
+                            self.set_status(format!("Failed to apply: {e}"), StatusLevel::Error);
                             self.is_loading = false;
                             self.overlay = Overlay::None;
                             return;
@@ -121,7 +120,7 @@ impl App {
                         match resp {
                             Ok(r) if r.status().is_success() => {
                                 self.set_status(
-                                    format!("Applied recorded stubs to :{}", port),
+                                    format!("Applied recorded stubs to :{port}"),
                                     StatusLevel::Success,
                                 );
                                 self.refresh().await;
@@ -134,22 +133,19 @@ impl App {
                             }
                             Err(e) => {
                                 self.set_status(
-                                    format!("Failed to apply: {}", e),
+                                    format!("Failed to apply: {e}"),
                                     StatusLevel::Error,
                                 );
                             }
                         }
                     }
                     Err(e) => {
-                        self.set_status(
-                            format!("Failed to parse config: {}", e),
-                            StatusLevel::Error,
-                        );
+                        self.set_status(format!("Failed to parse config: {e}"), StatusLevel::Error);
                     }
                 }
             }
             Err(e) => {
-                self.set_status(format!("Failed to export: {}", e), StatusLevel::Error);
+                self.set_status(format!("Failed to export: {e}"), StatusLevel::Error);
             }
         }
 
@@ -166,7 +162,7 @@ impl App {
 
         if let Some(port) = port {
             self.overlay = Overlay::Confirm {
-                message: format!("Clear all proxy recordings for :{}?", port),
+                message: format!("Clear all proxy recordings for :{port}?"),
                 action: PendingAction::ClearProxyResponses { port },
             };
         }
@@ -181,7 +177,7 @@ impl App {
                 self.refresh().await;
             }
             Err(e) => {
-                self.set_status(format!("Failed to clear: {}", e), StatusLevel::Error);
+                self.set_status(format!("Failed to clear: {e}"), StatusLevel::Error);
             }
         }
         self.is_loading = false;
@@ -197,7 +193,7 @@ impl App {
 
         if let Some(port) = port {
             self.overlay = Overlay::Confirm {
-                message: format!("Clear all recorded requests for :{}?", port),
+                message: format!("Clear all recorded requests for :{port}?"),
                 action: PendingAction::ClearRequests { port },
             };
         }
@@ -215,7 +211,7 @@ impl App {
                 self.refresh().await;
             }
             Err(e) => {
-                self.set_status(format!("Failed to clear: {}", e), StatusLevel::Error);
+                self.set_status(format!("Failed to clear: {e}"), StatusLevel::Error);
             }
         }
         self.is_loading = false;

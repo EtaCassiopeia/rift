@@ -209,15 +209,12 @@ pub fn validate_predicate(
         "inject",
     ];
 
-    let pred_obj = match predicate.as_object() {
-        Some(obj) => obj,
-        None => {
-            result.add_issue(
-                LintIssue::error("E007", "Predicate must be an object", file.to_path_buf())
-                    .with_location(location),
-            );
-            return;
-        }
+    let Some(pred_obj) = predicate.as_object() else {
+        result.add_issue(
+            LintIssue::error("E007", "Predicate must be an object", file.to_path_buf())
+                .with_location(location),
+        );
+        return;
     };
 
     let modifier_keys: HashSet<&str> =
@@ -257,8 +254,9 @@ pub fn validate_predicate(
             .collect::<Vec<_>>();
         let sub_predicates = serde_json::json!(sub_predicates);
         let and_predicate = serde_json::json!({"and": sub_predicates});
-        let suggestion =
-            format!("Split into separate predicates, combined with and, like: {and_predicate} (or just {sub_predicates} if at the top level)");
+        let suggestion = format!(
+            "Split into separate predicates, combined with and, like: {and_predicate} (or just {sub_predicates} if at the top level)"
+        );
         result.add_issue(
             LintIssue::error("E034", "Only one predicate operation", file.to_path_buf())
                 .with_location(location)
@@ -345,18 +343,18 @@ fn validate_regex_patterns(
 ) {
     if let Some(obj) = matches.as_object() {
         for (field, pattern) in obj {
-            if let Some(pattern_str) = pattern.as_str() {
-                if let Err(e) = Regex::new(pattern_str) {
-                    result.add_issue(
-                        LintIssue::error(
-                            "E013",
-                            format!("Invalid regex pattern in '{field}': {e}"),
-                            file.to_path_buf(),
-                        )
-                        .with_location(format!("{location}.matches.{field}"))
-                        .with_suggestion("Check regex syntax"),
-                    );
-                }
+            if let Some(pattern_str) = pattern.as_str()
+                && let Err(e) = Regex::new(pattern_str)
+            {
+                result.add_issue(
+                    LintIssue::error(
+                        "E013",
+                        format!("Invalid regex pattern in '{field}': {e}"),
+                        file.to_path_buf(),
+                    )
+                    .with_location(format!("{location}.matches.{field}"))
+                    .with_suggestion("Check regex syntax"),
+                );
             }
         }
     }
@@ -424,10 +422,10 @@ pub fn validate_response(
         validate_is_response(file, is_response, &format!("{location}.is"), result);
     }
 
-    if let Some(proxy) = response.get("proxy") {
-        if !proxy.is_null() {
-            validate_proxy_response(file, proxy, &format!("{location}.proxy"), result);
-        }
+    if let Some(proxy) = response.get("proxy")
+        && !proxy.is_null()
+    {
+        validate_proxy_response(file, proxy, &format!("{location}.proxy"), result);
     }
 
     // Rift/Mountebank write behaviors as `_behaviors: { wait, repeat, ... }` (object).
@@ -493,31 +491,29 @@ pub fn validate_is_response(
     }
 
     // Check if body is valid JSON when Content-Type is application/json
-    if let Some(body) = is_response.get("body") {
-        if let Some(headers) = is_response.get("headers").and_then(|h| h.as_object()) {
-            let content_type = headers
-                .iter()
-                .find(|(k, _)| k.to_lowercase() == "content-type")
-                .and_then(|(_, v)| v.as_str());
+    if let Some(body) = is_response.get("body")
+        && let Some(headers) = is_response.get("headers").and_then(|h| h.as_object())
+    {
+        let content_type = headers
+            .iter()
+            .find(|(k, _)| k.to_lowercase() == "content-type")
+            .and_then(|(_, v)| v.as_str());
 
-            if content_type
-                .map(|ct| ct.contains("application/json"))
-                .unwrap_or(false)
-            {
-                if let Some(body_str) = body.as_str() {
-                    if serde_json::from_str::<Value>(body_str).is_err() {
-                        result.add_issue(
-                            LintIssue::warning(
-                                "W004",
-                                "Body is not valid JSON but Content-Type is application/json",
-                                file.to_path_buf(),
-                            )
-                            .with_location(format!("{location}.body"))
-                            .with_suggestion("Verify the body is valid JSON"),
-                        );
-                    }
-                }
-            }
+        if content_type
+            .map(|ct| ct.contains("application/json"))
+            .unwrap_or(false)
+            && let Some(body_str) = body.as_str()
+            && serde_json::from_str::<Value>(body_str).is_err()
+        {
+            result.add_issue(
+                LintIssue::warning(
+                    "W004",
+                    "Body is not valid JSON but Content-Type is application/json",
+                    file.to_path_buf(),
+                )
+                .with_location(format!("{location}.body"))
+                .with_suggestion("Verify the body is valid JSON"),
+            );
         }
     }
 }
@@ -565,7 +561,7 @@ pub fn validate_headers(file: &Path, headers: &Value, location: &str, result: &m
                     file.to_path_buf(),
                 )
                 .with_location(format!("{location}.{name}"))
-                .with_suggestion(format!("Change to: \"{name}\": \"{}\"", value)),
+                .with_suggestion(format!("Change to: \"{name}\": \"{value}\"")),
             );
         } else if value.is_boolean() {
             result.add_issue(
@@ -575,7 +571,7 @@ pub fn validate_headers(file: &Path, headers: &Value, location: &str, result: &m
                     file.to_path_buf(),
                 )
                 .with_location(format!("{location}.{name}"))
-                .with_suggestion(format!("Change to: \"{name}\": \"{}\"", value)),
+                .with_suggestion(format!("Change to: \"{name}\": \"{value}\"")),
             );
         } else if value.is_null() {
             result.add_issue(
@@ -589,22 +585,20 @@ pub fn validate_headers(file: &Path, headers: &Value, location: &str, result: &m
             );
         }
 
-        if name.to_lowercase() == "content-length" {
-            if let Some(len_str) = value.as_str() {
-                if let Ok(len) = len_str.parse::<u64>() {
-                    if len < 10 {
-                        result.add_issue(
-                            LintIssue::warning(
-                                "W006",
-                                format!("Content-Length is very small ({len}), may cause issues"),
-                                file.to_path_buf(),
-                            )
-                            .with_location(format!("{location}.{name}"))
-                            .with_suggestion("Verify Content-Length matches actual body length"),
-                        );
-                    }
-                }
-            }
+        if name.to_lowercase() == "content-length"
+            && let Some(len_str) = value.as_str()
+            && let Ok(len) = len_str.parse::<u64>()
+            && len < 10
+        {
+            result.add_issue(
+                LintIssue::warning(
+                    "W006",
+                    format!("Content-Length is very small ({len}), may cause issues"),
+                    file.to_path_buf(),
+                )
+                .with_location(format!("{location}.{name}"))
+                .with_suggestion("Verify Content-Length matches actual body length"),
+            );
         }
     }
 }
@@ -631,20 +625,19 @@ pub fn validate_proxy_response(
 
             if url.contains("localhost:") || url.contains("127.0.0.1:") {
                 let port_re = Regex::new(r":(\d+)").unwrap();
-                if let Some(captures) = port_re.captures(url) {
-                    if let Ok(port) = captures[1].parse::<u16>() {
-                        if port > 10000 {
-                            result.add_issue(
-                                LintIssue::info(
-                                    "I002",
-                                    format!("Proxy targets localhost:{port}"),
-                                    file.to_path_buf(),
-                                )
-                                .with_location(format!("{location}.to"))
-                                .with_suggestion("Ensure upstream service is running on this port"),
-                            );
-                        }
-                    }
+                if let Some(captures) = port_re.captures(url)
+                    && let Ok(port) = captures[1].parse::<u16>()
+                    && port > 10000
+                {
+                    result.add_issue(
+                        LintIssue::info(
+                            "I002",
+                            format!("Proxy targets localhost:{port}"),
+                            file.to_path_buf(),
+                        )
+                        .with_location(format!("{location}.to"))
+                        .with_suggestion("Ensure upstream service is running on this port"),
+                    );
                 }
             }
         } else {
@@ -738,36 +731,34 @@ pub fn validate_behavior(
         }
     }
 
-    if let Some(decorate) = obj.get("decorate") {
-        if let Some(script) = decorate.as_str() {
-            validate_javascript_behavior(
-                file,
-                script,
-                &format!("{location}.decorate"),
-                result,
-                options,
-                true,
-            );
-        }
+    if let Some(decorate) = obj.get("decorate")
+        && let Some(script) = decorate.as_str()
+    {
+        validate_javascript_behavior(
+            file,
+            script,
+            &format!("{location}.decorate"),
+            result,
+            options,
+            true,
+        );
     }
 
-    if let Some(shell) = obj.get("shellTransform") {
-        if let Some(cmd) = shell.as_str() {
-            let dangerous_patterns = ["rm ", "rm -", "sudo ", "chmod ", "dd ", "> /dev/"];
-            for pattern in dangerous_patterns {
-                if cmd.contains(pattern) {
-                    result.add_issue(
-                        LintIssue::warning(
-                            "W008",
-                            format!(
-                                "shellTransform contains potentially dangerous command: {pattern}"
-                            ),
-                            file.to_path_buf(),
-                        )
-                        .with_location(format!("{location}.shellTransform"))
-                        .with_suggestion("Review this command for safety"),
-                    );
-                }
+    if let Some(shell) = obj.get("shellTransform")
+        && let Some(cmd) = shell.as_str()
+    {
+        let dangerous_patterns = ["rm ", "rm -", "sudo ", "chmod ", "dd ", "> /dev/"];
+        for pattern in dangerous_patterns {
+            if cmd.contains(pattern) {
+                result.add_issue(
+                    LintIssue::warning(
+                        "W008",
+                        format!("shellTransform contains potentially dangerous command: {pattern}"),
+                        file.to_path_buf(),
+                    )
+                    .with_location(format!("{location}.shellTransform"))
+                    .with_suggestion("Review this command for safety"),
+                );
             }
         }
     }

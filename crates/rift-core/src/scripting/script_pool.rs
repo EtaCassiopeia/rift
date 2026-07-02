@@ -1,10 +1,10 @@
 use crate::extensions::flow_state::FlowStore;
 use crate::scripting::{FaultDecision, ScriptRequest};
-use anyhow::{anyhow, Result};
-use crossbeam::channel::{bounded, Receiver, Sender};
+use anyhow::{Result, anyhow};
+use crossbeam::channel::{Receiver, Sender, bounded};
 use rhai::AST;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use tokio::sync::oneshot;

@@ -30,15 +30,13 @@ pub fn generate_stub(
         );
     }
 
-    if include_query {
-        if let Some(ref query) = signature.query {
-            let query_map = parse_query_string(query);
-            if !query_map.is_empty() {
-                predicates.insert(
-                    "query".to_string(),
-                    serde_json::json!({ "equals": query_map }),
-                );
-            }
+    if include_query && let Some(ref query) = signature.query {
+        let query_map = parse_query_string(query);
+        if !query_map.is_empty() {
+            predicates.insert(
+                "query".to_string(),
+                serde_json::json!({ "equals": query_map }),
+            );
         }
     }
 

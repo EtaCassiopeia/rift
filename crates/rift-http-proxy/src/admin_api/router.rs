@@ -110,14 +110,11 @@ async fn handle_gateway(
             &format!("invalid gateway target '{port_str}' (expected /__rift/<port>/<path>)"),
         );
     };
-    let imposter = match manager.get_imposter(port) {
-        Ok(imposter) => imposter,
-        Err(_) => {
-            return error_response(
-                StatusCode::NOT_FOUND,
-                &format!("no imposter on port {port}"),
-            )
-        }
+    let Ok(imposter) = manager.get_imposter(port) else {
+        return error_response(
+            StatusCode::NOT_FOUND,
+            &format!("no imposter on port {port}"),
+        );
     };
 
     let target = match query {
@@ -168,7 +165,7 @@ async fn route_by_path(
         (&Method::GET, "/config") => return system::handle_config(),
         (&Method::GET, "/logs") => return system::handle_logs(query),
         (&Method::POST, "/admin/reload") => {
-            return system::handle_reload(manager, config_source).await
+            return system::handle_reload(manager, config_source).await;
         }
         (&Method::GET, "/metrics") => return system::handle_metrics(manager).await,
         _ => {}
@@ -249,9 +246,8 @@ async fn route_imposter(
     };
 
     // Parse remaining route
-    let route = match ImposterRoute::parse(&segments[1..]) {
-        Some(r) => r,
-        None => return not_found(),
+    let Some(route) = ImposterRoute::parse(&segments[1..]) else {
+        return not_found();
     };
 
     // Dispatch based on method and route

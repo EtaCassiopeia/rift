@@ -215,11 +215,13 @@ mod tests {
     fn parse_error_is_returned_not_panicked() {
         let dir = tempfile::tempdir().unwrap();
         let bad = write(dir.path(), "bad.json", "{ not valid json");
-        assert!(load_configs(&ConfigSource::File {
-            path: bad,
-            no_parse: false
-        })
-        .is_err());
+        assert!(
+            load_configs(&ConfigSource::File {
+                path: bad,
+                no_parse: false
+            })
+            .is_err()
+        );
     }
 
     // EJS configfile pre-processing (relocated from main.rs with preprocess_ejs in issue #197)
@@ -233,17 +235,17 @@ mod tests {
 
     #[test]
     fn test_ejs_env_var_substitution() {
-        std::env::set_var("RIFT_TEST_HOST", "myhost");
+        unsafe { std::env::set_var("RIFT_TEST_HOST", "myhost") };
         let content = r#"{"body": "<%= process.env.RIFT_TEST_HOST %>"}"#;
         let path = PathBuf::from("config.json");
         let result = preprocess_ejs(content, &path).unwrap();
         assert_eq!(result, r#"{"body": "myhost"}"#);
-        std::env::remove_var("RIFT_TEST_HOST");
+        unsafe { std::env::remove_var("RIFT_TEST_HOST") };
     }
 
     #[test]
     fn test_ejs_env_var_with_default() {
-        std::env::remove_var("RIFT_TEST_UNSET_VAR");
+        unsafe { std::env::remove_var("RIFT_TEST_UNSET_VAR") };
         let content = r#"{"port": "<%= process.env.RIFT_TEST_UNSET_VAR || '4545' %>"}"#;
         let path = PathBuf::from("config.json");
         let result = preprocess_ejs(content, &path).unwrap();
@@ -252,12 +254,12 @@ mod tests {
 
     #[test]
     fn test_ejs_env_var_present_overrides_default() {
-        std::env::set_var("RIFT_TEST_PORT", "8080");
+        unsafe { std::env::set_var("RIFT_TEST_PORT", "8080") };
         let content = r#"{"port": "<%= process.env.RIFT_TEST_PORT || '4545' %>"}"#;
         let path = PathBuf::from("config.json");
         let result = preprocess_ejs(content, &path).unwrap();
         assert_eq!(result, r#"{"port": "8080"}"#);
-        std::env::remove_var("RIFT_TEST_PORT");
+        unsafe { std::env::remove_var("RIFT_TEST_PORT") };
     }
 
     #[test]

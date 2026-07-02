@@ -42,10 +42,10 @@ impl Imposter {
             // Correlated-isolation gate (issue #223, runs first): a space-scoped stub only
             // participates in matching when the request's resolved flow_id equals its space.
             // Unscoped stubs match any space (PerInstance default).
-            if let Some(space) = &stub.space {
-                if flow_id != *space {
-                    continue;
-                }
+            if let Some(space) = &stub.space
+                && flow_id != *space
+            {
+                continue;
             }
             // Scenario FSM eligibility gate (before predicate precedence): a stub guarded by
             // `requiredScenarioState` only participates in matching when the current
@@ -254,29 +254,29 @@ impl Imposter {
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
 
-        if content_type.contains("application/x-www-form-urlencoded") {
-            if let Some(body_str) = body {
-                let mut map = HashMap::new();
-                for pair in body_str.split('&').filter(|s| !s.is_empty()) {
-                    let mut parts = pair.splitn(2, '=');
-                    if let Some(raw_key) = parts.next() {
-                        let key = urlencoding::decode(raw_key)
-                            .unwrap_or_default()
-                            .into_owned();
-                        let value = parts
-                            .next()
-                            .map(|v| urlencoding::decode(v).unwrap_or_default().into_owned())
-                            .unwrap_or_default();
-                        map.entry(key)
-                            .and_modify(|existing: &mut String| {
-                                existing.push(',');
-                                existing.push_str(&value);
-                            })
-                            .or_insert(value);
-                    }
+        if content_type.contains("application/x-www-form-urlencoded")
+            && let Some(body_str) = body
+        {
+            let mut map = HashMap::new();
+            for pair in body_str.split('&').filter(|s| !s.is_empty()) {
+                let mut parts = pair.splitn(2, '=');
+                if let Some(raw_key) = parts.next() {
+                    let key = urlencoding::decode(raw_key)
+                        .unwrap_or_default()
+                        .into_owned();
+                    let value = parts
+                        .next()
+                        .map(|v| urlencoding::decode(v).unwrap_or_default().into_owned())
+                        .unwrap_or_default();
+                    map.entry(key)
+                        .and_modify(|existing: &mut String| {
+                            existing.push(',');
+                            existing.push_str(&value);
+                        })
+                        .or_insert(value);
                 }
-                return Some(map);
             }
+            return Some(map);
         }
         None
     }

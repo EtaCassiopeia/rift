@@ -197,8 +197,8 @@ pub fn apply_date_templates(body: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hyper::header::{HeaderName, HeaderValue};
     use hyper::HeaderMap;
+    use hyper::header::{HeaderName, HeaderValue};
 
     fn create_test_request_data() -> RequestData {
         let mut headers = HeaderMap::new();

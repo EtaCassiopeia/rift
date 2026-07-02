@@ -178,7 +178,7 @@ impl App {
                     self.set_status("Config refreshed".to_string(), StatusLevel::Success);
                 }
                 Err(e) => {
-                    self.set_status(format!("Failed to load config: {}", e), StatusLevel::Error)
+                    self.set_status(format!("Failed to load config: {e}"), StatusLevel::Error)
                 }
             }
         }
@@ -210,7 +210,7 @@ impl App {
                 self.server_config = Some(cfg);
                 self.navigate(View::Config);
             }
-            Err(e) => self.set_status(format!("Failed to load config: {}", e), StatusLevel::Error),
+            Err(e) => self.set_status(format!("Failed to load config: {e}"), StatusLevel::Error),
         }
         self.is_loading = false;
     }
@@ -303,16 +303,16 @@ impl App {
                         self.copy_to_clipboard(&text);
                     }
                     Some(EditorAction::PasteRequest) => {
-                        if let Some(text) = self.paste_from_clipboard() {
-                            if let Some(editor) = &mut self.stub_editor {
-                                editor.editor.set_yank_text(text.clone());
-                                editor.editor.input(ratatui_textarea::Input {
-                                    key: ratatui_textarea::Key::Char('y'),
-                                    ctrl: true,
-                                    alt: false,
-                                    shift: false,
-                                });
-                            }
+                        if let Some(text) = self.paste_from_clipboard()
+                            && let Some(editor) = &mut self.stub_editor
+                        {
+                            editor.editor.set_yank_text(text.clone());
+                            editor.editor.input(ratatui_textarea::Input {
+                                key: ratatui_textarea::Key::Char('y'),
+                                ctrl: true,
+                                alt: false,
+                                shift: false,
+                            });
                         }
                     }
                     None => {}

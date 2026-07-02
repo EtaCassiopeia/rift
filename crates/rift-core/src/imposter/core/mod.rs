@@ -27,8 +27,8 @@ use crate::recording::{ProxyMode, RecordedResponse, RecordingStore, RequestSigna
 use anyhow::Context;
 use parking_lot::RwLock;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 use tracing::{debug, error, info, warn};
@@ -228,7 +228,9 @@ impl Imposter {
 
         #[cfg(not(feature = "redis-backend"))]
         {
-            error!("Redis backend not available (compile with --features redis-backend), falling back to NoOp");
+            error!(
+                "Redis backend not available (compile with --features redis-backend), falling back to NoOp"
+            );
             Arc::new(NoOpFlowStore)
         }
     }

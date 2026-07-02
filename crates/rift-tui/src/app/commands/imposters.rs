@@ -8,15 +8,18 @@ impl App {
         if let Some(imp) = self.selected_imposter() {
             let port = imp.port;
             self.is_loading = true;
-            if let Ok(detail) = self.client.get_imposter(port).await {
-                self.current_imposter = Some(detail);
-                self.stub_list_state.select(Some(0));
-                self.navigate(View::ImposterDetail { port });
-            } else {
-                self.set_status(
-                    format!("Failed to load imposter :{}", port),
-                    StatusLevel::Error,
-                );
+            match self.client.get_imposter(port).await {
+                Ok(detail) => {
+                    self.current_imposter = Some(detail);
+                    self.stub_list_state.select(Some(0));
+                    self.navigate(View::ImposterDetail { port });
+                }
+                _ => {
+                    self.set_status(
+                        format!("Failed to load imposter :{port}"),
+                        StatusLevel::Error,
+                    );
+                }
             }
             self.is_loading = false;
         }
@@ -51,15 +54,12 @@ impl App {
                     } else {
                         "enabled"
                     };
-                    self.set_status(
-                        format!("Imposter :{} {}", port, action),
-                        StatusLevel::Success,
-                    );
+                    self.set_status(format!("Imposter :{port} {action}"), StatusLevel::Success);
                     self.refresh().await;
                 }
                 Err(e) => {
                     self.set_status(
-                        format!("Failed to toggle imposter: {}", e),
+                        format!("Failed to toggle imposter: {e}"),
                         StatusLevel::Error,
                     );
                 }
@@ -76,7 +76,7 @@ impl App {
                     imp.port,
                     imp.name
                         .as_ref()
-                        .map(|n| format!(" ({})", n))
+                        .map(|n| format!(" ({n})"))
                         .unwrap_or_default()
                 ),
                 action: PendingAction::DeleteImposter { port: imp.port },
@@ -89,14 +89,14 @@ impl App {
         self.is_loading = true;
         match self.client.delete_imposter(port).await {
             Ok(_) => {
-                self.set_status(format!("Deleted imposter :{}", port), StatusLevel::Success);
+                self.set_status(format!("Deleted imposter :{port}"), StatusLevel::Success);
                 self.refresh().await;
                 if matches!(self.view, View::ImposterDetail { port: p } if p == port) {
                     self.view = View::ImposterList;
                 }
             }
             Err(e) => {
-                self.set_status(format!("Failed to delete: {}", e), StatusLevel::Error);
+                self.set_status(format!("Failed to delete: {e}"), StatusLevel::Error);
             }
         }
         self.is_loading = false;
@@ -150,12 +150,12 @@ impl App {
         self.is_loading = true;
         match self.client.create_imposter(request).await {
             Ok(port) => {
-                self.set_status(format!("Created imposter :{}", port), StatusLevel::Success);
+                self.set_status(format!("Created imposter :{port}"), StatusLevel::Success);
                 self.overlay = Overlay::None;
                 self.refresh().await;
             }
             Err(e) => {
-                self.set_status(format!("Failed to create: {}", e), StatusLevel::Error);
+                self.set_status(format!("Failed to create: {e}"), StatusLevel::Error);
             }
         }
         self.is_loading = false;

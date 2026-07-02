@@ -19,10 +19,10 @@ impl Imposter {
     #[must_use]
     pub fn add_stub_unique(&self, stub: Stub, index: Option<usize>) -> bool {
         let mut stubs = self.stubs.write();
-        if let Some(id) = stub.id.as_deref() {
-            if stubs.iter().any(|s| s.stub.id.as_deref() == Some(id)) {
-                return false;
-            }
+        if let Some(id) = stub.id.as_deref()
+            && stubs.iter().any(|s| s.stub.id.as_deref() == Some(id))
+        {
+            return false;
         }
         let idx = index.unwrap_or(stubs.len()).min(stubs.len());
         stubs.insert(idx, StubState::new(stub));

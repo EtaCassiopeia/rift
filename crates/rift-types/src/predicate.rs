@@ -146,10 +146,12 @@ mod tests {
         // empty `except` is omitted from the wire form (skip_serializing_if)
         let empty: Predicate =
             serde_json::from_value(json!({ "matches": { "path": "/x" } })).unwrap();
-        assert!(serde_json::to_value(&empty)
-            .unwrap()
-            .get("except")
-            .is_none());
+        assert!(
+            serde_json::to_value(&empty)
+                .unwrap()
+                .get("except")
+                .is_none()
+        );
     }
 
     #[test]

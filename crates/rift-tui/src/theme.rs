@@ -192,8 +192,7 @@ mod tests {
         for preset in ThemePreset::ALL {
             assert!(
                 !preset.name().is_empty(),
-                "preset {:?} has empty name",
-                preset
+                "preset {preset:?} has empty name"
             );
         }
     }

@@ -134,7 +134,7 @@ impl ImposterManager {
             _ => {
                 return Err(ImposterError::Tls(
                     "https imposter must provide both `cert` and `key`, or neither".to_string(),
-                ))
+                ));
             }
         }
         // Same both-or-neither rule for the server default: a half-configured default (e.g. only
@@ -148,7 +148,7 @@ impl ImposterManager {
             _ => {
                 return Err(ImposterError::Tls(
                     "server default TLS must provide both cert and key, or neither".to_string(),
-                ))
+                ));
             }
         }
         if self.tls_defaults.allow_self_signed {
@@ -414,10 +414,10 @@ impl ImposterManager {
                 "http" | "https" => {}
                 other => return Err(ImposterError::InvalidProtocol(other.to_string())),
             }
-            if let Some(port) = config.port {
-                if !seen.insert(port) {
-                    return Err(ImposterError::PortInUse(port));
-                }
+            if let Some(port) = config.port
+                && !seen.insert(port)
+            {
+                return Err(ImposterError::PortInUse(port));
             }
         }
 
@@ -535,9 +535,8 @@ impl ImposterManager {
         let Some(ref datadir) = self.datadir else {
             return Ok(());
         };
-        let port = match imposter.config.port {
-            Some(p) => p,
-            None => return Ok(()),
+        let Some(port) = imposter.config.port else {
+            return Ok(());
         };
         let mut snapshot = imposter.config.clone();
         snapshot.stubs = imposter.get_stubs();
@@ -558,9 +557,8 @@ impl ImposterManager {
         let Some(ref datadir) = self.datadir else {
             return;
         };
-        let port = match imposter.config.port {
-            Some(p) => p,
-            None => return,
+        let Some(port) = imposter.config.port else {
+            return;
         };
         let mut snapshot = imposter.config.clone();
         snapshot.stubs = imposter.get_stubs();
@@ -587,13 +585,13 @@ impl ImposterManager {
         };
         let path = datadir.join(format!("{port}.json"));
         tokio::spawn(async move {
-            if path.exists() {
-                if let Err(e) = tokio::fs::remove_file(&path).await {
-                    error!(
-                        "Failed to remove persisted imposter {} at {:?}: {}",
-                        port, path, e
-                    );
-                }
+            if path.exists()
+                && let Err(e) = tokio::fs::remove_file(&path).await
+            {
+                error!(
+                    "Failed to remove persisted imposter {} at {:?}: {}",
+                    port, path, e
+                );
             }
         });
     }

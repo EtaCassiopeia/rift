@@ -1,7 +1,7 @@
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use hyper::{HeaderMap, Method, Uri};
 use rift_http_proxy::config::{FaultConfig, LatencyFault, MatchConfig, PathMatch, Rule};
-use rift_http_proxy::matcher::{find_matching_rule, CompiledRule};
+use rift_http_proxy::matcher::{CompiledRule, find_matching_rule};
 use rift_http_proxy::predicate::{PathMatcher, PredicateOptions, RequestPredicate, StringMatcher};
 use rift_http_proxy::rule_index::RuleIndex;
 

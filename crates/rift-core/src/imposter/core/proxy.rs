@@ -17,10 +17,9 @@ impl Imposter {
     ) -> Vec<serde_json::Value> {
         let mut predicates = Vec::new();
 
-        for gen in generators {
-            let gen_obj = match gen.as_object() {
-                Some(obj) => obj,
-                None => continue,
+        for r#gen in generators {
+            let Some(gen_obj) = r#gen.as_object() else {
+                continue;
             };
 
             // Handle inject predicateGenerator — calls a JS function with the request and
@@ -28,7 +27,7 @@ impl Imposter {
             if let Some(inject_fn) = gen_obj.get("inject").and_then(|v| v.as_str()) {
                 #[cfg(feature = "javascript")]
                 {
-                    use crate::scripting::{execute_predicate_generator_inject, MountebankRequest};
+                    use crate::scripting::{MountebankRequest, execute_predicate_generator_inject};
                     let query_map = query
                         .map(crate::imposter::parse_query_string)
                         .unwrap_or_default();
@@ -45,16 +44,17 @@ impl Imposter {
                 }
                 #[cfg(not(feature = "javascript"))]
                 {
-                    tracing::warn!("predicateGenerator inject requires the 'javascript' feature; generator ignored");
+                    tracing::warn!(
+                        "predicateGenerator inject requires the 'javascript' feature; generator ignored"
+                    );
                     let _ = inject_fn;
                 }
                 continue;
             }
 
             // Get the matches config
-            let matches = match gen_obj.get("matches").and_then(|m| m.as_object()) {
-                Some(m) => m,
-                None => continue,
+            let Some(matches) = gen_obj.get("matches").and_then(|m| m.as_object()) else {
+                continue;
             };
 
             // Get options
@@ -79,10 +79,10 @@ impl Imposter {
             {
                 let mut path_val = path.to_string();
                 // Apply except pattern if present
-                if let Some(pattern) = except_pattern {
-                    if let Ok(re) = regex::Regex::new(pattern) {
-                        path_val = re.replace_all(&path_val, "").to_string();
-                    }
+                if let Some(pattern) = except_pattern
+                    && let Ok(re) = regex::Regex::new(pattern)
+                {
+                    path_val = re.replace_all(&path_val, "").to_string();
                 }
                 pred_values.insert("path".to_string(), serde_json::Value::String(path_val));
             }
@@ -94,10 +94,10 @@ impl Imposter {
                 .unwrap_or(false)
             {
                 let mut method_val = method.to_string();
-                if let Some(pattern) = except_pattern {
-                    if let Ok(re) = regex::Regex::new(pattern) {
-                        method_val = re.replace_all(&method_val, "").to_string();
-                    }
+                if let Some(pattern) = except_pattern
+                    && let Ok(re) = regex::Regex::new(pattern)
+                {
+                    method_val = re.replace_all(&method_val, "").to_string();
                 }
                 pred_values.insert("method".to_string(), serde_json::Value::String(method_val));
             }
@@ -107,17 +107,15 @@ impl Imposter {
                 .get("query")
                 .and_then(|q| q.as_bool())
                 .unwrap_or(false)
+                && let Some(query_str) = query
             {
-                if let Some(query_str) = query {
-                    let query_map = crate::imposter::parse_query_string(query_str);
-                    if !query_map.is_empty() {
-                        let query_json: serde_json::Map<String, serde_json::Value> = query_map
-                            .into_iter()
-                            .map(|(k, v)| (k, serde_json::Value::String(v)))
-                            .collect();
-                        pred_values
-                            .insert("query".to_string(), serde_json::Value::Object(query_json));
-                    }
+                let query_map = crate::imposter::parse_query_string(query_str);
+                if !query_map.is_empty() {
+                    let query_json: serde_json::Map<String, serde_json::Value> = query_map
+                        .into_iter()
+                        .map(|(k, v)| (k, serde_json::Value::String(v)))
+                        .collect();
+                    pred_values.insert("query".to_string(), serde_json::Value::Object(query_json));
                 }
             }
 
@@ -125,13 +123,13 @@ impl Imposter {
             if let Some(header_matches) = matches.get("headers").and_then(|h| h.as_object()) {
                 let mut header_preds = serde_json::Map::new();
                 for (header_name, should_match) in header_matches {
-                    if should_match.as_bool().unwrap_or(false) {
-                        if let Some(header_value) = headers.get(header_name) {
-                            header_preds.insert(
-                                header_name.clone(),
-                                serde_json::Value::String(header_value.clone()),
-                            );
-                        }
+                    if should_match.as_bool().unwrap_or(false)
+                        && let Some(header_value) = headers.get(header_name)
+                    {
+                        header_preds.insert(
+                            header_name.clone(),
+                            serde_json::Value::String(header_value.clone()),
+                        );
                     }
                 }
                 if !header_preds.is_empty() {
@@ -147,17 +145,16 @@ impl Imposter {
                 .get("body")
                 .and_then(|b| b.as_bool())
                 .unwrap_or(false)
+                && let Some(body_str) = body
             {
-                if let Some(body_str) = body {
-                    let mut body_val = body_str.to_string();
-                    // Apply except pattern if present
-                    if let Some(pattern) = except_pattern {
-                        if let Ok(re) = regex::Regex::new(pattern) {
-                            body_val = re.replace_all(&body_val, "").to_string();
-                        }
-                    }
-                    pred_values.insert("body".to_string(), serde_json::Value::String(body_val));
+                let mut body_val = body_str.to_string();
+                // Apply except pattern if present
+                if let Some(pattern) = except_pattern
+                    && let Ok(re) = regex::Regex::new(pattern)
+                {
+                    body_val = re.replace_all(&body_val, "").to_string();
                 }
+                pred_values.insert("body".to_string(), serde_json::Value::String(body_val));
             }
 
             if pred_values.is_empty() {
@@ -274,8 +271,12 @@ impl Imposter {
     ) -> anyhow::Result<(u16, Vec<(String, String)>, Vec<u8>, Option<u64>)> {
         let client = get_http_client();
 
-        info!("Proxy config - addDecorateBehavior: {:?}, addWaitBehavior: {}, predicateGenerators: {:?}",
-            proxy_config.add_decorate_behavior, proxy_config.add_wait_behavior, proxy_config.predicate_generators);
+        info!(
+            "Proxy config - addDecorateBehavior: {:?}, addWaitBehavior: {}, predicateGenerators: {:?}",
+            proxy_config.add_decorate_behavior,
+            proxy_config.add_wait_behavior,
+            proxy_config.predicate_generators
+        );
 
         // Build the proxy URL, applying path rewrite if configured
         let original_path = uri.path();
@@ -305,16 +306,16 @@ impl Imposter {
         let signature = RequestSignature::new(method, uri.path(), uri.query(), &[]);
 
         // Check if we should replay cached response (based on proxy mode)
-        if !self.recording_store.should_proxy(&signature) {
-            if let Some(recorded) = self.recording_store.get_recorded(&signature) {
-                debug!("Returning recorded proxy response (proxyOnce mode)");
-                return Ok((
-                    recorded.status,
-                    recorded.headers.clone(),
-                    recorded.body.clone(),
-                    recorded.latency_ms,
-                ));
-            }
+        if !self.recording_store.should_proxy(&signature)
+            && let Some(recorded) = self.recording_store.get_recorded(&signature)
+        {
+            debug!("Returning recorded proxy response (proxyOnce mode)");
+            return Ok((
+                recorded.status,
+                recorded.headers.clone(),
+                recorded.body.clone(),
+                recorded.latency_ms,
+            ));
         }
 
         // Forward the request
@@ -352,7 +353,7 @@ impl Imposter {
         let response = request
             .send()
             .await
-            .with_context(|| format!("Failed to send proxy request to {}", target_url))?;
+            .with_context(|| format!("Failed to send proxy request to {target_url}"))?;
         let latency_ms = start.elapsed().as_millis() as u64;
 
         let status = response.status().as_u16();
@@ -362,21 +363,18 @@ impl Imposter {
             .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
             .collect();
         // Check Content-Length before reading the full body to reject obviously oversized responses
-        if let Some(content_length) = response.content_length() {
-            if content_length as usize > MAX_PROXY_RESPONSE_BODY_SIZE {
-                anyhow::bail!(
-                    "Proxy response body from {} exceeds maximum size ({} > {} bytes)",
-                    target_url,
-                    content_length,
-                    MAX_PROXY_RESPONSE_BODY_SIZE
-                );
-            }
+        if let Some(content_length) = response.content_length()
+            && content_length as usize > MAX_PROXY_RESPONSE_BODY_SIZE
+        {
+            anyhow::bail!(
+                "Proxy response body from {target_url} exceeds maximum size ({content_length} > {MAX_PROXY_RESPONSE_BODY_SIZE} bytes)"
+            );
         }
 
         let body_bytes = response
             .bytes()
             .await
-            .with_context(|| format!("Failed to read response body from {}", target_url))?;
+            .with_context(|| format!("Failed to read response body from {target_url}"))?;
 
         if body_bytes.len() > MAX_PROXY_RESPONSE_BODY_SIZE {
             anyhow::bail!(

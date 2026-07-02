@@ -38,7 +38,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{error, info, warn};
-use tracing_subscriber::{fmt, prelude::*, EnvFilter, Layer};
+use tracing_subscriber::{EnvFilter, Layer, fmt, prelude::*};
 
 use admin_api::DEFAULT_ADMIN_PORT;
 
@@ -195,7 +195,7 @@ fn main() -> Result<(), anyhow::Error> {
     if let Some(ref rcfile) = cli.rcfile.clone() {
         match apply_rcfile_defaults(&mut cli, rcfile) {
             Ok(()) => {}
-            Err(e) => eprintln!("Warning: failed to load --rcfile {:?}: {}", rcfile, e),
+            Err(e) => eprintln!("Warning: failed to load --rcfile {rcfile:?}: {e}"),
         }
     }
 
@@ -475,24 +475,24 @@ fn apply_rcfile_defaults(cli: &mut Cli, rcfile: &std::path::Path) -> Result<(), 
     for (key, val) in map {
         match key.as_str() {
             "port" => {
-                if cli.port == DEFAULT_ADMIN_PORT {
-                    if let Some(p) = val.as_u64() {
-                        cli.port = p as u16;
-                    }
+                if cli.port == DEFAULT_ADMIN_PORT
+                    && let Some(p) = val.as_u64()
+                {
+                    cli.port = p as u16;
                 }
             }
             "host" => {
-                if cli.host == "0.0.0.0" {
-                    if let Some(h) = val.as_str() {
-                        cli.host = h.to_string();
-                    }
+                if cli.host == "0.0.0.0"
+                    && let Some(h) = val.as_str()
+                {
+                    cli.host = h.to_string();
                 }
             }
             "logLevel" | "loglevel" => {
-                if cli.loglevel == "info" {
-                    if let Some(l) = val.as_str() {
-                        cli.loglevel = l.to_string();
-                    }
+                if cli.loglevel == "info"
+                    && let Some(l) = val.as_str()
+                {
+                    cli.loglevel = l.to_string();
                 }
             }
             "allowInjection" | "allow_injection" => {
@@ -506,17 +506,17 @@ fn apply_rcfile_defaults(cli: &mut Cli, rcfile: &std::path::Path) -> Result<(), 
                 }
             }
             "datadir" => {
-                if cli.datadir.is_none() {
-                    if let Some(d) = val.as_str() {
-                        cli.datadir = Some(std::path::PathBuf::from(d));
-                    }
+                if cli.datadir.is_none()
+                    && let Some(d) = val.as_str()
+                {
+                    cli.datadir = Some(std::path::PathBuf::from(d));
                 }
             }
             "configfile" => {
-                if cli.configfile.is_none() {
-                    if let Some(f) = val.as_str() {
-                        cli.configfile = Some(std::path::PathBuf::from(f));
-                    }
+                if cli.configfile.is_none()
+                    && let Some(f) = val.as_str()
+                {
+                    cli.configfile = Some(std::path::PathBuf::from(f));
                 }
             }
             other => {
@@ -557,7 +557,7 @@ fn save_imposters(
 async fn run_metrics_server(port: u16) -> anyhow::Result<()> {
     use hyper::server::conn::http1;
     use hyper::service::service_fn;
-    use hyper::{body::Incoming, Request, Response};
+    use hyper::{Request, Response, body::Incoming};
     use hyper_util::rt::TokioIo;
     use std::convert::Infallible;
     use tokio::net::TcpListener;

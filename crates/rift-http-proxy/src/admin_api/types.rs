@@ -157,12 +157,12 @@ pub fn get_base_url(req: &Request<Incoming>) -> String {
 /// Rejects Host header values containing `/` or `://` to prevent link-injection via a
 /// malformed Host header (e.g. `attacker.com/evil`).
 fn base_url_from_headers(headers: &hyper::HeaderMap) -> String {
-    if let Some(host) = headers.get("host") {
-        if let Ok(host_str) = host.to_str() {
-            if !host_str.contains('/') && !host_str.contains("://") {
-                return format!("http://{}", host_str);
-            }
-        }
+    if let Some(host) = headers.get("host")
+        && let Ok(host_str) = host.to_str()
+        && !host_str.contains('/')
+        && !host_str.contains("://")
+    {
+        return format!("http://{host_str}");
     }
     format!("http://localhost:{}", super::DEFAULT_ADMIN_PORT)
 }
@@ -171,10 +171,10 @@ fn base_url_from_headers(headers: &hyper::HeaderMap) -> String {
 pub fn make_imposter_links(base_url: &str, port: u16) -> ImposterLinks {
     ImposterLinks {
         self_link: Link {
-            href: format!("{}/imposters/{}", base_url, port),
+            href: format!("{base_url}/imposters/{port}"),
         },
         stubs: Link {
-            href: format!("{}/imposters/{}/stubs", base_url, port),
+            href: format!("{base_url}/imposters/{port}/stubs"),
         },
     }
 }
@@ -183,7 +183,7 @@ pub fn make_imposter_links(base_url: &str, port: u16) -> ImposterLinks {
 pub fn make_stub_links(base_url: &str, port: u16, index: usize) -> StubLinks {
     StubLinks {
         self_link: Link {
-            href: format!("{}/imposters/{}/stubs/{}", base_url, port, index),
+            href: format!("{base_url}/imposters/{port}/stubs/{index}"),
         },
     }
 }

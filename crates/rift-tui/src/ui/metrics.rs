@@ -2,11 +2,11 @@
 
 use crate::app::App;
 use ratatui::{
+    Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Bar, BarChart, BarGroup, Block, Borders, Paragraph, Sparkline},
-    Frame,
 };
 
 /// Draw the metrics view
@@ -51,7 +51,7 @@ fn draw_summary(frame: &mut Frame, app: &App, area: Rect) {
             Span::styled("    │    ", Style::default().fg(app.theme.border)),
             Span::styled("Rate: ", Style::default().fg(app.theme.muted)),
             Span::styled(
-                format!("{:.1} req/s", total_rate),
+                format!("{total_rate:.1} req/s"),
                 Style::default().fg(app.theme.success),
             ),
         ]),
@@ -182,7 +182,7 @@ fn draw_sparklines(frame: &mut Frame, app: &App, area: Rect) {
                     .add_modifier(Modifier::BOLD),
             )),
             Line::from(Span::styled(
-                format!("{:.1}/s", rate),
+                format!("{rate:.1}/s"),
                 Style::default().fg(if rate > 0.0 {
                     app.theme.success
                 } else {

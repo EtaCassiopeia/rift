@@ -33,7 +33,7 @@ impl App {
 
         // Add method if not GET
         if method != "GET" {
-            parts.push(format!("-X {}", method));
+            parts.push(format!("-X {method}"));
         }
 
         // Add Content-Type header if we have a body and it looks like JSON
@@ -41,18 +41,17 @@ impl App {
             let has_content_type = headers
                 .iter()
                 .any(|(k, _)| k.to_lowercase() == "content-type");
-            if !has_content_type {
-                if let Some(ref b) = body {
-                    if b.trim_start().starts_with('{') || b.trim_start().starts_with('[') {
-                        parts.push("-H 'Content-Type: application/json'".to_string());
-                    }
-                }
+            if !has_content_type
+                && let Some(ref b) = body
+                && (b.trim_start().starts_with('{') || b.trim_start().starts_with('['))
+            {
+                parts.push("-H 'Content-Type: application/json'".to_string());
             }
         }
 
         // Add headers
         for (key, value) in &headers {
-            parts.push(format!("-H '{}: {}'", key, value));
+            parts.push(format!("-H '{key}: {value}'"));
         }
 
         // Add body if present
@@ -61,16 +60,16 @@ impl App {
         }
 
         // Build URL with query params
-        let mut url = format!("http://localhost:{}{}", port, path);
+        let mut url = format!("http://localhost:{port}{path}");
         if !query_params.is_empty() {
             let query_string: Vec<String> = query_params
                 .iter()
-                .map(|(k, v)| format!("{}={}", k, v))
+                .map(|(k, v)| format!("{k}={v}"))
                 .collect();
             url = format!("{}?{}", url, query_string.join("&"));
         }
 
-        parts.push(format!("'{}'", url));
+        parts.push(format!("'{url}'"));
 
         parts.join(" \\\n  ")
     }
@@ -122,7 +121,7 @@ impl App {
                                 if p.starts_with('/') {
                                     p.to_string()
                                 } else {
-                                    format!("/{}", p)
+                                    format!("/{p}")
                                 }
                             }
                             _ => {
@@ -130,7 +129,7 @@ impl App {
                                 if p.starts_with('/') {
                                     p.to_string()
                                 } else {
-                                    format!("/{}", p)
+                                    format!("/{p}")
                                 }
                             }
                         };
@@ -190,7 +189,7 @@ impl App {
         // Replace [^/]+ patterns with numbered placeholders
         let mut counter = 1;
         while path.contains("[^/]+") {
-            path = path.replacen("[^/]+", &format!("{{{}}}", counter), 1);
+            path = path.replacen("[^/]+", &format!("{{{counter}}}"), 1);
             counter += 1;
         }
 
@@ -206,7 +205,7 @@ impl App {
         path = path.replace(")", "");
 
         if !path.starts_with('/') {
-            path = format!("/{}", path);
+            path = format!("/{path}");
         }
 
         path
@@ -296,10 +295,10 @@ impl App {
                 }
                 (Some(serde_json::Value::Array(t)), serde_json::Value::Array(s)) => {
                     // Merge array contents - for arrays of objects, merge first elements
-                    if let Some(serde_json::Value::Object(t_obj)) = t.first_mut() {
-                        if let Some(serde_json::Value::Object(s_obj)) = s.into_iter().next() {
-                            self.deep_merge(t_obj, s_obj);
-                        }
+                    if let Some(serde_json::Value::Object(t_obj)) = t.first_mut()
+                        && let Some(serde_json::Value::Object(s_obj)) = s.into_iter().next()
+                    {
+                        self.deep_merge(t_obj, s_obj);
                     }
                 }
                 (_, v) => {
@@ -323,17 +322,16 @@ impl App {
             _ => None,
         };
 
-        if let Some(idx) = stub_index {
-            if let Some(imp) = &self.current_imposter {
-                if let Some(stub) = imp.stubs.get(idx) {
-                    let curl_cmd = self.generate_curl_command(stub, port);
-                    self.copy_to_clipboard(&curl_cmd);
-                    self.set_status(
-                        "Curl command copied to clipboard".to_string(),
-                        StatusLevel::Success,
-                    );
-                }
-            }
+        if let Some(idx) = stub_index
+            && let Some(imp) = &self.current_imposter
+            && let Some(stub) = imp.stubs.get(idx)
+        {
+            let curl_cmd = self.generate_curl_command(stub, port);
+            self.copy_to_clipboard(&curl_cmd);
+            self.set_status(
+                "Curl command copied to clipboard".to_string(),
+                StatusLevel::Success,
+            );
         }
     }
 }

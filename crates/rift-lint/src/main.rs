@@ -7,7 +7,7 @@
 //!   rift-lint <directory_or_file> [OPTIONS]
 
 use clap::Parser;
-use rift_lint::{lint_file, LintIssue, LintOptions, LintResult, Severity};
+use rift_lint::{LintIssue, LintOptions, LintResult, Severity, lint_file};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -136,13 +136,13 @@ fn collect_imposter_files(path: &Path) -> Vec<PathBuf> {
         if path.extension().is_some_and(|ext| ext == "json") {
             files.push(path.to_path_buf());
         }
-    } else if path.is_dir() {
-        if let Ok(entries) = std::fs::read_dir(path) {
-            for entry in entries.flatten() {
-                let entry_path = entry.path();
-                if entry_path.is_file() && entry_path.extension().is_some_and(|ext| ext == "json") {
-                    files.push(entry_path);
-                }
+    } else if path.is_dir()
+        && let Ok(entries) = std::fs::read_dir(path)
+    {
+        for entry in entries.flatten() {
+            let entry_path = entry.path();
+            if entry_path.is_file() && entry_path.extension().is_some_and(|ext| ext == "json") {
+                files.push(entry_path);
             }
         }
     }
@@ -368,40 +368,39 @@ fn apply_fixes(imposters: &[(PathBuf, Value)]) {
             for stub in stubs {
                 if let Some(responses) = stub.get_mut("responses").and_then(|v| v.as_array_mut()) {
                     for response in responses {
-                        if let Some(is_response) = response.get_mut("is") {
-                            if let Some(headers) = is_response
+                        if let Some(is_response) = response.get_mut("is")
+                            && let Some(headers) = is_response
                                 .get_mut("headers")
                                 .and_then(|v| v.as_object_mut())
-                            {
-                                for (name, value) in headers.iter_mut() {
-                                    if value.is_array() {
-                                        // Convert array to comma-separated string
-                                        if let Some(arr) = value.as_array() {
-                                            let joined: Vec<String> = arr
-                                                .iter()
-                                                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                                                .collect();
-                                            *value = Value::String(joined.join(", "));
-                                            file_fixed = true;
-                                            fixes_applied += 1;
-                                            println!("  Fixed header '{name}' array -> string");
-                                        }
-                                    } else if value.is_number() {
-                                        *value = Value::String(value.to_string());
+                        {
+                            for (name, value) in headers.iter_mut() {
+                                if value.is_array() {
+                                    // Convert array to comma-separated string
+                                    if let Some(arr) = value.as_array() {
+                                        let joined: Vec<String> = arr
+                                            .iter()
+                                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                            .collect();
+                                        *value = Value::String(joined.join(", "));
                                         file_fixed = true;
                                         fixes_applied += 1;
-                                        println!("  Fixed header '{name}' number -> string");
-                                    } else if value.is_boolean() {
-                                        let bool_str = if value.as_bool().unwrap_or(false) {
-                                            "true"
-                                        } else {
-                                            "false"
-                                        };
-                                        *value = Value::String(bool_str.to_string());
-                                        file_fixed = true;
-                                        fixes_applied += 1;
-                                        println!("  Fixed header '{name}' boolean -> string");
+                                        println!("  Fixed header '{name}' array -> string");
                                     }
+                                } else if value.is_number() {
+                                    *value = Value::String(value.to_string());
+                                    file_fixed = true;
+                                    fixes_applied += 1;
+                                    println!("  Fixed header '{name}' number -> string");
+                                } else if value.is_boolean() {
+                                    let bool_str = if value.as_bool().unwrap_or(false) {
+                                        "true"
+                                    } else {
+                                        "false"
+                                    };
+                                    *value = Value::String(bool_str.to_string());
+                                    file_fixed = true;
+                                    fixes_applied += 1;
+                                    println!("  Fixed header '{name}' boolean -> string");
                                 }
                             }
                         }

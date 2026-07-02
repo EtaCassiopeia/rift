@@ -2,11 +2,11 @@
 
 use crate::app::App;
 use ratatui::{
+    Frame,
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem},
-    Frame,
 };
 
 /// Draw the imposter list view
@@ -50,7 +50,7 @@ pub fn draw_list(frame: &mut Frame, app: &App, area: Rect) {
                         app.theme.highlight_bg
                     }),
                 ),
-                Span::styled(format!("{} ", status), Style::default().fg(status_color)),
+                Span::styled(format!("{status} "), Style::default().fg(status_color)),
                 Span::styled(
                     format!(":{:<5}", imp.port),
                     Style::default().fg(fg_color).add_modifier(if dim {

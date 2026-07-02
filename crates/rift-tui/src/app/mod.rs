@@ -4,7 +4,7 @@ use crate::api::{
     ApiClient, CreateImposterRequest, ImposterDetail, ImposterSummary, MetricsData, Stub,
 };
 use crate::theme::Theme;
-use crate::validation::{validate_imposter_json, validate_stub_json, ValidationReport};
+use crate::validation::{ValidationReport, validate_imposter_json, validate_stub_json};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::ListState;
 use std::collections::{HashMap, VecDeque};
@@ -202,7 +202,7 @@ impl StubEditor {
                 true
             }
             Err(e) => {
-                self.validation_error = Some(format!("JSON error: {}", e));
+                self.validation_error = Some(format!("JSON error: {e}"));
                 self.validation_report = None;
                 false
             }
@@ -218,21 +218,21 @@ impl StubEditor {
     /// Format the JSON content
     pub fn format(&mut self) {
         let content = self.editor.lines().join("\n");
-        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
-            if let Ok(pretty) = serde_json::to_string_pretty(&val) {
-                let lines: Vec<String> = pretty.lines().map(String::from).collect();
-                self.editor = ratatui_textarea::TextArea::new(lines);
-                self.editor.set_line_number_style(
-                    ratatui::style::Style::default().fg(ratatui::style::Color::DarkGray),
-                );
-                self.editor
-                    .set_cursor_line_style(ratatui::style::Style::default());
-                self.editor.set_block(
-                    ratatui::widgets::Block::default()
-                        .borders(ratatui::widgets::Borders::ALL)
-                        .title(" Edit Stub (Ctrl+S save, Ctrl+F format, Ctrl+L lint, Esc cancel) "),
-                );
-            }
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content)
+            && let Ok(pretty) = serde_json::to_string_pretty(&val)
+        {
+            let lines: Vec<String> = pretty.lines().map(String::from).collect();
+            self.editor = ratatui_textarea::TextArea::new(lines);
+            self.editor.set_line_number_style(
+                ratatui::style::Style::default().fg(ratatui::style::Color::DarkGray),
+            );
+            self.editor
+                .set_cursor_line_style(ratatui::style::Style::default());
+            self.editor.set_block(
+                ratatui::widgets::Block::default()
+                    .borders(ratatui::widgets::Borders::ALL)
+                    .title(" Edit Stub (Ctrl+S save, Ctrl+F format, Ctrl+L lint, Esc cancel) "),
+            );
         }
     }
 
@@ -291,7 +291,7 @@ pub(super) fn crossterm_key_to_input(key: KeyEvent) -> ratatui_textarea::Input {
                 ctrl,
                 alt,
                 shift: true,
-            }
+            };
         }
         KeyCode::Delete => Key::Delete,
         KeyCode::Home => Key::Home,
@@ -469,19 +469,16 @@ impl App {
                 if !self.imposters.is_empty() {
                     if self.imposter_list_state.selected().is_none() {
                         self.imposter_list_state.select(Some(0));
-                    } else if let Some(idx) = self.imposter_list_state.selected() {
-                        if idx >= self.imposters.len() {
-                            self.imposter_list_state
-                                .select(Some(self.imposters.len() - 1));
-                        }
+                    } else if let Some(idx) = self.imposter_list_state.selected()
+                        && idx >= self.imposters.len()
+                    {
+                        self.imposter_list_state
+                            .select(Some(self.imposters.len() - 1));
                     }
                 }
             }
             Err(e) => {
-                self.set_status(
-                    format!("Failed to load imposters: {}", e),
-                    StatusLevel::Error,
-                );
+                self.set_status(format!("Failed to load imposters: {e}"), StatusLevel::Error);
             }
         }
 
@@ -506,10 +503,10 @@ impl App {
         }
 
         // Refresh current imposter if viewing detail
-        if let View::ImposterDetail { port } | View::StubDetail { port, .. } = self.view {
-            if let Ok(detail) = self.client.get_imposter(port).await {
-                self.current_imposter = Some(detail);
-            }
+        if let View::ImposterDetail { port } | View::StubDetail { port, .. } = self.view
+            && let Ok(detail) = self.client.get_imposter(port).await
+        {
+            self.current_imposter = Some(detail);
         }
 
         self.is_loading = false;
@@ -523,10 +520,10 @@ impl App {
 
     /// Clear status if expired
     pub fn clear_expired_status(&mut self) {
-        if let Some((_, _, time)) = &self.status_message {
-            if time.elapsed() > Duration::from_secs(5) {
-                self.status_message = None;
-            }
+        if let Some((_, _, time)) = &self.status_message
+            && time.elapsed() > Duration::from_secs(5)
+        {
+            self.status_message = None;
         }
     }
 

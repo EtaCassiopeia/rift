@@ -14,15 +14,9 @@ impl App {
         match self.client.export_imposter(port, remove_proxies).await {
             Ok(json) => {
                 let title = if remove_proxies {
-                    format!(
-                        "Exported Stubs (Port :{}) - [s]ave [c]opy [A]pply [Esc]close",
-                        port
-                    )
+                    format!("Exported Stubs (Port :{port}) - [s]ave [c]opy [A]pply [Esc]close")
                 } else {
-                    format!(
-                        "Exported Config (Port :{}) - [s]ave [c]opy [Esc]close",
-                        port
-                    )
+                    format!("Exported Config (Port :{port}) - [s]ave [c]opy [Esc]close")
                 };
                 self.overlay = Overlay::Export {
                     title,
@@ -31,7 +25,7 @@ impl App {
                 };
             }
             Err(e) => {
-                self.set_status(format!("Failed to export: {}", e), StatusLevel::Error);
+                self.set_status(format!("Failed to export: {e}"), StatusLevel::Error);
             }
         }
         self.is_loading = false;
@@ -42,16 +36,13 @@ impl App {
         match arboard::Clipboard::new() {
             Ok(mut clipboard) => {
                 if let Err(e) = clipboard.set_text(content.to_string()) {
-                    self.set_status(format!("Failed to copy: {}", e), StatusLevel::Error);
+                    self.set_status(format!("Failed to copy: {e}"), StatusLevel::Error);
                 } else {
                     self.set_status("Copied to clipboard".to_string(), StatusLevel::Success);
                 }
             }
             Err(e) => {
-                self.set_status(
-                    format!("Clipboard not available: {}", e),
-                    StatusLevel::Error,
-                );
+                self.set_status(format!("Clipboard not available: {e}"), StatusLevel::Error);
             }
         }
     }
@@ -67,14 +58,14 @@ impl App {
     pub fn show_save_dialog(&mut self, content: String, port: u16) {
         // Generate default filename
         let default_path = dirs::home_dir()
-            .map(|h| h.join(format!("imposter-{}.json", port)))
-            .unwrap_or_else(|| std::path::PathBuf::from(format!("imposter-{}.json", port)));
+            .map(|h| h.join(format!("imposter-{port}.json")))
+            .unwrap_or_else(|| std::path::PathBuf::from(format!("imposter-{port}.json")));
 
         let path_str = default_path.to_string_lossy().to_string();
         self.input_state.cursor_pos = path_str.len();
         self.input_state.file_path = path_str;
         self.overlay = Overlay::FilePathInput {
-            prompt: format!("Save imposter :{} to file", port),
+            prompt: format!("Save imposter :{port} to file"),
             action: FileAction::SaveExport { content, port },
         };
     }
@@ -85,10 +76,10 @@ impl App {
             if let Some(home) = dirs::home_dir() {
                 return home.join(rest).to_string_lossy().to_string();
             }
-        } else if path == "~" {
-            if let Some(home) = dirs::home_dir() {
-                return home.to_string_lossy().to_string();
-            }
+        } else if path == "~"
+            && let Some(home) = dirs::home_dir()
+        {
+            return home.to_string_lossy().to_string();
         }
         path.to_string()
     }
@@ -98,11 +89,11 @@ impl App {
         let expanded_path = Self::expand_path(path);
         match std::fs::write(&expanded_path, content) {
             Ok(_) => {
-                self.set_status(format!("Saved to {}", expanded_path), StatusLevel::Success);
+                self.set_status(format!("Saved to {expanded_path}"), StatusLevel::Success);
                 self.overlay = Overlay::None;
             }
             Err(e) => {
-                self.set_status(format!("Failed to save: {}", e), StatusLevel::Error);
+                self.set_status(format!("Failed to save: {e}"), StatusLevel::Error);
             }
         }
     }
@@ -174,7 +165,7 @@ impl App {
                 self.do_import(&content).await;
             }
             Err(e) => {
-                self.set_status(format!("Failed to read file: {}", e), StatusLevel::Error);
+                self.set_status(format!("Failed to read file: {e}"), StatusLevel::Error);
             }
         }
 
@@ -196,15 +187,15 @@ impl App {
                     }
                     Ok(r) => {
                         let body = r.text().await.unwrap_or_default();
-                        self.set_status(format!("Failed to import: {}", body), StatusLevel::Error);
+                        self.set_status(format!("Failed to import: {body}"), StatusLevel::Error);
                     }
                     Err(e) => {
-                        self.set_status(format!("Failed to import: {}", e), StatusLevel::Error);
+                        self.set_status(format!("Failed to import: {e}"), StatusLevel::Error);
                     }
                 }
             }
             Err(e) => {
-                self.set_status(format!("Invalid JSON: {}", e), StatusLevel::Error);
+                self.set_status(format!("Invalid JSON: {e}"), StatusLevel::Error);
             }
         }
     }
@@ -217,7 +208,7 @@ impl App {
         let path = std::path::Path::new(&expanded_folder);
         if !path.is_dir() {
             self.set_status(
-                format!("{} is not a directory", expanded_folder),
+                format!("{expanded_folder} is not a directory"),
                 StatusLevel::Error,
             );
             self.is_loading = false;
@@ -230,20 +221,20 @@ impl App {
         if let Ok(entries) = std::fs::read_dir(path) {
             for entry in entries.flatten() {
                 let file_path = entry.path();
-                if file_path.extension().map(|e| e == "json").unwrap_or(false) {
-                    if let Ok(content) = std::fs::read_to_string(&file_path) {
-                        if let Ok(config) = serde_json::from_str::<serde_json::Value>(&content) {
-                            let url = format!("{}/imposters", self.client.base_url());
-                            let resp = self.client.client().post(url).json(&config).send().await;
+                if file_path.extension().map(|e| e == "json").unwrap_or(false)
+                    && let Ok(content) = std::fs::read_to_string(&file_path)
+                {
+                    if let Ok(config) = serde_json::from_str::<serde_json::Value>(&content) {
+                        let url = format!("{}/imposters", self.client.base_url());
+                        let resp = self.client.client().post(url).json(&config).send().await;
 
-                            if resp.map(|r| r.status().is_success()).unwrap_or(false) {
-                                imported += 1;
-                            } else {
-                                failed += 1;
-                            }
+                        if resp.map(|r| r.status().is_success()).unwrap_or(false) {
+                            imported += 1;
                         } else {
                             failed += 1;
                         }
+                    } else {
+                        failed += 1;
                     }
                 }
             }
@@ -251,12 +242,12 @@ impl App {
 
         if failed > 0 {
             self.set_status(
-                format!("Imported {} imposters, {} failed", imported, failed),
+                format!("Imported {imported} imposters, {failed} failed"),
                 StatusLevel::Warning,
             );
         } else {
             self.set_status(
-                format!("Imported {} imposters", imported),
+                format!("Imported {imported} imposters"),
                 StatusLevel::Success,
             );
         }
@@ -304,18 +295,15 @@ impl App {
         match self.client.export_all_imposters().await {
             Ok(json) => match std::fs::write(&expanded_path, &json) {
                 Ok(_) => {
-                    self.set_status(
-                        format!("Exported to {}", expanded_path),
-                        StatusLevel::Success,
-                    );
+                    self.set_status(format!("Exported to {expanded_path}"), StatusLevel::Success);
                     self.overlay = Overlay::None;
                 }
                 Err(e) => {
-                    self.set_status(format!("Failed to write: {}", e), StatusLevel::Error);
+                    self.set_status(format!("Failed to write: {e}"), StatusLevel::Error);
                 }
             },
             Err(e) => {
-                self.set_status(format!("Failed to export: {}", e), StatusLevel::Error);
+                self.set_status(format!("Failed to export: {e}"), StatusLevel::Error);
             }
         }
 
@@ -331,10 +319,7 @@ impl App {
 
         // Create folder if it doesn't exist
         if let Err(e) = std::fs::create_dir_all(path) {
-            self.set_status(
-                format!("Failed to create folder: {}", e),
-                StatusLevel::Error,
-            );
+            self.set_status(format!("Failed to create folder: {e}"), StatusLevel::Error);
             self.is_loading = false;
             return;
         }
@@ -365,12 +350,12 @@ impl App {
 
         if failed > 0 {
             self.set_status(
-                format!("Exported {} imposters, {} failed", exported, failed),
+                format!("Exported {exported} imposters, {failed} failed"),
                 StatusLevel::Warning,
             );
         } else {
             self.set_status(
-                format!("Exported {} imposters to {}", exported, folder),
+                format!("Exported {exported} imposters to {folder}"),
                 StatusLevel::Success,
             );
         }

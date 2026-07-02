@@ -67,7 +67,7 @@ pub fn validate_stubs(stubs: &[Stub]) -> StubValidationResult {
         let stub_id = stub
             .id
             .clone()
-            .unwrap_or_else(|| format!("stub[{}]", stub_idx));
+            .unwrap_or_else(|| format!("stub[{stub_idx}]"));
 
         for (resp_idx, response) in stub.responses.iter().enumerate() {
             if let Some(err) = validate_response(response, &stub_id, resp_idx) {
@@ -86,7 +86,7 @@ pub fn validate_stub(stub: &Stub, stub_index: usize) -> StubValidationResult {
     let stub_id = stub
         .id
         .clone()
-        .unwrap_or_else(|| format!("stub[{}]", stub_index));
+        .unwrap_or_else(|| format!("stub[{stub_index}]"));
 
     for (resp_idx, response) in stub.responses.iter().enumerate() {
         if let Some(err) = validate_response(response, &stub_id, resp_idx) {
@@ -119,7 +119,7 @@ fn validate_response(
         }
         // Is responses with optional _rift extension
         StubResponse::Is { rift, .. } => {
-            if let Some(ref rift_ext) = rift {
+            if let Some(rift_ext) = rift {
                 if let Some(ref script_config) = rift_ext.script {
                     validate_rift_script(
                         &script_config.engine,

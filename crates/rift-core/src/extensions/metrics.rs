@@ -5,8 +5,8 @@
 //! Tracks fault injection activity, script execution, and proxy performance.
 use lazy_static::lazy_static;
 use prometheus::{
-    register_counter_vec, register_gauge_vec, register_histogram_vec, CounterVec, Encoder,
-    GaugeVec, HistogramVec, TextEncoder,
+    CounterVec, Encoder, GaugeVec, HistogramVec, TextEncoder, register_counter_vec,
+    register_gauge_vec, register_histogram_vec,
 };
 
 lazy_static! {
@@ -146,12 +146,12 @@ pub fn record_script_execution(rule_id: &str, duration_ms: f64, result: &str) {
 pub fn record_script_fault(fault_type: &str, rule_id: &str, duration_ms: Option<u64>) {
     record_fault_injection(fault_type, rule_id, "script");
 
-    if fault_type == "latency" {
-        if let Some(ms) = duration_ms {
-            LATENCY_INJECTED_MS
-                .with_label_values(&[rule_id])
-                .observe(ms as f64);
-        }
+    if fault_type == "latency"
+        && let Some(ms) = duration_ms
+    {
+        LATENCY_INJECTED_MS
+            .with_label_values(&[rule_id])
+            .observe(ms as f64);
     }
 }
 

@@ -2,11 +2,11 @@
 
 use crate::app::App;
 use ratatui::{
+    Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph},
-    Frame,
 };
 
 /// Draw the server configuration view
@@ -77,7 +77,7 @@ fn render_json_as_lines<'a>(value: &serde_json::Value, app: &'a App) -> Vec<Line
                 Line::from(vec![
                     Span::raw("  "),
                     Span::styled(
-                        format!("{:<24}", k),
+                        format!("{k:<24}"),
                         Style::default()
                             .fg(app.theme.key_fg)
                             .add_modifier(Modifier::BOLD),

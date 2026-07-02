@@ -62,24 +62,24 @@ where
     };
 
     // Check method
-    if let Some(expected) = obj.get("method") {
-        if !check_string_field(expected, method) {
-            return false;
-        }
+    if let Some(expected) = obj.get("method")
+        && !check_string_field(expected, method)
+    {
+        return false;
     }
 
     // Check path
-    if let Some(expected) = obj.get("path") {
-        if !check_string_field(expected, path) {
-            return false;
-        }
+    if let Some(expected) = obj.get("path")
+        && !check_string_field(expected, path)
+    {
+        return false;
     }
 
     // Check body
-    if let Some(expected) = obj.get("body") {
-        if !check_string_field(expected, body) {
-            return false;
-        }
+    if let Some(expected) = obj.get("body")
+        && !check_string_field(expected, body)
+    {
+        return false;
     }
 
     // Check requestFrom (IP:port) - Mountebank compatible
@@ -99,84 +99,84 @@ where
     }
 
     // Check form fields (parsed from application/x-www-form-urlencoded) - Mountebank compatible
-    if let Some(expected_form) = obj.get("form") {
-        if let Some(expected_obj) = expected_form.as_object() {
-            let actual_form = form.cloned().unwrap_or_default();
+    if let Some(expected_form) = obj.get("form")
+        && let Some(expected_obj) = expected_form.as_object()
+    {
+        let actual_form = form.cloned().unwrap_or_default();
 
-            // For deepEquals, check exact match (same number of fields)
-            if deep_equals && expected_obj.len() != actual_form.len() {
-                return false;
-            }
+        // For deepEquals, check exact match (same number of fields)
+        if deep_equals && expected_obj.len() != actual_form.len() {
+            return false;
+        }
 
-            for (key, expected_val) in expected_obj {
-                // Find key using keyCaseSensitive option
-                let actual = actual_form
-                    .iter()
-                    .find(|(k, _)| key_matches(key, k))
-                    .map(|(_, v)| v.as_str());
+        for (key, expected_val) in expected_obj {
+            // Find key using keyCaseSensitive option
+            let actual = actual_form
+                .iter()
+                .find(|(k, _)| key_matches(key, k))
+                .map(|(_, v)| v.as_str());
 
-                match actual {
-                    Some(actual) => {
-                        if !check_string_field(expected_val, actual) {
-                            return false;
-                        }
+            match actual {
+                Some(actual) => {
+                    if !check_string_field(expected_val, actual) {
+                        return false;
                     }
-                    None => return false,
                 }
+                None => return false,
             }
         }
     }
 
     // Check query parameters
-    if let Some(expected_query) = obj.get("query") {
-        if let Some(expected_obj) = expected_query.as_object() {
-            // For deepEquals, check exact match (same number of params)
-            if deep_equals && expected_obj.len() != query.len() {
-                return false;
-            }
+    if let Some(expected_query) = obj.get("query")
+        && let Some(expected_obj) = expected_query.as_object()
+    {
+        // For deepEquals, check exact match (same number of params)
+        if deep_equals && expected_obj.len() != query.len() {
+            return false;
+        }
 
-            for (key, expected_val) in expected_obj {
-                // Find key using keyCaseSensitive option
-                let actual = query
-                    .iter()
-                    .find(|(k, _)| key_matches(key, k))
-                    .map(|(_, v)| v.as_str());
+        for (key, expected_val) in expected_obj {
+            // Find key using keyCaseSensitive option
+            let actual = query
+                .iter()
+                .find(|(k, _)| key_matches(key, k))
+                .map(|(_, v)| v.as_str());
 
-                match actual {
-                    Some(actual) => {
-                        if !check_string_field(expected_val, actual) {
-                            return false;
-                        }
+            match actual {
+                Some(actual) => {
+                    if !check_string_field(expected_val, actual) {
+                        return false;
                     }
-                    None => return false,
                 }
+                None => return false,
             }
         }
     }
 
     // Check headers
-    if let Some(expected_headers) = obj.get("headers") {
-        if let Some(expected_obj) = expected_headers.as_object() {
-            // For deepEquals, check exact match
-            if deep_equals && expected_obj.len() != headers.len() {
-                return false;
-            }
+    if let Some(expected_headers) = obj.get("headers")
+        && let Some(expected_obj) = expected_headers.as_object()
+    {
+        // For deepEquals, check exact match
+        if deep_equals && expected_obj.len() != headers.len() {
+            return false;
+        }
 
-            for (key, expected_val) in expected_obj {
-                // Headers use keyCaseSensitive option
-                let actual = headers
-                    .iter()
-                    .find(|(k, _)| key_matches(key, k))
-                    .map(|(_, v)| v.as_str());
+        for (key, expected_val) in expected_obj {
+            // Headers use keyCaseSensitive option
+            let actual = headers
+                .iter()
+                .find(|(k, _)| key_matches(key, k))
+                .map(|(_, v)| v.as_str());
 
-                match actual {
-                    Some(actual) => {
-                        if !check_string_field(expected_val, actual) {
-                            return false;
-                        }
+            match actual {
+                Some(actual) => {
+                    if !check_string_field(expected_val, actual) {
+                        return false;
                     }
-                    None => return false,
                 }
+                None => return false,
             }
         }
     }
@@ -258,38 +258,38 @@ pub(crate) fn check_predicate_fields_regex(
     };
 
     // Check method
-    if let Some(expected) = obj.get("method") {
-        if !check_regex_field(expected, method) {
-            return false;
-        }
+    if let Some(expected) = obj.get("method")
+        && !check_regex_field(expected, method)
+    {
+        return false;
     }
 
     // Check path
-    if let Some(expected) = obj.get("path") {
-        if !check_regex_field(expected, path) {
-            return false;
-        }
+    if let Some(expected) = obj.get("path")
+        && !check_regex_field(expected, path)
+    {
+        return false;
     }
 
     // Check body
-    if let Some(expected) = obj.get("body") {
-        if !check_regex_field(expected, body) {
-            return false;
-        }
+    if let Some(expected) = obj.get("body")
+        && !check_regex_field(expected, body)
+    {
+        return false;
     }
 
     // Check requestFrom
-    if let Some(expected) = obj.get("requestFrom") {
-        if !check_regex_field(expected, request_from.unwrap_or("")) {
-            return false;
-        }
+    if let Some(expected) = obj.get("requestFrom")
+        && !check_regex_field(expected, request_from.unwrap_or(""))
+    {
+        return false;
     }
 
     // Check ip
-    if let Some(expected) = obj.get("ip") {
-        if !check_regex_field(expected, client_ip.unwrap_or("")) {
-            return false;
-        }
+    if let Some(expected) = obj.get("ip")
+        && !check_regex_field(expected, client_ip.unwrap_or(""))
+    {
+        return false;
     }
 
     // Check form fields

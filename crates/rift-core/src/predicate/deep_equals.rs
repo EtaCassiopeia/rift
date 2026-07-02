@@ -150,8 +150,8 @@ pub fn parse_query_string(query: Option<&str>) -> HashMap<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hyper::header::{HeaderName, HeaderValue};
     use hyper::HeaderMap;
+    use hyper::header::{HeaderName, HeaderValue};
 
     #[test]
     fn test_deep_equals_headers() {

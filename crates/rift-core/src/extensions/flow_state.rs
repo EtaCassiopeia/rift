@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -55,7 +55,9 @@ impl FlowStore for NoOpFlowStore {
     fn increment(&self, _flow_id: &str, _key: &str) -> Result<i64> {
         // Always return 1 for no-op store since we can't track state
         // Scripts using flow_store.increment() with NoOpFlowStore will always get 1
-        tracing::warn!("NoOpFlowStore: increment called but no state tracking available. Configure flow_state for stateful scripts.");
+        tracing::warn!(
+            "NoOpFlowStore: increment called but no state tracking available. Configure flow_state for stateful scripts."
+        );
         Ok(1)
     }
 
@@ -316,9 +318,11 @@ mod tests {
     #[test]
     fn test_noop_flow_store_with_object_value() {
         let store = NoOpFlowStore;
-        assert!(store
-            .set("flow", "key", json!({"nested": {"deep": "value"}}))
-            .is_ok());
+        assert!(
+            store
+                .set("flow", "key", json!({"nested": {"deep": "value"}}))
+                .is_ok()
+        );
     }
 
     // ============================================

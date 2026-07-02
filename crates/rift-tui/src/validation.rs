@@ -3,7 +3,7 @@
 //! This module provides validation capabilities using the `rift-lint` library
 //! to validate configurations before importing or saving them.
 
-use rift_lint::{lint_json, lint_value, validate_stub, LintOptions, LintResult, Severity};
+use rift_lint::{LintOptions, LintResult, Severity, lint_json, lint_value, validate_stub};
 use std::path::PathBuf;
 
 /// Validate an imposter configuration from a JSON string.

@@ -77,8 +77,8 @@ impl ErrorResponseBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hyper::header::{HeaderValue, CONTENT_TYPE};
     use hyper::StatusCode;
+    use hyper::header::{CONTENT_TYPE, HeaderValue};
 
     #[test]
     fn test_builder_with_status() {

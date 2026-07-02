@@ -80,10 +80,10 @@ pub fn predicate_matches(
 
     // Helper to apply except pattern
     let apply_except = |value: &str| -> String {
-        if let Some(pattern) = except_pattern {
-            if let Ok(re) = regex::Regex::new(pattern) {
-                return re.replace_all(value, "").to_string();
-            }
+        if let Some(pattern) = except_pattern
+            && let Ok(re) = regex::Regex::new(pattern)
+        {
+            return re.replace_all(value, "").to_string();
         }
         value.to_string()
     };
@@ -292,7 +292,7 @@ pub fn predicate_matches(
         PredicateOperation::Inject(inject_fn) => {
             #[cfg(feature = "javascript")]
             {
-                use crate::scripting::{execute_predicate_inject, MountebankRequest};
+                use crate::scripting::{MountebankRequest, execute_predicate_inject};
                 let query_map = parse_query(query);
                 let mb_request = MountebankRequest {
                     method: method.to_string(),
