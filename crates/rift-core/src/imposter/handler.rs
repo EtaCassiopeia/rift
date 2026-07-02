@@ -334,6 +334,7 @@ async fn handle_request_inner(
             Ok(inject) => inject,
             Err(e) => return Ok(backend_error_response(&e)),
         };
+        #[cfg(feature = "javascript")]
         if let Some(inject_fn) = inject_fn {
             debug!("Handling inject response");
 

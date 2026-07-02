@@ -58,7 +58,15 @@ impl Imposter {
         } else {
             sequencer.peek(key, responses.len(), &repeats)?
         };
-        Ok(responses.get(index))
+        // An out-of-range index is a sequencer contract violation; surfacing it beats
+        // silently falling through to the no-match default response (issue #313).
+        let Some(response) = responses.get(index) else {
+            anyhow::bail!(
+                "sequencer returned out-of-range index {index} for stub {stub_key} ({} responses)",
+                responses.len()
+            );
+        };
+        Ok(Some(response))
     }
 
     /// Get all stubs info for debug purposes (Rift extension)

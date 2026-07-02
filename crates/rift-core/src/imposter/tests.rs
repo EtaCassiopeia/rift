@@ -158,6 +158,7 @@ fn test_execute_stub() {
     };
 
     let result = imposter.execute_stub_with_rift(&StubState::new(stub));
+    let result = result.expect("sequencer path is infallible here");
     assert!(result.is_some());
     let (status, _headers, body, _behaviors, _rift_ext, _mode, is_fault) = result.unwrap();
     assert_eq!(status, 201);
