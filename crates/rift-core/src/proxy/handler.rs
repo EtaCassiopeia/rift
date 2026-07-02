@@ -158,9 +158,8 @@ async fn handle_script_rules(
                 ) && rule_applies_to_upstream(rule_upstream, upstream.name.as_deref())
             });
 
-    let (compiled_script, compiled_rule, _) = match matching_script {
-        Some(m) => m,
-        None => return RuleHandlingResult::NoFault(req),
+    let Some((compiled_script, compiled_rule, _)) = matching_script else {
+        return RuleHandlingResult::NoFault(req);
     };
     info!("Request matched script rule: {}", compiled_rule.id);
 

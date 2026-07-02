@@ -18,9 +18,8 @@ impl Imposter {
         let mut predicates = Vec::new();
 
         for r#gen in generators {
-            let gen_obj = match r#gen.as_object() {
-                Some(obj) => obj,
-                None => continue,
+            let Some(gen_obj) = r#gen.as_object() else {
+                continue;
             };
 
             // Handle inject predicateGenerator — calls a JS function with the request and
@@ -54,9 +53,8 @@ impl Imposter {
             }
 
             // Get the matches config
-            let matches = match gen_obj.get("matches").and_then(|m| m.as_object()) {
-                Some(m) => m,
-                None => continue,
+            let Some(matches) = gen_obj.get("matches").and_then(|m| m.as_object()) else {
+                continue;
             };
 
             // Get options
@@ -355,7 +353,7 @@ impl Imposter {
         let response = request
             .send()
             .await
-            .with_context(|| format!("Failed to send proxy request to {}", target_url))?;
+            .with_context(|| format!("Failed to send proxy request to {target_url}"))?;
         let latency_ms = start.elapsed().as_millis() as u64;
 
         let status = response.status().as_u16();
@@ -369,17 +367,14 @@ impl Imposter {
             && content_length as usize > MAX_PROXY_RESPONSE_BODY_SIZE
         {
             anyhow::bail!(
-                "Proxy response body from {} exceeds maximum size ({} > {} bytes)",
-                target_url,
-                content_length,
-                MAX_PROXY_RESPONSE_BODY_SIZE
+                "Proxy response body from {target_url} exceeds maximum size ({content_length} > {MAX_PROXY_RESPONSE_BODY_SIZE} bytes)"
             );
         }
 
         let body_bytes = response
             .bytes()
             .await
-            .with_context(|| format!("Failed to read response body from {}", target_url))?;
+            .with_context(|| format!("Failed to read response body from {target_url}"))?;
 
         if body_bytes.len() > MAX_PROXY_RESPONSE_BODY_SIZE {
             anyhow::bail!(

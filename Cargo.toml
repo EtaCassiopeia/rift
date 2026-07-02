@@ -30,6 +30,10 @@ rust-version = "1.92"
 # sites. This table centralizes the existing policy and makes new crates inherit it.
 [workspace.lints.clippy]
 all = "warn"
+# Targeted idiom lints (not full pedantic): keep new code on modern idioms.
+uninlined_format_args = "warn"
+manual_let_else = "warn"
+unnecessary_map_or = "warn"
 
 [workspace.dependencies]
 # Async runtime — version pinned here; each crate selects its own tokio features

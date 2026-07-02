@@ -195,7 +195,7 @@ fn main() -> Result<(), anyhow::Error> {
     if let Some(ref rcfile) = cli.rcfile.clone() {
         match apply_rcfile_defaults(&mut cli, rcfile) {
             Ok(()) => {}
-            Err(e) => eprintln!("Warning: failed to load --rcfile {:?}: {}", rcfile, e),
+            Err(e) => eprintln!("Warning: failed to load --rcfile {rcfile:?}: {e}"),
         }
     }
 

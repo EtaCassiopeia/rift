@@ -105,7 +105,7 @@ fn draw_info_panel(frame: &mut Frame, app: &App, port: u16, area: Rect) {
     };
 
     let block = Block::default()
-        .title(format!(" Imposter :{} ", port))
+        .title(format!(" Imposter :{port} "))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(app.theme.border));
 
@@ -134,11 +134,11 @@ fn build_stub_summary(stubs: &[crate::api::Stub], max_width: usize) -> String {
     let mut summary = format!("{} total", stubs.len());
 
     if scenario_count > 0 {
-        summary.push_str(&format!(", {} scenarios", scenario_count));
+        summary.push_str(&format!(", {scenario_count} scenarios"));
     }
 
     if proxy_count > 0 {
-        summary.push_str(&format!(", {} proxy", proxy_count));
+        summary.push_str(&format!(", {proxy_count} proxy"));
     }
 
     // Add first few scenario names if there's space
@@ -221,7 +221,7 @@ fn draw_stubs_panel(frame: &mut Frame, app: &App, area: Rect) {
 
             let pred_count = stub.predicates.len();
             let resp_count = stub.responses.len();
-            let counts = format!(" {}p {}r", pred_count, resp_count);
+            let counts = format!(" {pred_count}p {resp_count}r");
 
             let line = Line::from(vec![
                 Span::styled(
@@ -240,9 +240,9 @@ fn draw_stubs_panel(frame: &mut Frame, app: &App, area: Rect) {
                     format!("#{:<2}", i + 1),
                     Style::default().fg(app.theme.muted),
                 ),
-                Span::styled(format!(" {} ", display_name), Style::default().fg(fg_color)),
+                Span::styled(format!(" {display_name} "), Style::default().fg(fg_color)),
                 Span::styled(
-                    format!("[{}]", response_type),
+                    format!("[{response_type}]"),
                     Style::default().fg(response_color),
                 ),
                 Span::styled(counts, Style::default().fg(app.theme.muted)),
@@ -523,7 +523,7 @@ fn summarize_predicates(predicates: &[serde_json::Value]) -> String {
                     }
                 }
                 "contains" | "startsWith" | "endsWith" | "matches" => {
-                    return format!("{} ...", key);
+                    return format!("{key} ...");
                 }
                 "and" | "or" => {
                     if let Some(arr) = value.as_array() {

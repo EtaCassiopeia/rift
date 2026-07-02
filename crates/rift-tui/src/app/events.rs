@@ -178,7 +178,7 @@ impl App {
                     self.set_status("Config refreshed".to_string(), StatusLevel::Success);
                 }
                 Err(e) => {
-                    self.set_status(format!("Failed to load config: {}", e), StatusLevel::Error)
+                    self.set_status(format!("Failed to load config: {e}"), StatusLevel::Error)
                 }
             }
         }
@@ -210,7 +210,7 @@ impl App {
                 self.server_config = Some(cfg);
                 self.navigate(View::Config);
             }
-            Err(e) => self.set_status(format!("Failed to load config: {}", e), StatusLevel::Error),
+            Err(e) => self.set_status(format!("Failed to load config: {e}"), StatusLevel::Error),
         }
         self.is_loading = false;
     }

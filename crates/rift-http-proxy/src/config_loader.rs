@@ -235,19 +235,16 @@ mod tests {
 
     #[test]
     fn test_ejs_env_var_substitution() {
-        // TODO: Audit that the environment access only happens in single-threaded code.
         unsafe { std::env::set_var("RIFT_TEST_HOST", "myhost") };
         let content = r#"{"body": "<%= process.env.RIFT_TEST_HOST %>"}"#;
         let path = PathBuf::from("config.json");
         let result = preprocess_ejs(content, &path).unwrap();
         assert_eq!(result, r#"{"body": "myhost"}"#);
-        // TODO: Audit that the environment access only happens in single-threaded code.
         unsafe { std::env::remove_var("RIFT_TEST_HOST") };
     }
 
     #[test]
     fn test_ejs_env_var_with_default() {
-        // TODO: Audit that the environment access only happens in single-threaded code.
         unsafe { std::env::remove_var("RIFT_TEST_UNSET_VAR") };
         let content = r#"{"port": "<%= process.env.RIFT_TEST_UNSET_VAR || '4545' %>"}"#;
         let path = PathBuf::from("config.json");
@@ -257,13 +254,11 @@ mod tests {
 
     #[test]
     fn test_ejs_env_var_present_overrides_default() {
-        // TODO: Audit that the environment access only happens in single-threaded code.
         unsafe { std::env::set_var("RIFT_TEST_PORT", "8080") };
         let content = r#"{"port": "<%= process.env.RIFT_TEST_PORT || '4545' %>"}"#;
         let path = PathBuf::from("config.json");
         let result = preprocess_ejs(content, &path).unwrap();
         assert_eq!(result, r#"{"port": "8080"}"#);
-        // TODO: Audit that the environment access only happens in single-threaded code.
         unsafe { std::env::remove_var("RIFT_TEST_PORT") };
     }
 

@@ -202,9 +202,8 @@ where
                 Err(_) => return false,
             };
 
-            let actual_obj = match actual_json.as_object() {
-                Some(obj) => obj,
-                None => return false,
+            let Some(actual_obj) = actual_json.as_object() else {
+                return false;
             };
 
             // For deepEquals, actual must have exactly the same keys
@@ -222,9 +221,8 @@ where
                         .map(|(_, v)| v)
                 };
 
-                let actual_val = match actual_val {
-                    Some(v) => v,
-                    None => return false,
+                let Some(actual_val) = actual_val else {
+                    return false;
                 };
 
                 let actual_val_str = json_value_to_string(actual_val);
@@ -247,9 +245,8 @@ where
                 Err(_) => return false,
             };
 
-            let actual_arr = match actual_json.as_array() {
-                Some(arr) => arr,
-                None => return false,
+            let Some(actual_arr) = actual_json.as_array() else {
+                return false;
             };
 
             if expected_arr.len() != actual_arr.len() {

@@ -80,7 +80,7 @@ pub fn draw_confirm(frame: &mut Frame, message: &str) {
 
 /// Draw an error dialog using tui-popup
 pub fn draw_error(frame: &mut Frame, message: &str) {
-    let content = format!("\n{}\n\nPress Esc to close", message);
+    let content = format!("\n{message}\n\nPress Esc to close");
 
     let popup = Popup::new(content)
         .title(" Error ")
@@ -92,7 +92,7 @@ pub fn draw_error(frame: &mut Frame, message: &str) {
 
 /// Draw a success message dialog using tui-popup
 pub fn draw_success(frame: &mut Frame, message: &str) {
-    let content = format!("\n{}\n\nPress any key to continue", message);
+    let content = format!("\n{message}\n\nPress any key to continue");
 
     let popup = Popup::new(content)
         .title(" Success ")
@@ -127,9 +127,9 @@ fn draw_input_field(
     };
 
     let title = if focused {
-        format!(" ▶ {} ", label)
+        format!(" ▶ {label} ")
     } else {
-        format!("   {} ", label)
+        format!("   {label} ")
     };
 
     let block = Block::default()
@@ -197,7 +197,7 @@ fn draw_create_imposter_input(frame: &mut Frame, app: &App, prompt: &str) {
     frame.render_widget(Clear, area);
 
     let block = Block::default()
-        .title(format!(" {} ", prompt))
+        .title(format!(" {prompt} "))
         .title_alignment(Alignment::Center)
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Yellow))
@@ -276,7 +276,7 @@ fn draw_create_proxy_input(frame: &mut Frame, app: &App, prompt: &str) {
     frame.render_widget(Clear, area);
 
     let block = Block::default()
-        .title(format!(" {} ", prompt))
+        .title(format!(" {prompt} "))
         .title_alignment(Alignment::Center)
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Yellow))
@@ -411,7 +411,7 @@ pub fn draw_export(
     frame.render_widget(Clear, area);
 
     let block = Block::default()
-        .title(format!(" {} ", title))
+        .title(format!(" {title} "))
         .title_alignment(Alignment::Center)
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Green))
@@ -489,7 +489,7 @@ pub fn draw_file_path_input(frame: &mut Frame, app: &App, prompt: &str) {
     frame.render_widget(Clear, area);
 
     let block = Block::default()
-        .title(format!(" {} ", prompt))
+        .title(format!(" {prompt} "))
         .title_alignment(Alignment::Center)
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Yellow))

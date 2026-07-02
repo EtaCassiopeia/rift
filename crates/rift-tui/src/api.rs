@@ -521,7 +521,7 @@ impl ApiClient {
         }
         Err(ApiError::Server {
             code: status.as_str().to_string(),
-            message: format!("Request failed with status {}", status),
+            message: format!("Request failed with status {status}"),
         })
     }
 }

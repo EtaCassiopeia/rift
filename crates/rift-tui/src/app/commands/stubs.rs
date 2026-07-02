@@ -70,7 +70,7 @@ impl App {
                         self.refresh().await;
                     }
                     Err(e) => {
-                        self.set_status(format!("Failed to save: {}", e), StatusLevel::Error);
+                        self.set_status(format!("Failed to save: {e}"), StatusLevel::Error);
                     }
                 }
                 self.is_loading = false;
@@ -115,7 +115,7 @@ impl App {
             && let Some(idx) = self.stub_list_state.selected()
         {
             self.overlay = Overlay::Confirm {
-                message: format!("Delete stub #{} from :{}?", idx, port),
+                message: format!("Delete stub #{idx} from :{port}?"),
                 action: PendingAction::DeleteStub { port, index: idx },
             };
         }
@@ -130,7 +130,7 @@ impl App {
                 self.refresh().await;
             }
             Err(e) => {
-                self.set_status(format!("Failed to delete: {}", e), StatusLevel::Error);
+                self.set_status(format!("Failed to delete: {e}"), StatusLevel::Error);
             }
         }
         self.is_loading = false;
@@ -138,9 +138,8 @@ impl App {
     }
 
     pub(in super::super) async fn reorder_stub(&mut self, direction: i32) {
-        let port = match self.view {
-            View::ImposterDetail { port } => port,
-            _ => return,
+        let View::ImposterDetail { port } = self.view else {
+            return;
         };
         if let Some(idx) = self.stub_list_state.selected() {
             let new_idx = idx as i32 + direction;
@@ -164,7 +163,7 @@ impl App {
                         self.refresh().await;
                     }
                     Err(e) => {
-                        self.set_status(format!("Failed to reorder: {}", e), StatusLevel::Error);
+                        self.set_status(format!("Failed to reorder: {e}"), StatusLevel::Error);
                         // Refresh to restore correct order
                         self.refresh().await;
                     }
@@ -197,9 +196,7 @@ impl App {
                     self.set_status("Stub duplicated".to_string(), StatusLevel::Success);
                     self.refresh().await;
                 }
-                Err(e) => {
-                    self.set_status(format!("Failed to duplicate: {}", e), StatusLevel::Error)
-                }
+                Err(e) => self.set_status(format!("Failed to duplicate: {e}"), StatusLevel::Error),
             }
             self.is_loading = false;
         }

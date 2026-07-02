@@ -16,7 +16,7 @@ impl App {
                 }
                 _ => {
                     self.set_status(
-                        format!("Failed to load imposter :{}", port),
+                        format!("Failed to load imposter :{port}"),
                         StatusLevel::Error,
                     );
                 }
@@ -54,15 +54,12 @@ impl App {
                     } else {
                         "enabled"
                     };
-                    self.set_status(
-                        format!("Imposter :{} {}", port, action),
-                        StatusLevel::Success,
-                    );
+                    self.set_status(format!("Imposter :{port} {action}"), StatusLevel::Success);
                     self.refresh().await;
                 }
                 Err(e) => {
                     self.set_status(
-                        format!("Failed to toggle imposter: {}", e),
+                        format!("Failed to toggle imposter: {e}"),
                         StatusLevel::Error,
                     );
                 }
@@ -79,7 +76,7 @@ impl App {
                     imp.port,
                     imp.name
                         .as_ref()
-                        .map(|n| format!(" ({})", n))
+                        .map(|n| format!(" ({n})"))
                         .unwrap_or_default()
                 ),
                 action: PendingAction::DeleteImposter { port: imp.port },
@@ -92,14 +89,14 @@ impl App {
         self.is_loading = true;
         match self.client.delete_imposter(port).await {
             Ok(_) => {
-                self.set_status(format!("Deleted imposter :{}", port), StatusLevel::Success);
+                self.set_status(format!("Deleted imposter :{port}"), StatusLevel::Success);
                 self.refresh().await;
                 if matches!(self.view, View::ImposterDetail { port: p } if p == port) {
                     self.view = View::ImposterList;
                 }
             }
             Err(e) => {
-                self.set_status(format!("Failed to delete: {}", e), StatusLevel::Error);
+                self.set_status(format!("Failed to delete: {e}"), StatusLevel::Error);
             }
         }
         self.is_loading = false;
@@ -153,12 +150,12 @@ impl App {
         self.is_loading = true;
         match self.client.create_imposter(request).await {
             Ok(port) => {
-                self.set_status(format!("Created imposter :{}", port), StatusLevel::Success);
+                self.set_status(format!("Created imposter :{port}"), StatusLevel::Success);
                 self.overlay = Overlay::None;
                 self.refresh().await;
             }
             Err(e) => {
-                self.set_status(format!("Failed to create: {}", e), StatusLevel::Error);
+                self.set_status(format!("Failed to create: {e}"), StatusLevel::Error);
             }
         }
         self.is_loading = false;

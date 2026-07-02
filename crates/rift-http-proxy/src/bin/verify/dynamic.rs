@@ -291,9 +291,8 @@ impl<'a> DynamicVerifier<'a> {
             Ok(s) => s,
             Err(e) => return vec![DynCheck::fail(label, e)],
         };
-        let port = match free_port() {
-            Some(p) => p,
-            None => return vec![DynCheck::fail(label, "no free port".to_string())],
+        let Some(port) = free_port() else {
+            return vec![DynCheck::fail(label, "no free port".to_string())];
         };
         let mut config = imposter.clone();
         config["port"] = port.into();
@@ -331,9 +330,8 @@ impl<'a> DynamicVerifier<'a> {
             Ok(m) => m,
             Err(e) => return vec![DynCheck::fail(label, e)],
         };
-        let port = match free_port() {
-            Some(p) => p,
-            None => return vec![DynCheck::fail(label, "no free port".to_string())],
+        let Some(port) = free_port() else {
+            return vec![DynCheck::fail(label, "no free port".to_string())];
         };
 
         let mut proxy_cfg = serde_json::json!({ "to": mock.url(), "mode": mode });
@@ -394,9 +392,8 @@ impl<'a> DynamicVerifier<'a> {
         expectation: FaultExpectation,
     ) -> Vec<DynCheck> {
         let label = format!("stub #{stub_idx} fault");
-        let port = match free_port() {
-            Some(p) => p,
-            None => return vec![DynCheck::fail(label, "no free port".to_string())],
+        let Some(port) = free_port() else {
+            return vec![DynCheck::fail(label, "no free port".to_string())];
         };
         let path = "/__rift_verify_fault";
         let config = serde_json::json!({

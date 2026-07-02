@@ -33,7 +33,7 @@ impl App {
 
         // Add method if not GET
         if method != "GET" {
-            parts.push(format!("-X {}", method));
+            parts.push(format!("-X {method}"));
         }
 
         // Add Content-Type header if we have a body and it looks like JSON
@@ -51,7 +51,7 @@ impl App {
 
         // Add headers
         for (key, value) in &headers {
-            parts.push(format!("-H '{}: {}'", key, value));
+            parts.push(format!("-H '{key}: {value}'"));
         }
 
         // Add body if present
@@ -60,16 +60,16 @@ impl App {
         }
 
         // Build URL with query params
-        let mut url = format!("http://localhost:{}{}", port, path);
+        let mut url = format!("http://localhost:{port}{path}");
         if !query_params.is_empty() {
             let query_string: Vec<String> = query_params
                 .iter()
-                .map(|(k, v)| format!("{}={}", k, v))
+                .map(|(k, v)| format!("{k}={v}"))
                 .collect();
             url = format!("{}?{}", url, query_string.join("&"));
         }
 
-        parts.push(format!("'{}'", url));
+        parts.push(format!("'{url}'"));
 
         parts.join(" \\\n  ")
     }
@@ -121,7 +121,7 @@ impl App {
                                 if p.starts_with('/') {
                                     p.to_string()
                                 } else {
-                                    format!("/{}", p)
+                                    format!("/{p}")
                                 }
                             }
                             _ => {
@@ -129,7 +129,7 @@ impl App {
                                 if p.starts_with('/') {
                                     p.to_string()
                                 } else {
-                                    format!("/{}", p)
+                                    format!("/{p}")
                                 }
                             }
                         };
@@ -189,7 +189,7 @@ impl App {
         // Replace [^/]+ patterns with numbered placeholders
         let mut counter = 1;
         while path.contains("[^/]+") {
-            path = path.replacen("[^/]+", &format!("{{{}}}", counter), 1);
+            path = path.replacen("[^/]+", &format!("{{{counter}}}"), 1);
             counter += 1;
         }
 
@@ -205,7 +205,7 @@ impl App {
         path = path.replace(")", "");
 
         if !path.starts_with('/') {
-            path = format!("/{}", path);
+            path = format!("/{path}");
         }
 
         path

@@ -144,7 +144,7 @@ fn build_help_text() -> Vec<Line<'static>> {
 
 fn section_header(title: &'static str) -> Line<'static> {
     Line::from(Span::styled(
-        format!("  {}", title),
+        format!("  {title}"),
         Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
     ))
 }
@@ -152,7 +152,7 @@ fn section_header(title: &'static str) -> Line<'static> {
 fn help_line(key: &'static str, desc: &'static str) -> Line<'static> {
     Line::from(vec![
         Span::styled(
-            format!("  {:<16}", key),
+            format!("  {key:<16}"),
             Style::default().add_modifier(Modifier::BOLD),
         ),
         Span::raw(desc),

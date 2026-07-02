@@ -147,8 +147,7 @@ async fn handle_request_inner(
                 StatusCode::PAYLOAD_TOO_LARGE,
                 [("x-rift-imposter", "true")],
                 format!(
-                    r#"{{"error": "Request body exceeds maximum size of {} bytes"}}"#,
-                    MAX_REQUEST_BODY_SIZE
+                    r#"{{"error": "Request body exceeds maximum size of {MAX_REQUEST_BODY_SIZE} bytes"}}"#
                 ),
             ));
         }

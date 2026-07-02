@@ -202,7 +202,7 @@ impl StubEditor {
                 true
             }
             Err(e) => {
-                self.validation_error = Some(format!("JSON error: {}", e));
+                self.validation_error = Some(format!("JSON error: {e}"));
                 self.validation_report = None;
                 false
             }
@@ -478,10 +478,7 @@ impl App {
                 }
             }
             Err(e) => {
-                self.set_status(
-                    format!("Failed to load imposters: {}", e),
-                    StatusLevel::Error,
-                );
+                self.set_status(format!("Failed to load imposters: {e}"), StatusLevel::Error);
             }
         }
 

@@ -209,15 +209,12 @@ pub fn validate_predicate(
         "inject",
     ];
 
-    let pred_obj = match predicate.as_object() {
-        Some(obj) => obj,
-        None => {
-            result.add_issue(
-                LintIssue::error("E007", "Predicate must be an object", file.to_path_buf())
-                    .with_location(location),
-            );
-            return;
-        }
+    let Some(pred_obj) = predicate.as_object() else {
+        result.add_issue(
+            LintIssue::error("E007", "Predicate must be an object", file.to_path_buf())
+                .with_location(location),
+        );
+        return;
     };
 
     let modifier_keys: HashSet<&str> =
@@ -564,7 +561,7 @@ pub fn validate_headers(file: &Path, headers: &Value, location: &str, result: &m
                     file.to_path_buf(),
                 )
                 .with_location(format!("{location}.{name}"))
-                .with_suggestion(format!("Change to: \"{name}\": \"{}\"", value)),
+                .with_suggestion(format!("Change to: \"{name}\": \"{value}\"")),
             );
         } else if value.is_boolean() {
             result.add_issue(
@@ -574,7 +571,7 @@ pub fn validate_headers(file: &Path, headers: &Value, location: &str, result: &m
                     file.to_path_buf(),
                 )
                 .with_location(format!("{location}.{name}"))
-                .with_suggestion(format!("Change to: \"{name}\": \"{}\"", value)),
+                .with_suggestion(format!("Change to: \"{name}\": \"{value}\"")),
             );
         } else if value.is_null() {
             result.add_issue(

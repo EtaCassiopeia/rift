@@ -50,7 +50,7 @@ pub fn draw_list(frame: &mut Frame, app: &App, area: Rect) {
                         app.theme.highlight_bg
                     }),
                 ),
-                Span::styled(format!("{} ", status), Style::default().fg(status_color)),
+                Span::styled(format!("{status} "), Style::default().fg(status_color)),
                 Span::styled(
                     format!(":{:<5}", imp.port),
                     Style::default().fg(fg_color).add_modifier(if dim {

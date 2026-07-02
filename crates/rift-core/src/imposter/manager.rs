@@ -535,9 +535,8 @@ impl ImposterManager {
         let Some(ref datadir) = self.datadir else {
             return Ok(());
         };
-        let port = match imposter.config.port {
-            Some(p) => p,
-            None => return Ok(()),
+        let Some(port) = imposter.config.port else {
+            return Ok(());
         };
         let mut snapshot = imposter.config.clone();
         snapshot.stubs = imposter.get_stubs();
@@ -558,9 +557,8 @@ impl ImposterManager {
         let Some(ref datadir) = self.datadir else {
             return;
         };
-        let port = match imposter.config.port {
-            Some(p) => p,
-            None => return,
+        let Some(port) = imposter.config.port else {
+            return;
         };
         let mut snapshot = imposter.config.clone();
         snapshot.stubs = imposter.get_stubs();
