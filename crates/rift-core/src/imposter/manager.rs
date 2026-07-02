@@ -496,18 +496,14 @@ impl ImposterManager {
         stub: Stub,
     ) -> Result<(), ImposterError> {
         let imposter = self.get_imposter(port)?;
-        imposter
-            .replace_stub(index, stub)
-            .map_err(|_| ImposterError::StubIndexOutOfBounds(index))?;
+        imposter.replace_stub(index, stub)?;
         self.persist_imposter_checked(&imposter).await
     }
 
     /// Delete a stub
     pub async fn delete_stub(&self, port: u16, index: usize) -> Result<(), ImposterError> {
         let imposter = self.get_imposter(port)?;
-        imposter
-            .delete_stub(index)
-            .map_err(|_| ImposterError::StubIndexOutOfBounds(index))?;
+        imposter.delete_stub(index)?;
         self.persist_imposter_checked(&imposter).await
     }
 

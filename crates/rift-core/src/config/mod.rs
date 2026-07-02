@@ -134,7 +134,7 @@ impl Config {
 
         // Validate all upstreams (reverse proxy mode)
         for upstream in &self.upstreams {
-            upstream.validate().map_err(|e| anyhow::anyhow!(e))?;
+            upstream.validate()?;
         }
 
         // Validate script rules if present

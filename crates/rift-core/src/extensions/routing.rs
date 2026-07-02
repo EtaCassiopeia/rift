@@ -2,6 +2,17 @@ use crate::config::{HeaderMatch, HostMatch, Route};
 use hyper::Request;
 use regex::Regex;
 
+/// Error compiling routing configuration into a [`Router`].
+#[derive(Debug, thiserror::Error)]
+pub enum RoutingError {
+    #[error("Invalid path regex in route '{route}': {source}")]
+    InvalidPathRegex {
+        route: String,
+        #[source]
+        source: regex::Error,
+    },
+}
+
 /// Router matches incoming requests to upstream services
 pub struct Router {
     routes: Vec<CompiledRoute>,
@@ -24,7 +35,7 @@ enum CompiledHost {
 
 impl Router {
     /// Create a new router from route configuration
-    pub fn new(routes: Vec<Route>) -> Result<Self, String> {
+    pub fn new(routes: Vec<Route>) -> Result<Self, RoutingError> {
         let mut compiled = Vec::new();
 
         for route in routes {
@@ -47,15 +58,17 @@ impl Router {
     }
 }
 
-fn compile_route(route: Route) -> Result<CompiledRoute, String> {
+fn compile_route(route: Route) -> Result<CompiledRoute, RoutingError> {
     let host = route.match_config.host.map(|host_match| match host_match {
         HostMatch::Exact(h) => CompiledHost::Exact(h),
         HostMatch::Wildcard { wildcard } => CompiledHost::Wildcard(wildcard),
     });
 
     let path_regex = if let Some(pattern) = &route.match_config.path_regex {
-        let regex = Regex::new(pattern)
-            .map_err(|e| format!("Invalid path regex in route '{}': {}", route.name, e))?;
+        let regex = Regex::new(pattern).map_err(|source| RoutingError::InvalidPathRegex {
+            route: route.name.clone(),
+            source,
+        })?;
         Some(regex)
     } else {
         None

@@ -2,6 +2,13 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Error parsing a [`Protocol`] from a URL scheme.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ProtocolError {
+    #[error("Unsupported protocol scheme: {0}")]
+    UnsupportedScheme(String),
+}
+
 /// Protocol supported by Rift for listeners and upstreams
 /// Extensible design to support future protocols (TCP, WebSocket, DynamoDB, etc.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
@@ -41,14 +48,14 @@ impl Protocol {
     }
 
     /// Parse protocol from URL scheme
-    pub fn from_scheme(scheme: &str) -> Result<Self, String> {
+    pub fn from_scheme(scheme: &str) -> Result<Self, ProtocolError> {
         match scheme.to_lowercase().as_str() {
             "http" => Ok(Protocol::Http),
             "https" => Ok(Protocol::Https),
             "tcp" => Ok(Protocol::Tcp),
             "ws" | "websocket" => Ok(Protocol::WebSocket),
             "dynamodb" => Ok(Protocol::DynamoDB),
-            _ => Err(format!("Unsupported protocol scheme: {scheme}")),
+            _ => Err(ProtocolError::UnsupportedScheme(scheme.to_string())),
         }
     }
 }

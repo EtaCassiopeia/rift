@@ -3,6 +3,17 @@
 use super::request::RequestContext;
 use std::collections::HashMap;
 
+/// Error executing a `decorate` behavior script.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum DecorateError {
+    #[error("Decorate script error: {0}")]
+    Rhai(String),
+    #[error("JavaScript decorate error: {0}")]
+    JavaScript(String),
+    #[error("Could not parse JavaScript decorate function")]
+    JsParseFailure,
+}
+
 /// Execute shell transform command
 /// The command receives MB_REQUEST and MB_RESPONSE environment variables
 /// and should output the transformed response body to stdout
@@ -101,7 +112,7 @@ pub fn apply_decorate(
     response_body: &str,
     response_status: u16,
     response_headers: &mut HashMap<String, String>,
-) -> Result<(String, u16), String> {
+) -> Result<(String, u16), DecorateError> {
     use rhai::{Dynamic, Engine, Map, Scope};
 
     let engine = Engine::new();
@@ -174,7 +185,7 @@ pub fn apply_decorate(
                 Ok((response_body.to_string(), response_status))
             }
         }
-        Err(e) => Err(format!("Decorate script error: {e}")),
+        Err(e) => Err(DecorateError::Rhai(e.to_string())),
     }
 }
 
@@ -336,7 +347,10 @@ mod tests {
 
         let result = apply_decorate(script, &request, "body", 200, &mut headers);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Decorate script error"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Decorate script error"));
     }
 
     // Issue #191: JS `config =>` decorate convention detection + rewrite.

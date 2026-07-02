@@ -1,0 +1,283 @@
+//! Request matching, flow-id / scenario-state resolution, and form parsing.
+//!
+//! Part of the `Imposter` implementation; see `core/mod.rs` for the struct definition.
+
+use super::*;
+
+impl Imposter {
+    /// Find a matching stub for a request and return a cloned copy with its index
+    pub fn find_matching_stub(
+        &self,
+        method: &str,
+        path: &str,
+        headers: &hyper::HeaderMap,
+        query: Option<&str>,
+        body: Option<&str>,
+    ) -> Option<(StubState, usize)> {
+        // Call the extended version with no client info (backward compatible)
+        self.find_matching_stub_with_client(method, path, headers, query, body, None, None)
+    }
+
+    /// Find a matching stub with client address information (for requestFrom/ip predicates)
+    #[allow(clippy::too_many_arguments)]
+    pub fn find_matching_stub_with_client(
+        &self,
+        method: &str,
+        path: &str,
+        headers: &hyper::HeaderMap,
+        query: Option<&str>,
+        body: Option<&str>,
+        request_from: Option<&str>,
+        client_ip: Option<&str>,
+    ) -> Option<(StubState, usize)> {
+        let stubs = self.stubs.read();
+        let headers_map = Self::header_map_to_hashmap(headers);
+        // Parse form data if Content-Type is application/x-www-form-urlencoded
+        let form = Self::parse_form_data(headers, body);
+
+        let imposter_port = self.config.port.unwrap_or(0);
+        let flow_id = self.resolve_flow_id(&headers_map);
+        for (index, stub_state) in stubs.iter().enumerate() {
+            let stub = &stub_state.stub;
+            // Correlated-isolation gate (issue #223, runs first): a space-scoped stub only
+            // participates in matching when the request's resolved flow_id equals its space.
+            // Unscoped stubs match any space (PerInstance default).
+            if let Some(space) = &stub.space {
+                if flow_id != *space {
+                    continue;
+                }
+            }
+            // Scenario FSM eligibility gate (before predicate precedence): a stub guarded by
+            // `requiredScenarioState` only participates in matching when the current
+            // (flow_id, scenario) state equals it.
+            if let Some(required) = &stub.required_scenario_state {
+                let scenario = stub.scenario_name.as_deref().unwrap_or("");
+                if self.scenario_state(&flow_id, scenario) != *required {
+                    continue;
+                }
+            }
+            if stub_matches(
+                &stub.predicates,
+                method,
+                path,
+                query,
+                &headers_map,
+                body,
+                request_from,
+                client_ip,
+                form.as_ref(),
+                imposter_port,
+            ) {
+                // PERF NOTE: this deep-clones the matched `Stub` on every request. The clone is
+                // load-bearing, not accidental: the caller (`handler.rs`) holds the returned
+                // `StubState` across `.await` points (async proxying / response building), so the
+                // `parking_lot` read guard held here MUST be released before returning — a guard
+                // cannot be held across an await without blocking all writers for the request's
+                // lifetime. Returning only `index` would force the caller to re-lock (racy against
+                // concurrent `replace_stub`) or hold the guard across await. The response-cycling
+                // state is already shared cheaply: `StubState.cycler` is an `Arc`, so advancing the
+                // cycler on this clone is visible through the stored stub. Eliminating the `Stub`
+                // clone cleanly would mean making `StubState.stub` an `Arc<Stub>` — a broader field
+                // retype across every `.stub` access/mutation site, deferred out of this
+                // behavior-preserving pass.
+                return Some((stub_state.clone(), index));
+            }
+        }
+        None
+    }
+
+    /// The configured `flow_id_source` (`"imposter_port"` or `"header:<Name>"`),
+    /// defaulting to `"imposter_port"`.
+    pub fn flow_id_source(&self) -> String {
+        self.config
+            .rift
+            .as_ref()
+            .and_then(|r| r.flow_state.as_ref())
+            .and_then(|fs| fs.flow_id_source.clone())
+            .unwrap_or_else(|| "imposter_port".to_string())
+    }
+
+    /// Resolve the correlation `flow_id` for a request, partitioning scenario state.
+    /// `"header:<Name>"` uses that (case-insensitive) header; `"imposter_port"` (the default,
+    /// and the fallback when the header is absent) uses the imposter port.
+    pub fn resolve_flow_id(&self, headers: &HashMap<String, String>) -> String {
+        // Live path uses the single-value header view (`headers_clone`); kept separate from the
+        // multi-value `flow_id_for` (used over recorded requests) to avoid a per-request alloc.
+        let port = self.config.port.unwrap_or(0);
+        match self.flow_id_source().strip_prefix("header:") {
+            Some(name) => headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                .map(|(_, v)| v.clone())
+                .unwrap_or_else(|| port.to_string()),
+            None => port.to_string(),
+        }
+    }
+
+    /// Resolve the correlation `flow_id` for an already-recorded request (multi-value headers).
+    pub fn resolve_flow_id_recorded(&self, headers: &HashMap<String, Vec<String>>) -> String {
+        Self::flow_id_for(
+            &self.flow_id_source(),
+            headers,
+            self.config.port.unwrap_or(0),
+        )
+    }
+
+    /// Pure flow_id resolution (no `&self`), so it can be reused over recorded requests.
+    /// A flow id derives from a single header value; the first is taken if multi-valued (#238).
+    fn flow_id_for(source: &str, headers: &HashMap<String, Vec<String>>, port: u16) -> String {
+        match source.strip_prefix("header:") {
+            Some(name) => headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                .and_then(|(_, v)| v.first().cloned())
+                .unwrap_or_else(|| port.to_string()),
+            None => port.to_string(),
+        }
+    }
+
+    /// Current scenario state for `(flow_id, scenario)`, or the initial state if absent.
+    /// A backend read error degrades to the initial state but is logged — it must not be
+    /// silently mistaken for "no state yet", which would mis-gate matching.
+    pub fn scenario_state(&self, flow_id: &str, scenario: &str) -> String {
+        match self.flow_store.get(flow_id, scenario) {
+            Ok(Some(v)) => v.as_str().unwrap_or(INITIAL_SCENARIO_STATE).to_string(),
+            Ok(None) => INITIAL_SCENARIO_STATE.to_string(),
+            Err(e) => {
+                warn!(
+                    "scenario state read failed ({flow_id}/{scenario}); using initial '{INITIAL_SCENARIO_STATE}': {e}"
+                );
+                INITIAL_SCENARIO_STATE.to_string()
+            }
+        }
+    }
+
+    /// Set scenario state for `(flow_id, scenario)`.
+    pub fn set_scenario_state(
+        &self,
+        flow_id: &str,
+        scenario: &str,
+        state: &str,
+    ) -> anyhow::Result<()> {
+        self.flow_store.set(
+            flow_id,
+            scenario,
+            serde_json::Value::String(state.to_string()),
+        )
+    }
+
+    /// Delete a scenario's state for a flow (so it reads back as the initial state).
+    pub fn delete_scenario_state(&self, flow_id: &str, scenario: &str) -> anyhow::Result<()> {
+        self.flow_store.delete(flow_id, scenario)
+    }
+
+    /// Apply a matched stub's `newScenarioState` transition after it responds (no-op if unset).
+    pub fn apply_scenario_transition(&self, flow_id: &str, stub: &Stub) {
+        if let Some(next) = &stub.new_scenario_state {
+            let scenario = stub.scenario_name.as_deref().unwrap_or("");
+            if let Err(e) = self.set_scenario_state(flow_id, scenario, next) {
+                warn!("scenario transition failed ({flow_id}/{scenario} -> {next}): {e}");
+            }
+        }
+    }
+
+    /// Read a raw flow-state value (admin flow-state inspection).
+    pub fn flow_get(&self, flow_id: &str, key: &str) -> anyhow::Result<Option<serde_json::Value>> {
+        self.flow_store.get(flow_id, key)
+    }
+
+    /// Set a raw flow-state value (admin flow-state arrange).
+    pub fn flow_set(
+        &self,
+        flow_id: &str,
+        key: &str,
+        value: serde_json::Value,
+    ) -> anyhow::Result<()> {
+        self.flow_store.set(flow_id, key, value)
+    }
+
+    /// Delete a raw flow-state value (admin flow-state teardown).
+    pub fn flow_delete(&self, flow_id: &str, key: &str) -> anyhow::Result<()> {
+        self.flow_store.delete(flow_id, key)
+    }
+
+    /// Distinct scenario names declared by this imposter's stubs (sorted).
+    pub fn scenario_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .stubs
+            .read()
+            .iter()
+            .filter_map(|s| s.stub.scenario_name.clone())
+            .collect();
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    /// Stubs scoped to a given correlation space (issue #223).
+    pub fn space_stubs(&self, space: &str) -> Vec<Stub> {
+        self.stubs
+            .read()
+            .iter()
+            .filter(|s| s.stub.space.as_deref() == Some(space))
+            .map(|s| s.stub.clone())
+            .collect()
+    }
+
+    /// Tear down a correlation space (issue #223): remove its scoped stubs, drop its recorded
+    /// requests, and reset its named scenario states. Other spaces and the port are untouched.
+    pub fn teardown_space(&self, space: &str) {
+        // Snapshot scenario names BEFORE pruning stubs: a scenario declared only on this space's
+        // stubs would otherwise vanish from scenario_names() and its state would never be reset.
+        let scenarios = self.scenario_names();
+        self.stubs
+            .write()
+            .retain(|s| s.stub.space.as_deref() != Some(space));
+        let source = self.flow_id_source();
+        self.recorded_requests.write().retain(|r| {
+            Self::flow_id_for(&source, &r.headers, self.config.port.unwrap_or(0)) != space
+        });
+        for scenario in scenarios {
+            if let Err(e) = self.delete_scenario_state(space, &scenario) {
+                warn!("space teardown: failed to reset scenario '{scenario}' for '{space}': {e}");
+            }
+        }
+    }
+
+    /// Parse form-urlencoded data from body if Content-Type matches
+    pub(crate) fn parse_form_data(
+        headers: &hyper::HeaderMap,
+        body: Option<&str>,
+    ) -> Option<HashMap<String, String>> {
+        let content_type = headers
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+
+        if content_type.contains("application/x-www-form-urlencoded") {
+            if let Some(body_str) = body {
+                let mut map = HashMap::new();
+                for pair in body_str.split('&').filter(|s| !s.is_empty()) {
+                    let mut parts = pair.splitn(2, '=');
+                    if let Some(raw_key) = parts.next() {
+                        let key = urlencoding::decode(raw_key)
+                            .unwrap_or_default()
+                            .into_owned();
+                        let value = parts
+                            .next()
+                            .map(|v| urlencoding::decode(v).unwrap_or_default().into_owned())
+                            .unwrap_or_default();
+                        map.entry(key)
+                            .and_modify(|existing: &mut String| {
+                                existing.push(',');
+                                existing.push_str(&value);
+                            })
+                            .or_insert(value);
+                    }
+                }
+                return Some(map);
+            }
+        }
+        None
+    }
+}

@@ -16,6 +16,9 @@ readme = "../../README.md"
 # rlib: so the in-crate Rust integration test can link and exercise the same extern fns.
 crate-type = ["cdylib", "rlib"]
 
+[lints]
+workspace = true
+
 [dependencies]
 # Features are forwarded (not hard-coded) so the per-platform cdylib build can drop engines that
 # can't cross-compile for a given target (e.g. LuaJIT for x86_64-apple-darwin) — issue #205.

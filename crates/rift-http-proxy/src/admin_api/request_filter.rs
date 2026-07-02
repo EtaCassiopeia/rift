@@ -5,6 +5,18 @@
 
 use crate::imposter::RecordedRequest;
 
+/// Error parsing a `match=` filter clause. Its `Display` is surfaced verbatim as the
+/// `400 Bad Request` body, so the wording is part of the admin API contract.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum MatchClauseError {
+    #[error("invalid match clause '{0}' (expected header:<Name>=<Value>)")]
+    MissingHeaderValue(String),
+    #[error("invalid match clause '{0}' (empty header name)")]
+    EmptyHeaderName(String),
+    #[error("unsupported match clause '{0}' (expected header:<Name>=<Value> or flow_id=<Value>)")]
+    Unsupported(String),
+}
+
 /// A single parsed `match=` clause.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum MatchClause {
@@ -19,7 +31,9 @@ pub(crate) enum MatchClause {
 /// Returns `Err` for a `match` value that is neither `header:<Name>=<Value>` nor
 /// `flow_id=<Value>`: a malformed filter must not silently fall back to returning
 /// every request, which would cross-contaminate correlated scenarios.
-pub(crate) fn parse_match_clauses(query: Option<&str>) -> Result<Vec<MatchClause>, String> {
+pub(crate) fn parse_match_clauses(
+    query: Option<&str>,
+) -> Result<Vec<MatchClause>, MatchClauseError> {
     let mut clauses = Vec::new();
     let Some(q) = query else {
         return Ok(clauses);
@@ -39,15 +53,13 @@ pub(crate) fn parse_match_clauses(query: Option<&str>) -> Result<Vec<MatchClause
     Ok(clauses)
 }
 
-fn parse_one(value: &str) -> Result<MatchClause, String> {
+fn parse_one(value: &str) -> Result<MatchClause, MatchClauseError> {
     if let Some(rest) = value.strip_prefix("header:") {
-        let (name, header_value) = rest.split_once('=').ok_or_else(|| {
-            format!("invalid match clause '{value}' (expected header:<Name>=<Value>)")
-        })?;
+        let (name, header_value) = rest
+            .split_once('=')
+            .ok_or_else(|| MatchClauseError::MissingHeaderValue(value.to_string()))?;
         if name.is_empty() {
-            return Err(format!(
-                "invalid match clause '{value}' (empty header name)"
-            ));
+            return Err(MatchClauseError::EmptyHeaderName(value.to_string()));
         }
         Ok(MatchClause::Header {
             name: name.to_string(),
@@ -56,9 +68,7 @@ fn parse_one(value: &str) -> Result<MatchClause, String> {
     } else if let Some(flow_id) = value.strip_prefix("flow_id=") {
         Ok(MatchClause::FlowId(flow_id.to_string()))
     } else {
-        Err(format!(
-            "unsupported match clause '{value}' (expected header:<Name>=<Value> or flow_id=<Value>)"
-        ))
+        Err(MatchClauseError::Unsupported(value.to_string()))
     }
 }
 

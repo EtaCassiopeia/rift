@@ -151,9 +151,18 @@ fn collect_imposter_files(path: &Path) -> Vec<PathBuf> {
     files
 }
 
-fn load_imposter_file(path: &Path) -> Result<Value, String> {
-    let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-    serde_json::from_str(&content).map_err(|e| e.to_string())
+/// Error loading and parsing an imposter file for linting.
+#[derive(Debug, thiserror::Error)]
+enum LoadError {
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
+}
+
+fn load_imposter_file(path: &Path) -> Result<Value, LoadError> {
+    let content = std::fs::read_to_string(path)?;
+    Ok(serde_json::from_str(&content)?)
 }
 
 fn check_port_conflicts(port_map: &HashMap<u16, Vec<PathBuf>>, result: &mut LintResult) {

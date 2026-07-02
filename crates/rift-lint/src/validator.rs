@@ -6,12 +6,17 @@ use serde_json::Value;
 use std::collections::HashSet;
 use std::path::Path;
 
+/// A JavaScript syntax error surfaced by the embedded validator.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{0}")]
+pub(crate) struct JsSyntaxError(pub String);
+
 /// JavaScript syntax validator using boa_engine.
 #[cfg(feature = "javascript")]
 mod js_validator {
     use boa_engine::{Context, Source};
 
-    pub fn validate_javascript(script: &str) -> Result<(), String> {
+    pub fn validate_javascript(script: &str) -> Result<(), super::JsSyntaxError> {
         let mut context = Context::default();
 
         // Mountebank uses function expressions that need to be wrapped
@@ -28,7 +33,7 @@ mod js_validator {
             Err(e) => {
                 let err_str = e.to_string();
                 if err_str.contains("SyntaxError") || err_str.contains("unexpected") {
-                    Err(err_str)
+                    Err(super::JsSyntaxError(err_str))
                 } else {
                     Ok(())
                 }
@@ -40,7 +45,7 @@ mod js_validator {
 #[cfg(not(feature = "javascript"))]
 mod js_validator {
     #[allow(dead_code)]
-    pub fn validate_javascript(_script: &str) -> Result<(), String> {
+    pub fn validate_javascript(_script: &str) -> Result<(), super::JsSyntaxError> {
         Ok(())
     }
 }

@@ -125,22 +125,43 @@ pub fn parse_verify_spec(stub: &serde_json::Value) -> Option<Result<VerifySpec, 
     Some(serde_json::from_value(raw.clone()).map_err(|e| format!("invalid _verify: {e}")))
 }
 
+/// A single mismatch between an observed response and a declared [`VerifyExpect`].
+/// `Display` reproduces the human-readable reason shown in the verification report.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ExpectMismatch {
+    #[error("status {actual} != expected {expected}")]
+    Status { actual: u16, expected: u16 },
+    #[error("body {actual:?} != expected {expected:?}")]
+    BodyEquals { actual: String, expected: String },
+    #[error("body {actual:?} does not contain {expected:?}")]
+    BodyContains { actual: String, expected: String },
+}
+
 /// Check an observed (status, body) against a declared expectation. Returns `Ok(())` on a match
-/// or `Err(reason)` describing the first mismatch.
-pub fn check_expect(expect: &VerifyExpect, status: u16, body: &str) -> Result<(), String> {
+/// or `Err` describing the first mismatch.
+pub fn check_expect(expect: &VerifyExpect, status: u16, body: &str) -> Result<(), ExpectMismatch> {
     if let Some(want) = expect.status {
         if status != want {
-            return Err(format!("status {status} != expected {want}"));
+            return Err(ExpectMismatch::Status {
+                actual: status,
+                expected: want,
+            });
         }
     }
     if let Some(want) = &expect.body_equals {
         if body != want {
-            return Err(format!("body {body:?} != expected {want:?}"));
+            return Err(ExpectMismatch::BodyEquals {
+                actual: body.to_string(),
+                expected: want.clone(),
+            });
         }
     }
     if let Some(want) = &expect.body_contains {
         if !body.contains(want.as_str()) {
-            return Err(format!("body {body:?} does not contain {want:?}"));
+            return Err(ExpectMismatch::BodyContains {
+                actual: body.to_string(),
+                expected: want.clone(),
+            });
         }
     }
     Ok(())
@@ -286,7 +307,7 @@ impl<'a> DynamicVerifier<'a> {
             match self.drive_step(port, &step.request).await {
                 Ok((status, body)) => match check_expect(&step.expect, status, &body) {
                     Ok(()) => checks.push(DynCheck::pass(step_label)),
-                    Err(why) => checks.push(DynCheck::fail(step_label, why)),
+                    Err(why) => checks.push(DynCheck::fail(step_label, why.to_string())),
                 },
                 Err(e) => checks.push(DynCheck::fail(step_label, e)),
             }

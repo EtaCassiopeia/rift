@@ -1,7 +1,20 @@
 //! Upstream and connection pool configuration.
 
-use super::protocol::Protocol;
+use super::protocol::{Protocol, ProtocolError};
 use serde::{Deserialize, Serialize};
+
+/// Error validating a named [`Upstream`] URL/protocol.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum UpstreamError {
+    #[error("Invalid URL format (missing scheme): {0}")]
+    InvalidUrl(String),
+    #[error(transparent)]
+    Protocol(#[from] ProtocolError),
+    #[error(
+        "Unsupported protocol '{protocol}' for upstream '{name}'. Currently supported: http, https"
+    )]
+    UnsupportedProtocol { protocol: String, name: String },
+}
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct UpstreamConfig {
@@ -51,26 +64,25 @@ pub struct Upstream {
 impl Upstream {
     /// Parse and extract protocol from URL
     /// Returns the protocol or an error if URL is invalid or protocol is unsupported
-    pub fn get_protocol(&self) -> Result<Protocol, String> {
+    pub fn get_protocol(&self) -> Result<Protocol, UpstreamError> {
         // Parse URL to extract scheme
         let url_parts: Vec<&str> = self.url.splitn(2, "://").collect();
         if url_parts.len() != 2 {
-            return Err(format!("Invalid URL format (missing scheme): {}", self.url));
+            return Err(UpstreamError::InvalidUrl(self.url.clone()));
         }
 
-        Protocol::from_scheme(url_parts[0])
+        Ok(Protocol::from_scheme(url_parts[0])?)
     }
 
     /// Validate that the upstream configuration is valid
-    pub fn validate(&self) -> Result<(), String> {
+    pub fn validate(&self) -> Result<(), UpstreamError> {
         // Check protocol is valid and supported
         let protocol = self.get_protocol()?;
         if !protocol.is_supported() {
-            return Err(format!(
-                "Unsupported protocol '{}' for upstream '{}'. Currently supported: http, https",
-                protocol.as_str(),
-                self.name
-            ));
+            return Err(UpstreamError::UnsupportedProtocol {
+                protocol: protocol.as_str().to_string(),
+                name: self.name.clone(),
+            });
         }
         Ok(())
     }
