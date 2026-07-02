@@ -28,6 +28,8 @@ mod wait;
 #[allow(unused_imports)]
 pub use copy::{CopyBehavior, CopySource, apply_copy_behaviors};
 pub use cycler::{HasRepeatBehavior, ResponseCycler, RuleCycler};
+
+pub mod sequencer;
 #[allow(unused_imports)]
 pub use extraction::{ExtractionMethod, extract_jsonpath, extract_xpath, extract_xpath_with_ns};
 #[allow(unused_imports)]
@@ -35,6 +37,7 @@ pub use lookup::{
     CsvCache, CsvData, CsvDataSource, DataSource, LookupBehavior, LookupKey, apply_lookup_behaviors,
 };
 pub use request::{RequestContext, header_to_title_case};
+pub use sequencer::{LocalSequencer, ResponseSequencer, SequenceKey};
 pub use transform::{
     DecorateError, apply_decorate, apply_shell_transform, is_js_config_decorate,
     rewrite_js_config_to_rhai,

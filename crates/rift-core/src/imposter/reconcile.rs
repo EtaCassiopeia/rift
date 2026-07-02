@@ -94,7 +94,11 @@ pub(crate) enum StubReconcile {
     /// Same stubs, same order — nothing touched.
     Unchanged,
     /// Edited in place; untouched slots kept their cycling state.
-    Patched,
+    Patched {
+        /// Sequencer keys (`stub_key(stub, 0)`) of stubs the patch removed, so the
+        /// manager can fire the per-stub `reset_scope` GC hook (issue #313).
+        removed_keys: Vec<String>,
+    },
     /// More than half the stubs would change — the caller should replace the imposter
     /// wholesale instead of thrashing the stub set in place.
     Degenerate,
@@ -154,7 +158,11 @@ pub(crate) fn reconcile_stub_states(
             None => StubState::new(stub),
         })
         .collect();
-    StubReconcile::Patched
+    let removed_keys = by_key
+        .into_values()
+        .map(|state| stub_key(&state.stub, 0))
+        .collect();
+    StubReconcile::Patched { removed_keys }
 }
 
 /// Content inequality via canonical JSON. A serialization failure on either side counts
@@ -277,7 +285,7 @@ mod tests {
 
         let desired = vec![two_resp("a1", "a2"), one_resp("b"), one_resp("c2")];
         let outcome = reconcile_stub_states(&mut states, desired);
-        assert!(matches!(outcome, StubReconcile::Patched));
+        assert!(matches!(outcome, StubReconcile::Patched { .. }));
         assert_eq!(states.len(), 3);
         assert_eq!(
             next_body(&states[0]),
@@ -300,7 +308,7 @@ mod tests {
 
         let desired = vec![two_resp("b1", "b2"), two_resp("a1", "a2")];
         let outcome = reconcile_stub_states(&mut states, desired);
-        assert!(matches!(outcome, StubReconcile::Patched));
+        assert!(matches!(outcome, StubReconcile::Patched { .. }));
         assert_eq!(next_body(&states[0]), "b2", "moved stub keeps its cursor");
         assert_eq!(next_body(&states[1]), "a2", "moved stub keeps its cursor");
     }
@@ -342,7 +350,7 @@ mod tests {
         updated.id = Some("s1".into());
         let outcome =
             reconcile_stub_states(&mut states, vec![updated, one_resp("b"), one_resp("c")]);
-        assert!(matches!(outcome, StubReconcile::Patched));
+        assert!(matches!(outcome, StubReconcile::Patched { .. }));
         assert_eq!(
             next_body(&states[0]),
             "v2b",
@@ -366,7 +374,7 @@ mod tests {
             one_resp("c"),
         ];
         let outcome = reconcile_stub_states(&mut states, desired);
-        assert!(matches!(outcome, StubReconcile::Patched));
+        assert!(matches!(outcome, StubReconcile::Patched { .. }));
         assert_eq!(states.len(), 4);
         assert_eq!(next_body(&states[0]), "a2");
         assert_eq!(next_body(&states[1]), "new");

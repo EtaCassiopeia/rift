@@ -8,6 +8,7 @@ use super::fault_io::{FaultCell, FaultIo, TcpFaultKind};
 use super::handler::handle_imposter_request_decorated;
 use super::reconcile::{ApplyReport, ImposterEvent, ImposterEventListener, StubReconcile};
 use super::types::{ImposterConfig, ImposterError, Stub};
+use crate::behaviors::ResponseSequencer;
 use crate::extensions::decorate::ResponseDecorator;
 use crate::extensions::flow_state::FlowStoreProvider;
 use hyper::server::conn::http1;
@@ -104,6 +105,8 @@ pub struct ImposterManager {
     response_decorator: Option<Arc<dyn ResponseDecorator>>,
     /// Embedder hook to supply a custom flow store per imposter (issue #312)
     flow_store_provider: Option<Arc<dyn FlowStoreProvider>>,
+    /// Pluggable response-cursor backend (issue #313); None = embedded per-stub cycler.
+    sequencer: Option<Arc<dyn ResponseSequencer>>,
 }
 
 impl ImposterManager {
@@ -123,6 +126,7 @@ impl ImposterManager {
             event_listener: None,
             response_decorator: None,
             flow_store_provider: None,
+            sequencer: None,
         }
     }
 
@@ -165,6 +169,20 @@ impl ImposterManager {
     #[must_use]
     pub fn with_flow_store_provider(mut self, provider: Arc<dyn FlowStoreProvider>) -> Self {
         self.flow_store_provider = Some(provider);
+        self
+    }
+
+    /// Register a pluggable response-cursor backend (issue #313), consulted for every
+    /// response-cycling decision with a full `SequenceKey` and materialized repeats.
+    /// Without one, imposters keep the embedded per-stub cycler (today's hot path,
+    /// untouched). `reset_scope` fires on stub delete — direct or via an `apply_config`
+    /// patch — (that stub's key), bulk stub replace, and imposter teardown (port-wide,
+    /// the GC hook). A single in-place stub replace deliberately does NOT reset: the slot
+    /// survives, so slot-keyed cursors keep cycling; a `stub_key`-keyed backend whose key
+    /// changed with the content keeps the old key's cursor until port teardown reclaims it.
+    #[must_use]
+    pub fn with_sequencer(mut self, sequencer: Arc<dyn ResponseSequencer>) -> Self {
+        self.sequencer = Some(sequencer);
         self
     }
 
@@ -273,7 +291,11 @@ impl ImposterManager {
 
         info!("Imposter bound to {}:{}", bind_host, port);
         // Create imposter
-        let mut imposter = Imposter::new_with_provider(config, self.flow_store_provider.as_ref());
+        let mut imposter = Imposter::new_with_hooks(
+            config,
+            self.flow_store_provider.as_ref(),
+            self.sequencer.clone(),
+        );
 
         // Create shutdown channel for this imposter
         let (shutdown_tx, _) = broadcast::channel(1);
@@ -439,6 +461,10 @@ impl ImposterManager {
         #[cfg(feature = "javascript")]
         crate::scripting::clear_imposter_state(port);
 
+        if let Some(sequencer) = &self.sequencer {
+            sequencer.reset_scope(port, None);
+        }
+
         info!("Imposter on port {} deleted", port);
         self.remove_persisted_imposter(port);
         Ok(imposter.config.clone())
@@ -596,7 +622,14 @@ impl ImposterManager {
 
             match existing.reconcile_stubs(config.stubs.clone()) {
                 StubReconcile::Unchanged => {}
-                StubReconcile::Patched => {
+                StubReconcile::Patched { removed_keys } => {
+                    // apply_config removals are stub deletes: fire the sequencer GC hook
+                    // per removed stub, same as delete_stub (issue #313).
+                    if let Some(sequencer) = &self.sequencer {
+                        for key in &removed_keys {
+                            sequencer.reset_scope(port, Some(key));
+                        }
+                    }
                     report.stub_patched.push(port);
                     self.emit(ImposterEvent::StubsChanged(port));
                     // The in-memory patch stands either way; a datadir write failure must
@@ -696,6 +729,9 @@ impl ImposterManager {
         if !imposter.delete_stub_by_id(id) {
             return Err(ImposterError::StubNotFound(id.to_string()));
         }
+        if let Some(sequencer) = &self.sequencer {
+            sequencer.reset_scope(port, Some(id));
+        }
         self.emit(ImposterEvent::StubsChanged(port));
         self.persist_imposter_checked(&imposter).await
     }
@@ -734,7 +770,18 @@ impl ImposterManager {
     /// Delete a stub
     pub async fn delete_stub(&self, port: u16, index: usize) -> Result<(), ImposterError> {
         let imposter = self.get_imposter(port)?;
+        // Resolve the stub's stable key before it is gone, for the sequencer GC hook.
+        let deleted_key = if self.sequencer.is_some() {
+            imposter
+                .get_stub(index)
+                .map(|stub| crate::imposter::reconcile::stub_key(&stub, 0))
+        } else {
+            None
+        };
         imposter.delete_stub(index)?;
+        if let (Some(sequencer), Some(key)) = (&self.sequencer, deleted_key) {
+            sequencer.reset_scope(port, Some(&key));
+        }
         self.emit(ImposterEvent::StubsChanged(port));
         self.persist_imposter_checked(&imposter).await
     }
@@ -743,6 +790,9 @@ impl ImposterManager {
     pub async fn replace_stubs(&self, port: u16, stubs: Vec<Stub>) -> Result<(), ImposterError> {
         let imposter = self.get_imposter(port)?;
         imposter.replace_stubs(stubs);
+        if let Some(sequencer) = &self.sequencer {
+            sequencer.reset_scope(port, None);
+        }
         self.emit(ImposterEvent::StubsChanged(port));
         self.persist_imposter_checked(&imposter).await
     }
@@ -1827,6 +1877,415 @@ mod tests {
                 imposter.flow_get("f", "k").expect("get"),
                 Some(json!("v")),
                 "None provider must fall through to the configured flowState store, not NoOp"
+            );
+
+            manager.delete_all().await;
+        }
+    }
+
+    // =========================================================================
+    // Issue #313: pluggable ResponseSequencer
+    // =========================================================================
+    mod response_sequencer {
+        use super::*;
+        use crate::behaviors::sequencer::{LocalSequencer, ResponseSequencer, SequenceKey};
+        use crate::extensions::decorate::BackendUnavailable;
+
+        type NextCall = (u16, u64, String, String, Vec<u32>);
+
+        fn recorded(key: &SequenceKey<'_>, repeats: &[u32]) -> NextCall {
+            (
+                key.port,
+                key.slot,
+                key.stub_key.to_string(),
+                key.scope.to_string(),
+                repeats.to_vec(),
+            )
+        }
+
+        /// Delegates to LocalSequencer while recording every next() key and reset_scope().
+        #[derive(Default)]
+        struct RecordingSequencer {
+            inner: LocalSequencer,
+            nexts: Mutex<Vec<NextCall>>,
+            peeks: Mutex<Vec<NextCall>>,
+            resets: Mutex<Vec<(u16, Option<String>)>>,
+        }
+
+        impl ResponseSequencer for RecordingSequencer {
+            fn next(
+                &self,
+                key: SequenceKey<'_>,
+                response_count: usize,
+                repeats: &[u32],
+            ) -> anyhow::Result<usize> {
+                self.nexts.lock().push(recorded(&key, repeats));
+                self.inner.next(key, response_count, repeats)
+            }
+            fn peek(
+                &self,
+                key: SequenceKey<'_>,
+                response_count: usize,
+                repeats: &[u32],
+            ) -> anyhow::Result<usize> {
+                self.peeks.lock().push(recorded(&key, repeats));
+                self.inner.peek(key, response_count, repeats)
+            }
+            fn reset_scope(&self, port: u16, stub_key: Option<&str>) {
+                self.resets
+                    .lock()
+                    .push((port, stub_key.map(str::to_string)));
+                self.inner.reset_scope(port, stub_key);
+            }
+        }
+
+        struct FailingSequencer;
+        impl ResponseSequencer for FailingSequencer {
+            fn next(&self, _key: SequenceKey<'_>, _n: usize, _r: &[u32]) -> anyhow::Result<usize> {
+                Err(anyhow::Error::new(BackendUnavailable {
+                    feature: "sequencer",
+                    detail: "induced".to_string(),
+                }))
+            }
+            fn peek(&self, _key: SequenceKey<'_>, _n: usize, _r: &[u32]) -> anyhow::Result<usize> {
+                Err(anyhow::Error::new(BackendUnavailable {
+                    feature: "sequencer",
+                    detail: "induced".to_string(),
+                }))
+            }
+            fn reset_scope(&self, _port: u16, _stub_key: Option<&str>) {}
+        }
+
+        fn manager_with_recorder() -> (Arc<RecordingSequencer>, ImposterManager) {
+            let recorder = Arc::new(RecordingSequencer::default());
+            let manager = ImposterManager::new()
+                .with_sequencer(recorder.clone() as Arc<dyn ResponseSequencer>);
+            (recorder, manager)
+        }
+
+        fn cycling_stub_json() -> serde_json::Value {
+            json!({
+                "id": "s1",
+                "predicates": [{"equals": {"path": "/cycle"}}],
+                "responses": [
+                    {"is": {"statusCode": 200, "body": "one"},
+                     "_behaviors": {"repeat": 2}},
+                    {"is": {"statusCode": 200, "body": "two"}}
+                ]
+            })
+        }
+
+        // AC2: an injected sequencer receives the correct key parts and repeats, and its
+        // decisions drive the served responses (repeat honored through the real pipeline).
+        #[tokio::test]
+        async fn sequencer_receives_keys_and_drives_cycling() {
+            let (recorder, manager) = manager_with_recorder();
+            manager
+                .create_imposter(imposter_cfg(json!({
+                    "protocol": "http", "port": 19520,
+                    "stubs": [cycling_stub_json()]
+                })))
+                .await
+                .expect("create");
+
+            let mut bodies = Vec::new();
+            for _ in 0..3 {
+                bodies.push(
+                    reqwest::get("http://127.0.0.1:19520/cycle")
+                        .await
+                        .expect("request")
+                        .text()
+                        .await
+                        .expect("body"),
+                );
+            }
+            assert_eq!(
+                bodies,
+                vec!["one", "one", "two"],
+                "sequencer decisions must honor per-response repeats"
+            );
+
+            let nexts = recorder.nexts.lock().clone();
+            assert!(!nexts.is_empty(), "sequencer was consulted");
+            let (port, slot, stub_key, scope, repeats) = nexts[0].clone();
+            assert_eq!(port, 19520);
+            assert_eq!(stub_key, "s1", "explicit stub id is the stable key");
+            assert_eq!(scope, "", "global stub has an empty scope");
+            assert_eq!(repeats, vec![2, 1], "materialized per-response repeats");
+            assert!(
+                nexts.iter().all(|(_, s, ..)| *s == slot),
+                "slot token stable across requests"
+            );
+            let peeks = recorder.peeks.lock().clone();
+            assert!(
+                !peeks.is_empty() && peeks.iter().all(|(_, s, ..)| *s == slot),
+                "response-type dispatch peeks route through the sequencer with the same slot"
+            );
+
+            manager.delete_all().await;
+        }
+
+        // AC2/AC1: an in-place replace keeps the slot token (mirroring the embedded
+        // preserve-on-replace), so a slot-keyed backend keeps its cursor position.
+        #[tokio::test]
+        async fn slot_survives_in_place_replace() {
+            let (recorder, manager) = manager_with_recorder();
+            manager
+                .create_imposter(imposter_cfg(json!({
+                    "protocol": "http", "port": 19521,
+                    "stubs": [cycling_stub_json()]
+                })))
+                .await
+                .expect("create");
+
+            let _ = reqwest::get("http://127.0.0.1:19521/cycle")
+                .await
+                .expect("request");
+            let slot_before = recorder.nexts.lock().last().expect("recorded").1;
+
+            let replacement: Stub = serde_json::from_value(cycling_stub_json()).expect("stub");
+            manager
+                .replace_stub_by_id(19521, "s1", replacement)
+                .await
+                .expect("replace");
+
+            let _ = reqwest::get("http://127.0.0.1:19521/cycle")
+                .await
+                .expect("request");
+            let slot_after = recorder.nexts.lock().last().expect("recorded").1;
+            assert_eq!(
+                slot_before, slot_after,
+                "in-place replace must keep the slot token"
+            );
+
+            manager.delete_all().await;
+        }
+
+        // AC2: reset_scope fires per stub on delete, and port-wide on bulk replace and
+        // imposter teardown (the GC hook).
+        #[tokio::test]
+        async fn reset_scope_fires_on_delete_bulk_replace_and_teardown() {
+            let (recorder, manager) = manager_with_recorder();
+            manager
+                .create_imposter(imposter_cfg(json!({
+                    "protocol": "http", "port": 19522,
+                    "stubs": [cycling_stub_json(), stub_json("other")]
+                })))
+                .await
+                .expect("create");
+
+            manager
+                .delete_stub_by_id(19522, "s1")
+                .await
+                .expect("delete by id");
+            assert!(
+                recorder
+                    .resets
+                    .lock()
+                    .contains(&(19522, Some("s1".to_string()))),
+                "stub delete resets that stub's cursors: {:?}",
+                recorder.resets.lock()
+            );
+
+            let fresh: Vec<Stub> = vec![serde_json::from_value(stub_json("fresh")).expect("stub")];
+            manager
+                .replace_stubs(19522, fresh)
+                .await
+                .expect("replace all");
+            assert!(
+                recorder.resets.lock().contains(&(19522, None)),
+                "bulk replace resets the whole port"
+            );
+
+            recorder.resets.lock().clear();
+            manager.delete_imposter(19522).await.expect("teardown");
+            assert!(
+                recorder.resets.lock().contains(&(19522, None)),
+                "imposter teardown is the port-wide GC hook"
+            );
+        }
+
+        // A failing sequencer surfaces as the structured backend error (#318), never a
+        // silent wrong response.
+        #[tokio::test]
+        async fn failing_sequencer_surfaces_structured_503() {
+            let manager = ImposterManager::new()
+                .with_sequencer(Arc::new(FailingSequencer) as Arc<dyn ResponseSequencer>);
+            manager
+                .create_imposter(imposter_cfg(json!({
+                    "protocol": "http", "port": 19523,
+                    "stubs": [cycling_stub_json()]
+                })))
+                .await
+                .expect("create");
+
+            let resp = reqwest::get("http://127.0.0.1:19523/cycle")
+                .await
+                .expect("request");
+            assert_eq!(resp.status(), 503, "sequencer outage is a structured 503");
+            let body: serde_json::Value = resp.json().await.expect("json");
+            assert_eq!(body["error"], "backendUnavailable");
+            assert_eq!(body["feature"], "sequencer");
+
+            manager.delete_all().await;
+        }
+
+        // Scope (issue #223 space) is carried in the key: a space-scoped stub reports its
+        // space, exercised directly at the imposter layer (the HTTP gate needs a matching
+        // flow id, which is orthogonal here).
+        #[tokio::test]
+        async fn space_scoped_stub_reports_scope() {
+            let (recorder, manager) = manager_with_recorder();
+            manager
+                .create_imposter(imposter_cfg(json!({
+                    "protocol": "http", "port": 19524,
+                    "stubs": []
+                })))
+                .await
+                .expect("create");
+
+            let spaced: Stub = serde_json::from_value(json!({
+                "space": "flow-9",
+                "predicates": [{"equals": {"path": "/sp"}}],
+                "responses": [{"is": {"statusCode": 200, "body": "sp"}}]
+            }))
+            .expect("stub");
+            manager.add_stub(19524, spaced, None).await.expect("add");
+
+            let imposter = manager.get_imposter(19524).unwrap();
+            let stub_state = imposter.stubs.read()[0].clone();
+            let _ = imposter
+                .execute_stub_with_rift(&stub_state)
+                .expect("sequencer ok");
+
+            let nexts = recorder.nexts.lock().clone();
+            assert_eq!(nexts.last().expect("recorded").3, "flow-9");
+
+            manager.delete_all().await;
+        }
+
+        // A misbehaving custom sequencer returning an out-of-range index is a loud 500
+        // (contract violation), never a silent fall-through to the default response.
+        struct OobSequencer;
+        impl ResponseSequencer for OobSequencer {
+            fn next(&self, _k: SequenceKey<'_>, _n: usize, _r: &[u32]) -> anyhow::Result<usize> {
+                Ok(usize::MAX)
+            }
+            fn peek(&self, _k: SequenceKey<'_>, _n: usize, _r: &[u32]) -> anyhow::Result<usize> {
+                Ok(0)
+            }
+            fn reset_scope(&self, _port: u16, _stub_key: Option<&str>) {}
+        }
+
+        #[tokio::test]
+        async fn out_of_range_sequencer_index_surfaces_500() {
+            let manager = ImposterManager::new()
+                .with_sequencer(Arc::new(OobSequencer) as Arc<dyn ResponseSequencer>);
+            manager
+                .create_imposter(imposter_cfg(json!({
+                    "protocol": "http", "port": 19527,
+                    "stubs": [cycling_stub_json()]
+                })))
+                .await
+                .expect("create");
+
+            let resp = reqwest::get("http://127.0.0.1:19527/cycle")
+                .await
+                .expect("request");
+            assert_eq!(
+                resp.status(),
+                500,
+                "contract violation is a loud backend error"
+            );
+
+            manager.delete_all().await;
+        }
+
+        // An id-less stub keys as the stable content key (~hash#0), and delete-by-INDEX
+        // resolves and resets that same key.
+        #[tokio::test]
+        async fn idless_stub_content_key_and_delete_by_index_reset() {
+            let (recorder, manager) = manager_with_recorder();
+            manager
+                .create_imposter(imposter_cfg(json!({
+                    "protocol": "http", "port": 19525,
+                    "stubs": [{
+                        "predicates": [{"equals": {"path": "/anon"}}],
+                        "responses": [{"is": {"statusCode": 200, "body": "anon"}}]
+                    }]
+                })))
+                .await
+                .expect("create");
+
+            let _ = reqwest::get("http://127.0.0.1:19525/anon")
+                .await
+                .expect("request");
+            let key_used = recorder.nexts.lock().last().expect("recorded").2.clone();
+            assert!(
+                key_used.starts_with('~') && key_used.ends_with("#0"),
+                "id-less stub keys as a content key, got {key_used}"
+            );
+
+            manager
+                .delete_stub(19525, 0)
+                .await
+                .expect("delete by index");
+            assert!(
+                recorder
+                    .resets
+                    .lock()
+                    .contains(&(19525, Some(key_used.clone()))),
+                "delete-by-index resets the same content key: {:?}",
+                recorder.resets.lock()
+            );
+
+            manager.delete_all().await;
+        }
+
+        // apply_config patches are stub lifecycle too: a removed stub fires the per-stub
+        // GC hook, and an untouched sibling keeps its slot (cursor survives the patch).
+        #[tokio::test]
+        async fn apply_config_patch_resets_removed_and_preserves_sibling_slot() {
+            let (recorder, manager) = manager_with_recorder();
+            let initial = imposter_cfg(json!({
+                "protocol": "http", "port": 19526,
+                "stubs": [
+                    cycling_stub_json(),
+                    {"id": "doomed",
+                     "predicates": [{"equals": {"path": "/doomed"}}],
+                     "responses": [{"is": {"statusCode": 200, "body": "bye"}}]}
+                ]
+            }));
+            manager
+                .apply_config(vec![initial.clone()])
+                .await
+                .expect("create via apply");
+
+            let _ = reqwest::get("http://127.0.0.1:19526/cycle")
+                .await
+                .expect("request");
+            let slot_before = recorder.nexts.lock().last().expect("recorded").1;
+
+            let mut patched = initial;
+            patched.stubs.truncate(1);
+            manager.apply_config(vec![patched]).await.expect("patch");
+
+            assert!(
+                recorder
+                    .resets
+                    .lock()
+                    .contains(&(19526, Some("doomed".to_string()))),
+                "apply_config removal fires the per-stub GC hook: {:?}",
+                recorder.resets.lock()
+            );
+
+            let _ = reqwest::get("http://127.0.0.1:19526/cycle")
+                .await
+                .expect("request");
+            let slot_after = recorder.nexts.lock().last().expect("recorded").1;
+            assert_eq!(
+                slot_before, slot_after,
+                "an untouched sibling keeps its slot across an apply_config patch"
             );
 
             manager.delete_all().await;
