@@ -1598,6 +1598,39 @@ mod tests {
         );
     }
 
+    // Issue #306: a bare jsonpath selector (no leading `$`) must match, just like
+    // the rooted form `$.searchValue`.
+    #[test]
+    fn test_jsonpath_bare_selector_predicate_matches() {
+        let fields: HashMap<String, serde_json::Value> =
+            [("body".to_string(), json!("v"))].into_iter().collect();
+        let params = PredicateParameters {
+            selector: Some(PredicateSelector::JsonPath {
+                selector: "searchValue".to_string(),
+            }),
+            ..PredicateParameters::default()
+        };
+        let pred = make_predicate_with_params(PredicateOperation::Equals(fields), params);
+
+        let result = predicate_matches(
+            &pred,
+            "POST",
+            "/x",
+            None,
+            &empty_headers(),
+            Some(r#"{"searchValue":"v"}"#),
+            None,
+            None,
+            None,
+            0,
+        );
+
+        assert!(
+            result,
+            "bare jsonpath selector should match like $.searchValue"
+        );
+    }
+
     // =========================================================================
     // inject predicate tests (require javascript feature)
     // =========================================================================
