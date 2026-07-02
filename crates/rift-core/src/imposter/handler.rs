@@ -271,7 +271,11 @@ async fn handle_request_inner(
         }
 
         // Check if this is a proxy response
-        if let Some(proxy_config) = imposter.get_proxy_response(&stub_state) {
+        let proxy_config = match imposter.get_proxy_response(&stub_state) {
+            Ok(config) => config,
+            Err(e) => return Ok(backend_error_response(&e)),
+        };
+        if let Some(proxy_config) = proxy_config {
             debug!("Handling proxy request to {}", proxy_config.to);
             match imposter
                 .handle_proxy_request(
@@ -285,7 +289,9 @@ async fn handle_request_inner(
             {
                 Ok((status, response_headers, body, latency)) => {
                     // Advance the cycler for this proxy response
-                    imposter.advance_cycler_for_proxy(&stub_state);
+                    if let Err(e) = imposter.advance_cycler_for_proxy(&stub_state) {
+                        return Ok(backend_error_response(&e));
+                    }
 
                     let mut response = Response::builder().status(status);
 
@@ -324,7 +330,11 @@ async fn handle_request_inner(
 
         // Check if this is an inject response (JavaScript function)
         #[cfg(feature = "javascript")]
-        if let Some(inject_fn) = imposter.get_inject_response(&stub_state) {
+        let inject_fn = match imposter.get_inject_response(&stub_state) {
+            Ok(inject) => inject,
+            Err(e) => return Ok(backend_error_response(&e)),
+        };
+        if let Some(inject_fn) = inject_fn {
             debug!("Handling inject response");
 
             // Build request for inject function
@@ -343,7 +353,9 @@ async fn handle_request_inner(
             ) {
                 Ok(inject_response) => {
                     // Advance the cycler for this inject response
-                    imposter.advance_cycler_for_inject(&stub_state);
+                    if let Err(e) = imposter.advance_cycler_for_inject(&stub_state) {
+                        return Ok(backend_error_response(&e));
+                    }
 
                     let mut response = Response::builder().status(inject_response.status_code);
 
@@ -375,7 +387,11 @@ async fn handle_request_inner(
         }
 
         // Check if this is a RiftScript response (_rift.script)
-        if let Some(script_config) = imposter.get_rift_script_response(&stub_state) {
+        let script_config = match imposter.get_rift_script_response(&stub_state) {
+            Ok(config) => config,
+            Err(e) => return Ok(backend_error_response(&e)),
+        };
+        if let Some(script_config) = script_config {
             debug!(
                 "Handling Rift script response (engine: {})",
                 script_config.engine
@@ -420,7 +436,9 @@ async fn handle_request_inner(
                     headers,
                     ..
                 }) => {
-                    imposter.advance_cycler_for_rift_script(&stub_state);
+                    if let Err(e) = imposter.advance_cycler_for_rift_script(&stub_state) {
+                        return Ok(backend_error_response(&e));
+                    }
 
                     let mut response = Response::builder().status(status);
                     for (k, v) in &headers {
@@ -441,7 +459,9 @@ async fn handle_request_inner(
                 Ok(FaultDecision::Latency { duration_ms, .. }) => {
                     // Apply latency then return 200 OK
                     tokio::time::sleep(Duration::from_millis(duration_ms)).await;
-                    imposter.advance_cycler_for_rift_script(&stub_state);
+                    if let Err(e) = imposter.advance_cycler_for_rift_script(&stub_state) {
+                        return Ok(backend_error_response(&e));
+                    }
 
                     return Ok(build_response_with_headers(
                         StatusCode::OK,
@@ -455,7 +475,9 @@ async fn handle_request_inner(
                 }
                 Ok(FaultDecision::None) => {
                     // Script says no fault - return 200 OK
-                    imposter.advance_cycler_for_rift_script(&stub_state);
+                    if let Err(e) = imposter.advance_cycler_for_rift_script(&stub_state) {
+                        return Ok(backend_error_response(&e));
+                    }
 
                     return Ok(build_response_with_headers(
                         StatusCode::OK,
@@ -485,8 +507,10 @@ async fn handle_request_inner(
             rift_ext,
             response_mode,
             is_fault,
-        )) = imposter.execute_stub_with_rift(&stub_state)
-        {
+        )) = match imposter.execute_stub_with_rift(&stub_state) {
+            Ok(executed) => executed,
+            Err(e) => return Ok(backend_error_response(&e)),
+        } {
             // Handle faults - simulate connection errors
             if is_fault {
                 return handle_fault_response(&body);
@@ -830,7 +854,10 @@ fn handle_debug_request(
     };
     let match_result = if let Some((stub_state, stub_index)) = matched {
         // Match found
-        let response_preview = imposter.get_response_preview(&stub_state);
+        let response_preview = match imposter.get_response_preview(&stub_state) {
+            Ok(preview) => preview,
+            Err(e) => return Ok(backend_error_response(&e)),
+        };
         DebugMatchResult {
             matched: true,
             stub_index: Some(stub_index),

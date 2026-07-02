@@ -28,6 +28,9 @@ mod wait;
 #[allow(unused_imports)]
 pub use copy::{CopyBehavior, CopySource, apply_copy_behaviors};
 pub use cycler::{HasRepeatBehavior, ResponseCycler, RuleCycler};
+
+pub mod sequencer;
+pub use sequencer::{LocalSequencer, ResponseSequencer, SequenceKey};
 #[allow(unused_imports)]
 pub use extraction::{ExtractionMethod, extract_jsonpath, extract_xpath, extract_xpath_with_ns};
 #[allow(unused_imports)]

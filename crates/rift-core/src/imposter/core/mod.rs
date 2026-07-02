@@ -56,10 +56,17 @@ fn get_http_client() -> &'static reqwest::Client {
     })
 }
 
+/// Process-wide slot mint: globally unique tokens are trivially per-imposter unique, and a
+/// global counter avoids threading imposter context into every construction site.
+static NEXT_STUB_SLOT: AtomicU64 = AtomicU64::new(1);
+
 #[derive(Debug, Clone)]
 pub struct StubState {
     pub(crate) stub: Stub,
     cycler: Arc<RuleCycler>,
+    /// Slot token for sequencer keying (issue #313): minted at insertion, preserved by
+    /// in-place replaces (which keep the StubState), dropped with the slot.
+    pub(crate) slot: u64,
 }
 
 impl StubState {
@@ -68,6 +75,7 @@ impl StubState {
         Self {
             stub,
             cycler: Arc::new(RuleCycler::new()),
+            slot: NEXT_STUB_SLOT.fetch_add(1, Ordering::Relaxed),
         }
     }
 
@@ -112,6 +120,8 @@ pub struct Imposter {
     pub shutdown_tx: Option<broadcast::Sender<()>>,
     /// Flow store for Rift extensions (stateful scripting)
     pub flow_store: Arc<dyn FlowStore>,
+    /// Pluggable response-cursor backend (issue #313); None = embedded per-stub cycler.
+    pub(crate) sequencer: Option<Arc<dyn crate::behaviors::ResponseSequencer>>,
 }
 
 impl Imposter {
@@ -125,6 +135,16 @@ impl Imposter {
     pub fn new_with_provider(
         config: ImposterConfig,
         provider: Option<&Arc<dyn crate::extensions::flow_state::FlowStoreProvider>>,
+    ) -> Self {
+        Self::new_with_hooks(config, provider, None)
+    }
+
+    /// Create a new imposter with all embedder hooks: the flow-store `provider` (#312) and
+    /// a pluggable response `sequencer` (#313; None = embedded per-stub cycler).
+    pub fn new_with_hooks(
+        config: ImposterConfig,
+        provider: Option<&Arc<dyn crate::extensions::flow_state::FlowStoreProvider>>,
+        sequencer: Option<Arc<dyn crate::behaviors::ResponseSequencer>>,
     ) -> Self {
         let stubs: Vec<StubState> = config
             .stubs
@@ -149,6 +169,7 @@ impl Imposter {
             created_at: chrono::Utc::now(),
             shutdown_tx: None,
             flow_store,
+            sequencer,
         }
     }
 
