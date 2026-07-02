@@ -2,6 +2,7 @@
 
 use regex::RegexBuilder;
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 
 /// Regex matching options (Mountebank-compatible)
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -59,13 +60,42 @@ impl ExtractionMethod {
     }
 }
 
+/// Normalize a JSONPath selector to an RFC 9535 rooted path.
+///
+/// serde_json_path requires the leading root identifier `$`, but Mountebank (and
+/// the recorded predicates we ingest) accept bare selectors such as `searchValue`
+/// or `user.name`. Treat a bare selector as root-relative: prepend `$` when it
+/// already begins with a segment (`[0]`, `['k']`) and `$.` otherwise.
+///
+/// Surrounding whitespace is trimmed uniformly so a rooted and a bare selector
+/// are handled the same way regardless of stray padding.
+fn normalize_jsonpath(path: &str) -> Cow<'_, str> {
+    let trimmed = path.trim();
+    let prefix = if trimmed.starts_with('$') {
+        ""
+    } else if trimmed.starts_with('[') {
+        "$"
+    } else {
+        "$."
+    };
+    // Borrow only when nothing needs changing: already rooted and no stray padding.
+    if prefix.is_empty() && trimmed.len() == path.len() {
+        Cow::Borrowed(path)
+    } else {
+        Cow::Owned(format!("{prefix}{trimmed}"))
+    }
+}
+
 /// Extract value using JSONPath (RFC 9535 compliant via serde_json_path)
 /// Used by copy behaviors and predicate jsonpath parameter.
 /// Supports the full JSONPath spec: wildcards, descendant segments, filters,
 /// negative indices, selector sequences, bracket notation, etc.
+/// Bare selectors (no leading `$`) are treated as root-relative for
+/// Mountebank compatibility.
 pub fn extract_jsonpath(json_str: &str, path: &str) -> Option<String> {
     let json: serde_json::Value = serde_json::from_str(json_str).ok()?;
-    let json_path = serde_json_path::JsonPath::parse(path).ok()?;
+    let rooted = normalize_jsonpath(path);
+    let json_path = serde_json_path::JsonPath::parse(&rooted).ok()?;
     let node_list = json_path.query(&json);
 
     // Return the first matched node as a string
@@ -315,6 +345,73 @@ mod tests {
         assert_eq!(
             extract_jsonpath(json, "$.items[1]"),
             Some("second".to_string())
+        );
+    }
+
+    // Issue #306: bare selectors (no leading `$`) are treated as root-relative,
+    // matching Mountebank behaviour.
+    #[test]
+    fn test_jsonpath_bare_selector_root_relative() {
+        let json = r#"{"searchValue": "v"}"#;
+        assert_eq!(extract_jsonpath(json, "searchValue"), Some("v".to_string()));
+        // Equivalent to the rooted form.
+        assert_eq!(
+            extract_jsonpath(json, "searchValue"),
+            extract_jsonpath(json, "$.searchValue")
+        );
+    }
+
+    #[test]
+    fn test_jsonpath_bare_nested_selector() {
+        let json = r#"{"user": {"name": "Alice", "age": 30}}"#;
+        assert_eq!(
+            extract_jsonpath(json, "user.name"),
+            Some("Alice".to_string())
+        );
+        assert_eq!(extract_jsonpath(json, "user.age"), Some("30".to_string()));
+        // Equivalent to the rooted form.
+        assert_eq!(
+            extract_jsonpath(json, "user.name"),
+            extract_jsonpath(json, "$.user.name")
+        );
+    }
+
+    #[test]
+    fn test_jsonpath_selector_whitespace_trimmed() {
+        // Stray padding is trimmed for both bare and rooted selectors.
+        let json = r#"{"searchValue": "v"}"#;
+        assert_eq!(
+            extract_jsonpath(json, "  searchValue  "),
+            Some("v".to_string())
+        );
+        assert_eq!(
+            extract_jsonpath(json, "  $.searchValue  "),
+            Some("v".to_string())
+        );
+    }
+
+    #[test]
+    fn test_jsonpath_bare_bracket_selector() {
+        // Leading-bracket bare selectors must get `$` (not `$.`) prepended.
+        let json = r#"{"items": ["first", "second"]}"#;
+        assert_eq!(
+            extract_jsonpath(json, "items[0]"),
+            Some("first".to_string())
+        );
+        let json = r#"{"searchValue": "v"}"#;
+        assert_eq!(
+            extract_jsonpath(json, "['searchValue']"),
+            Some("v".to_string())
+        );
+    }
+
+    #[test]
+    fn test_jsonpath_rooted_selector_unchanged() {
+        // The rooted form must keep working exactly as before.
+        let json = r#"{"searchValue": "v"}"#;
+        assert_eq!(
+            extract_jsonpath(json, "$.searchValue"),
+            Some("v".to_string())
         );
     }
 
