@@ -10,16 +10,63 @@ use clap::Parser;
 use rift_lint::{LintIssue, LintOptions, LintResult, Severity, lint_file};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
-// ANSI color codes
-const GREEN: &str = "\x1b[32m";
-const RED: &str = "\x1b[31m";
-const YELLOW: &str = "\x1b[33m";
-const CYAN: &str = "\x1b[36m";
-const BOLD: &str = "\x1b[1m";
-const DIM: &str = "\x1b[2m";
-const RESET: &str = "\x1b[0m";
+/// Runtime ANSI color codes. Resolved once in `main` from `NO_COLOR`/TTY/json-mode via
+/// `Palette::detect`, then read anywhere via `palette()`. Fields are empty strings when color is
+/// disabled, so `{green}`-style interpolation becomes a no-op instead of requiring call-site branching.
+#[derive(Debug, Clone, Copy)]
+struct Palette {
+    green: &'static str,
+    red: &'static str,
+    yellow: &'static str,
+    cyan: &'static str,
+    bold: &'static str,
+    dim: &'static str,
+    reset: &'static str,
+}
+
+impl Palette {
+    const PLAIN: Palette = Palette {
+        green: "",
+        red: "",
+        yellow: "",
+        cyan: "",
+        bold: "",
+        dim: "",
+        reset: "",
+    };
+
+    /// Color is on only for an interactive text-mode session: never in `-o json` (stdout must be
+    /// pure JSON), never with `NO_COLOR` set, and never when stdout is piped/redirected.
+    fn detect(json_mode: bool) -> Self {
+        let color =
+            !json_mode && std::env::var_os("NO_COLOR").is_none() && std::io::stdout().is_terminal();
+        if color {
+            Palette {
+                green: "\x1b[32m",
+                red: "\x1b[31m",
+                yellow: "\x1b[33m",
+                cyan: "\x1b[36m",
+                bold: "\x1b[1m",
+                dim: "\x1b[2m",
+                reset: "\x1b[0m",
+            }
+        } else {
+            Palette::PLAIN
+        }
+    }
+}
+
+static PALETTE: OnceLock<Palette> = OnceLock::new();
+
+/// The process-wide palette, set once in `main` before anything is printed. Falls back to plain
+/// (no color) rather than panicking if read before `main` initializes it.
+fn palette() -> Palette {
+    PALETTE.get().copied().unwrap_or(Palette::PLAIN)
+}
 
 /// Rift Imposter Configuration Linter
 #[derive(Parser, Debug)]
@@ -51,11 +98,33 @@ struct Args {
     strict: bool,
 }
 
+/// Print to stdout in text mode, or stderr in json mode. In `-o json`, stdout is reserved
+/// exclusively for the final `print_results_json` payload — every other message is decoration.
+fn emit(json_mode: bool, msg: &str) {
+    if json_mode {
+        eprintln!("{msg}");
+    } else {
+        println!("{msg}");
+    }
+}
+
 fn main() {
     let args = Args::parse();
+    let json_mode = args.output == "json";
+    let _ = PALETTE.set(Palette::detect(json_mode));
+    let Palette {
+        yellow,
+        cyan,
+        bold,
+        dim,
+        reset,
+        ..
+    } = palette();
 
-    println!("{BOLD}{CYAN}Rift Imposter Linter{RESET}");
-    println!("{DIM}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{RESET}");
+    // The banner and scan progress are decoration, not data: always on stderr so stdout stays
+    // clean in both json mode (pure JSON) and piped text mode (no banner noise).
+    eprintln!("{bold}{cyan}Rift Imposter Linter{reset}");
+    eprintln!("{dim}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{reset}");
 
     let mut result = LintResult::default();
     let options = LintOptions::default();
@@ -64,16 +133,24 @@ fn main() {
     let files = collect_imposter_files(&args.path);
 
     if files.is_empty() {
-        println!(
-            "{YELLOW}Warning:{RESET} No JSON files found in {:?}",
-            args.path
+        emit(
+            json_mode,
+            &format!(
+                "{yellow}Warning:{reset} No JSON files found in {:?}",
+                args.path
+            ),
         );
+        // In json mode still emit a (zero) result so stdout is always valid JSON — a consumer
+        // piping to `jq` shouldn't get empty input for the no-files case (issue #347).
+        if json_mode {
+            print_results_json(&result);
+        }
         std::process::exit(0);
     }
 
-    println!("{DIM}Scanning:{RESET} {CYAN}{}{RESET}", args.path.display());
-    println!(
-        "{DIM}Found:{RESET}    {BOLD}{}{RESET} imposter file(s)\n",
+    eprintln!("{dim}Scanning:{reset} {cyan}{}{reset}", args.path.display());
+    eprintln!(
+        "{dim}Found:{reset}    {bold}{}{reset} imposter file(s)\n",
         files.len()
     );
     result.files_checked = files.len();
@@ -112,7 +189,7 @@ fn main() {
     }
 
     // Print results
-    if args.output == "json" {
+    if json_mode {
         print_results_json(&result);
     } else {
         print_results(&result, &args);
@@ -120,8 +197,8 @@ fn main() {
 
     // Apply fixes if requested
     if args.fix && result.errors > 0 {
-        println!("\n{BOLD}Applying fixes...{RESET}");
-        apply_fixes(&imposters);
+        emit(json_mode, &format!("\n{bold}Applying fixes...{reset}"));
+        apply_fixes(&imposters, json_mode);
     }
 
     // Exit with error code if there were errors (or warnings in strict mode)
@@ -204,10 +281,20 @@ fn print_results_json(result: &LintResult) {
 }
 
 fn print_results(result: &LintResult, args: &Args) {
+    let Palette {
+        green,
+        red,
+        yellow,
+        cyan,
+        bold,
+        dim,
+        reset,
+    } = palette();
+
     println!();
 
     if result.issues.is_empty() {
-        println!("{GREEN}{BOLD}No issues found!{RESET}");
+        println!("{green}{bold}No issues found!{reset}");
     } else {
         // Group issues by file
         let mut issues_by_file: HashMap<&PathBuf, Vec<&LintIssue>> = HashMap::new();
@@ -251,34 +338,34 @@ fn print_results(result: &LintResult, args: &Args) {
 
             // File header with issue count
             let status_indicator = if file_errors > 0 {
-                format!("{RED}FAIL{RESET}")
+                format!("{red}FAIL{reset}")
             } else {
-                format!("{YELLOW}WARN{RESET}")
+                format!("{yellow}WARN{reset}")
             };
 
             let counts = if file_errors > 0 && file_warnings > 0 {
                 format!(
-                    " {DIM}({RED}{file_errors} error(s){RESET}{DIM}, {YELLOW}{file_warnings} warning(s){RESET}{DIM}){RESET}"
+                    " {dim}({red}{file_errors} error(s){reset}{dim}, {yellow}{file_warnings} warning(s){reset}{dim}){reset}"
                 )
             } else if file_errors > 0 {
-                format!(" {DIM}({RED}{file_errors} error(s){RESET}{DIM}){RESET}")
+                format!(" {dim}({red}{file_errors} error(s){reset}{dim}){reset}")
             } else if file_warnings > 0 {
-                format!(" {DIM}({YELLOW}{file_warnings} warning(s){RESET}{DIM}){RESET}")
+                format!(" {dim}({yellow}{file_warnings} warning(s){reset}{dim}){reset}")
             } else {
                 String::new()
             };
 
-            println!("{status_indicator} {BOLD}{CYAN}{file_name}{RESET}{counts}");
+            println!("{status_indicator} {bold}{cyan}{file_name}{reset}{counts}");
 
             for issue in filtered_issues {
                 let severity_marker = match issue.severity {
-                    Severity::Error => format!("{RED}|{RESET}"),
-                    Severity::Warning => format!("{YELLOW}|{RESET}"),
-                    Severity::Info => format!("{CYAN}|{RESET}"),
+                    Severity::Error => format!("{red}|{reset}"),
+                    Severity::Warning => format!("{yellow}|{reset}"),
+                    Severity::Info => format!("{cyan}|{reset}"),
                 };
 
                 let severity_str = format!(
-                    "{BOLD}{}{}{RESET}",
+                    "{bold}{}{}{reset}",
                     severity_color(&issue.severity),
                     issue.severity.label()
                 );
@@ -286,11 +373,11 @@ fn print_results(result: &LintResult, args: &Args) {
                 let location_str = issue
                     .location
                     .as_ref()
-                    .map(|l| format!("{DIM}[{RESET}{CYAN}{l}{RESET}{DIM}]{RESET}"))
+                    .map(|l| format!("{dim}[{reset}{cyan}{l}{reset}{dim}]{reset}"))
                     .unwrap_or_default();
 
                 let code_str = format!(
-                    "{DIM}({}{}{DIM}){RESET}",
+                    "{dim}({}{}{dim}){reset}",
                     severity_color(&issue.severity),
                     issue.code
                 );
@@ -301,7 +388,7 @@ fn print_results(result: &LintResult, args: &Args) {
                 );
 
                 if let Some(suggestion) = &issue.suggestion {
-                    println!("  {severity_marker}   {GREEN}-> {suggestion}{RESET}");
+                    println!("  {severity_marker}   {green}-> {suggestion}{reset}");
                 }
             }
             println!();
@@ -309,54 +396,58 @@ fn print_results(result: &LintResult, args: &Args) {
     }
 
     // Summary
-    println!("{DIM}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{RESET}");
-    println!("{BOLD}{CYAN}Summary{RESET}");
-    println!("{DIM}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{RESET}");
+    println!("{dim}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{reset}");
+    println!("{bold}{cyan}Summary{reset}");
+    println!("{dim}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{reset}");
     println!(
-        "  {DIM}Files checked:{RESET} {BOLD}{}{RESET}",
+        "  {dim}Files checked:{reset} {bold}{}{reset}",
         result.files_checked
     );
 
     // Errors count
     if result.errors > 0 {
         println!(
-            "  {RED}Errors:{RESET}    {BOLD}{RED}{}{RESET}",
+            "  {red}Errors:{reset}    {bold}{red}{}{reset}",
             result.errors
         );
     } else {
-        println!("  {GREEN}Errors:{RESET}    {BOLD}{GREEN}0{RESET}");
+        println!("  {green}Errors:{reset}    {bold}{green}0{reset}");
     }
 
     // Warnings count
     if result.warnings > 0 {
         println!(
-            "  {YELLOW}Warnings:{RESET}  {BOLD}{YELLOW}{}{RESET}",
+            "  {yellow}Warnings:{reset}  {bold}{yellow}{}{reset}",
             result.warnings
         );
     } else {
-        println!("  {DIM}Warnings:{RESET}  {BOLD}0{RESET}");
+        println!("  {dim}Warnings:{reset}  {bold}0{reset}");
     }
 
     println!();
 
     if result.errors == 0 && result.warnings == 0 {
-        println!("{GREEN}{BOLD}All checks passed!{RESET}");
+        println!("{green}{bold}All checks passed!{reset}");
     } else if result.errors == 0 {
-        println!("{YELLOW}{BOLD}Passed with warnings{RESET}");
+        println!("{yellow}{bold}Passed with warnings{reset}");
     } else {
-        println!("{RED}{BOLD}Linting failed with errors{RESET}");
+        println!("{red}{bold}Linting failed with errors{reset}");
     }
 }
 
 fn severity_color(severity: &Severity) -> &'static str {
+    let p = palette();
     match severity {
-        Severity::Error => RED,
-        Severity::Warning => YELLOW,
-        Severity::Info => CYAN,
+        Severity::Error => p.red,
+        Severity::Warning => p.yellow,
+        Severity::Info => p.cyan,
     }
 }
 
-fn apply_fixes(imposters: &[(PathBuf, Value)]) {
+fn apply_fixes(imposters: &[(PathBuf, Value)], json_mode: bool) {
+    let Palette {
+        green, red, reset, ..
+    } = palette();
     let mut fixes_applied = 0;
 
     for (file, imposter) in imposters {
@@ -384,13 +475,19 @@ fn apply_fixes(imposters: &[(PathBuf, Value)]) {
                                         *value = Value::String(joined.join(", "));
                                         file_fixed = true;
                                         fixes_applied += 1;
-                                        println!("  Fixed header '{name}' array -> string");
+                                        emit(
+                                            json_mode,
+                                            &format!("  Fixed header '{name}' array -> string"),
+                                        );
                                     }
                                 } else if value.is_number() {
                                     *value = Value::String(value.to_string());
                                     file_fixed = true;
                                     fixes_applied += 1;
-                                    println!("  Fixed header '{name}' number -> string");
+                                    emit(
+                                        json_mode,
+                                        &format!("  Fixed header '{name}' number -> string"),
+                                    );
                                 } else if value.is_boolean() {
                                     let bool_str = if value.as_bool().unwrap_or(false) {
                                         "true"
@@ -400,7 +497,10 @@ fn apply_fixes(imposters: &[(PathBuf, Value)]) {
                                     *value = Value::String(bool_str.to_string());
                                     file_fixed = true;
                                     fixes_applied += 1;
-                                    println!("  Fixed header '{name}' boolean -> string");
+                                    emit(
+                                        json_mode,
+                                        &format!("  Fixed header '{name}' boolean -> string"),
+                                    );
                                 }
                             }
                         }
@@ -414,17 +514,29 @@ fn apply_fixes(imposters: &[(PathBuf, Value)]) {
             match serde_json::to_string_pretty(&modified) {
                 Ok(content) => {
                     if let Err(e) = std::fs::write(file, content) {
-                        println!("{RED}Error writing {}: {e}{RESET}", file.display());
+                        emit(
+                            json_mode,
+                            &format!("{red}Error writing {}: {e}{reset}", file.display()),
+                        );
                     } else {
-                        println!("{GREEN}Fixed: {}{RESET}", file.display());
+                        emit(
+                            json_mode,
+                            &format!("{green}Fixed: {}{reset}", file.display()),
+                        );
                     }
                 }
                 Err(e) => {
-                    println!("{RED}Error serializing {}: {e}{RESET}", file.display());
+                    emit(
+                        json_mode,
+                        &format!("{red}Error serializing {}: {e}{reset}", file.display()),
+                    );
                 }
             }
         }
     }
 
-    println!("\n{GREEN}Applied {fixes_applied} fixes{RESET}");
+    emit(
+        json_mode,
+        &format!("\n{green}Applied {fixes_applied} fixes{reset}"),
+    );
 }

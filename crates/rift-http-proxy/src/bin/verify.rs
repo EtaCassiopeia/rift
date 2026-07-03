@@ -22,19 +22,97 @@ use reqwest::Client;
 use serde::Deserialize;
 use similar::{ChangeTag, TextDiff};
 use std::collections::HashMap;
+use std::io::IsTerminal;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 #[path = "verify/dynamic.rs"]
 mod dynamic;
 
-// ANSI color codes
-const GREEN: &str = "\x1b[32m";
-const RED: &str = "\x1b[31m";
-const YELLOW: &str = "\x1b[33m";
-const CYAN: &str = "\x1b[36m";
-const BOLD: &str = "\x1b[1m";
-const DIM: &str = "\x1b[2m";
-const RESET: &str = "\x1b[0m";
+/// Runtime ANSI color codes. Resolved once in `main` from `NO_COLOR`/TTY/json-mode via
+/// `Palette::detect`, then read anywhere via `palette()`. Fields are empty strings when color is
+/// disabled, so `{green}`-style interpolation becomes a no-op instead of requiring call-site branching.
+#[derive(Debug, Clone, Copy)]
+struct Palette {
+    green: &'static str,
+    red: &'static str,
+    yellow: &'static str,
+    cyan: &'static str,
+    bold: &'static str,
+    dim: &'static str,
+    reset: &'static str,
+}
+
+impl Palette {
+    const PLAIN: Palette = Palette {
+        green: "",
+        red: "",
+        yellow: "",
+        cyan: "",
+        bold: "",
+        dim: "",
+        reset: "",
+    };
+
+    /// Color is on only for an interactive text-mode session: never in `-o json` (stdout must be
+    /// pure JSON), never with `NO_COLOR` set, and never when stdout is piped/redirected.
+    fn detect(json_mode: bool) -> Self {
+        let color =
+            !json_mode && std::env::var_os("NO_COLOR").is_none() && std::io::stdout().is_terminal();
+        if color {
+            Palette {
+                green: "\x1b[32m",
+                red: "\x1b[31m",
+                yellow: "\x1b[33m",
+                cyan: "\x1b[36m",
+                bold: "\x1b[1m",
+                dim: "\x1b[2m",
+                reset: "\x1b[0m",
+            }
+        } else {
+            Palette::PLAIN
+        }
+    }
+}
+
+static PALETTE: OnceLock<Palette> = OnceLock::new();
+
+/// The process-wide palette, set once in `main` before anything is printed. Falls back to plain
+/// (no color) rather than panicking if read before `main` initializes it.
+fn palette() -> Palette {
+    PALETTE.get().copied().unwrap_or(Palette::PLAIN)
+}
+
+/// True once `main` has committed to json output mode. Printing helpers consult this so decoration
+/// (banners, progress, the human summary) never lands on stdout alongside the JSON payload.
+static JSON_MODE: OnceLock<bool> = OnceLock::new();
+
+fn json_mode() -> bool {
+    JSON_MODE.get().copied().unwrap_or(false)
+}
+
+/// Print to stdout normally, or to stderr when running in `-o json` — stdout in json mode is
+/// reserved exclusively for the final serialized summary.
+macro_rules! outln {
+    ($($arg:tt)*) => {{
+        if json_mode() {
+            eprintln!($($arg)*);
+        } else {
+            println!($($arg)*);
+        }
+    }};
+}
+
+/// Same routing as `outln!`, without a trailing newline (mirrors `print!`).
+macro_rules! outw {
+    ($($arg:tt)*) => {{
+        if json_mode() {
+            eprint!($($arg)*);
+        } else {
+            print!($($arg)*);
+        }
+    }};
+}
 
 /// Rift Stub Verifier - Test your imposters and stubs
 #[derive(Parser, Debug)]
@@ -104,6 +182,11 @@ struct Args {
     /// precedence, so this never clobbers a correctly-detected, differently-named imposter.
     #[arg(long)]
     flow_id_header: Option<String>,
+
+    /// Output format: text (default), json. In json mode, stdout carries only the final summary
+    /// (issue #347) — all human-readable progress and the decorative banner go to stderr instead.
+    #[arg(short = 'o', long, default_value = "text")]
+    output: String,
 }
 
 // ============================================================================
@@ -319,6 +402,9 @@ struct FailureDetails {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
+    let json = args.output == "json";
+    let _ = JSON_MODE.set(json);
+    let _ = PALETTE.set(Palette::detect(json));
 
     let client = Client::builder()
         .timeout(Duration::from_secs(args.timeout))
@@ -331,16 +417,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    println!("{BOLD}{CYAN}Rift Stub Verifier{RESET}");
-    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    println!("Admin URL: {}", args.admin_url);
-    println!();
+    let Palette {
+        green,
+        red,
+        yellow,
+        cyan,
+        bold,
+        dim,
+        reset,
+    } = palette();
+
+    // Banner and per-test progress are decoration, not data: `outln!` keeps them off stdout
+    // entirely in json mode, so stdout carries only the final serialized summary.
+    outln!("{bold}{cyan}Rift Stub Verifier{reset}");
+    outln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    outln!("Admin URL: {}", args.admin_url);
+    outln!();
 
     // Fetch imposters
     let imposters = fetch_imposters(&client, &args.admin_url, args.port).await?;
 
     if imposters.is_empty() {
-        println!("{YELLOW}Warning:{RESET} No imposters found");
+        outln!("{yellow}Warning:{reset} No imposters found");
+        if json {
+            let payload = serde_json::json!({
+                "imposters": 0, "stubs": 0, "tests": 0, "passed": 0, "failed": 0, "skipped": 0,
+            });
+            println!("{}", serde_json::to_string_pretty(&payload)?);
+        }
         return Ok(());
     }
 
@@ -351,10 +455,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Process each imposter
     for imposter in &imposters {
-        println!(
+        outln!(
             "{}Imposter:{} {} (port {})",
-            BOLD,
-            RESET,
+            bold,
+            reset,
             imposter.name.as_deref().unwrap_or("unnamed"),
             imposter.port
         );
@@ -362,8 +466,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         summary.total_stubs += imposter.stubs.len();
 
         if imposter.stubs.is_empty() {
-            println!("   └─ No stubs defined");
-            println!();
+            outln!("   └─ No stubs defined");
+            outln!();
             continue;
         }
 
@@ -382,7 +486,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             for test_case in test_cases {
                 if args.show_curl || args.verbose {
                     let curl = generate_curl_command(imposter.port, &test_case);
-                    println!("   {DIM}{curl}{RESET}");
+                    outln!("   {dim}{curl}{reset}");
                 }
 
                 if let Some(reason) = &test_case.skip_reason {
@@ -391,18 +495,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if test_case.is_no_match_stub {
                         summary.passed += 1;
                         if args.verbose {
-                            println!(
+                            outln!(
                                 "   {}PASS{} Stub #{} - {} {} ({})",
-                                GREEN, RESET, stub_index, test_case.method, test_case.path, reason
+                                green,
+                                reset,
+                                stub_index,
+                                test_case.method,
+                                test_case.path,
+                                reason
                             );
                         }
                     } else {
                         summary.skipped += 1;
                         if args.verbose {
-                            println!(
+                            outln!(
                                 "   {}SKIP{} Stub #{} - {}",
-                                YELLOW,
-                                RESET,
+                                yellow,
+                                reset,
                                 stub_index,
                                 test_case.skip_reason.as_ref().unwrap()
                             );
@@ -412,10 +521,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
 
                 if args.dry_run {
-                    println!(
+                    outln!(
                         "   {}DRY-RUN{} Stub #{}{} - {} {}",
-                        CYAN,
-                        RESET,
+                        cyan,
+                        reset,
                         stub_index,
                         test_case
                             .stub_id
@@ -443,10 +552,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if result.success {
                     summary.passed += 1;
                     if args.verbose {
-                        println!(
+                        outln!(
                             "   {}PASS{} Stub #{}{} - {} {} -> {} ({}ms)",
-                            GREEN,
-                            RESET,
+                            green,
+                            reset,
                             stub_index,
                             test_case
                                 .stub_id
@@ -484,10 +593,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         failure_reasons: result.failure_reasons,
                     };
 
-                    println!(
+                    outln!(
                         "   {}FAIL{} Stub #{}{} - {} {}",
-                        RED,
-                        RESET,
+                        red,
+                        reset,
                         stub_index,
                         test_case
                             .stub_id
@@ -500,7 +609,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     // Show enhanced error details inline when verbose
                     if args.verbose && !failure.failure_reasons.is_empty() {
-                        println!("   {BOLD}Why it failed:{RESET}");
+                        outln!("   {bold}Why it failed:{reset}");
                         for reason in &failure.failure_reasons {
                             print_failure_reason(reason);
                         }
@@ -510,7 +619,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
-        println!();
+        outln!();
     }
 
     // Opt-in dynamic-behavior assertion (issue #251): proxy / `_verify` sequences / faults.
@@ -520,6 +629,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Print summary
     print_summary(&summary, args.show_curl);
+
+    // json mode: stdout carries only this single, pure-JSON summary payload (issue #347); every
+    // other message above went to stderr via `outln!`.
+    if json {
+        let payload = serde_json::json!({
+            "imposters": summary.total_imposters,
+            "stubs": summary.total_stubs,
+            "tests": summary.total_tests,
+            "passed": summary.passed,
+            "failed": summary.failed,
+            "skipped": summary.skipped,
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    }
 
     // Exit with error code if any failures
     if summary.failed > 0 {
@@ -538,9 +661,18 @@ async fn run_dynamic_verification(
     imposters: &[ImposterDetails],
     summary: &mut VerificationSummary,
 ) {
+    let Palette {
+        green,
+        red,
+        yellow,
+        cyan,
+        bold,
+        reset,
+        ..
+    } = palette();
     let verifier = dynamic::DynamicVerifier { client, admin_url };
-    println!();
-    println!("{BOLD}{CYAN}Dynamic assertions (--verify-dynamic){RESET}");
+    outln!();
+    outln!("{bold}{cyan}Dynamic assertions (--verify-dynamic){reset}");
 
     for imposter in imposters {
         // The imposter list was already fetched successfully, so a per-imposter GET/parse failure
@@ -568,13 +700,13 @@ async fn run_dynamic_verification(
         for check in verifier.verify_imposter(&raw).await {
             if check.skipped {
                 summary.skipped += 1;
-                println!("   {YELLOW}SKIP{RESET} {} — {}", check.label, check.detail);
+                outln!("   {yellow}SKIP{reset} {} — {}", check.label, check.detail);
             } else if check.passed {
                 summary.passed += 1;
-                println!("   {GREEN}PASS{RESET} {}", check.label);
+                outln!("   {green}PASS{reset} {}", check.label);
             } else {
                 summary.failed += 1;
-                println!("   {RED}FAIL{RESET} {} — {}", check.label, check.detail);
+                outln!("   {red}FAIL{reset} {} — {}", check.label, check.detail);
                 summary.failures.push(FailureDetails {
                     imposter_port: imposter.port,
                     imposter_name: imposter.name.clone(),
@@ -599,8 +731,9 @@ fn record_dynamic_fetch_failure(
     detail: String,
 ) {
     summary.failed += 1;
-    println!(
-        "   {RED}FAIL{RESET} imposter {} dynamic fetch — {detail}",
+    let Palette { red, reset, .. } = palette();
+    outln!(
+        "   {red}FAIL{reset} imposter {} dynamic fetch — {detail}",
         imposter.port
     );
     summary.failures.push(FailureDetails {
@@ -2094,26 +2227,35 @@ fn generate_curl_command(port: u16, test_case: &TestCase) -> String {
 // ============================================================================
 
 fn print_summary(summary: &VerificationSummary, show_curl: bool) {
-    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    println!("{BOLD}Verification Summary{RESET}");
-    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    println!("  Imposters:  {}", summary.total_imposters);
-    println!("  Stubs:      {}", summary.total_stubs);
-    println!("  Tests:      {}", summary.total_tests);
-    println!();
-    println!("  {}Passed:  {}{}", GREEN, summary.passed, RESET);
-    println!("  {}Failed:  {}{}", RED, summary.failed, RESET);
-    println!("  {}Skipped: {}{}", YELLOW, summary.skipped, RESET);
-    println!();
+    let Palette {
+        green,
+        red,
+        yellow,
+        bold,
+        reset,
+        ..
+    } = palette();
+
+    outln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    outln!("{bold}Verification Summary{reset}");
+    outln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    outln!("  Imposters:  {}", summary.total_imposters);
+    outln!("  Stubs:      {}", summary.total_stubs);
+    outln!("  Tests:      {}", summary.total_tests);
+    outln!();
+    outln!("  {}Passed:  {}{}", green, summary.passed, reset);
+    outln!("  {}Failed:  {}{}", red, summary.failed, reset);
+    outln!("  {}Skipped: {}{}", yellow, summary.skipped, reset);
+    outln!();
 
     if !summary.failures.is_empty() {
-        println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-        println!("{RED}Failure Details{RESET}");
-        println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        outln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        outln!("{red}Failure Details{reset}");
+        outln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
         for (i, failure) in summary.failures.iter().enumerate() {
-            println!();
-            println!(
+            outln!();
+            outln!(
                 "{}. Imposter :{} {} - Stub #{}{}",
                 i + 1,
                 failure.imposter_port,
@@ -2129,117 +2271,136 @@ fn print_summary(summary: &VerificationSummary, show_curl: bool) {
                     .map(|id| format!(" [{id}]"))
                     .unwrap_or_default()
             );
-            println!("   Request:  {}", failure.test_description);
-            println!("   Expected: {}", failure.expected);
-            println!("   {}Actual:   {}{}", RED, failure.actual, RESET);
+            outln!("   Request:  {}", failure.test_description);
+            outln!("   Expected: {}", failure.expected);
+            outln!("   {}Actual:   {}{}", red, failure.actual, reset);
 
             if show_curl && let Some(ref curl) = failure.curl_command {
-                println!("   Curl:     {curl}");
+                outln!("   Curl:     {curl}");
             }
 
             // Print failure reasons with hints
             if !failure.failure_reasons.is_empty() {
-                println!();
-                println!("   {BOLD}Why it failed:{RESET}");
+                outln!();
+                outln!("   {bold}Why it failed:{reset}");
                 for reason in &failure.failure_reasons {
                     print_failure_reason(reason);
                 }
             }
         }
-        println!();
+        outln!();
     }
 
     // Final status
     if summary.failed == 0 {
-        println!("{GREEN}All tests passed!{RESET}");
+        outln!("{green}All tests passed!{reset}");
     } else {
-        println!(
+        outln!(
             "{}{} test(s) failed. See details above.{}",
-            RED, summary.failed, RESET
+            red,
+            summary.failed,
+            reset
         );
     }
 }
 
 /// Print a single failure reason with hint and optional diff
 fn print_failure_reason(reason: &FailureReason) {
+    let Palette {
+        green,
+        red,
+        yellow,
+        dim,
+        reset,
+        ..
+    } = palette();
+
     match reason {
         FailureReason::StatusMismatch { expected, actual } => {
-            println!(
-                "   - {YELLOW}Status mismatch:{RESET} expected {GREEN}{expected}{RESET}, got {RED}{actual}{RESET}"
+            outln!(
+                "   - {yellow}Status mismatch:{reset} expected {green}{expected}{reset}, got {red}{actual}{reset}"
             );
-            println!("     {DIM}{}{RESET}", reason.hint());
+            outln!("     {dim}{}{reset}", reason.hint());
         }
         FailureReason::HeaderMissing { header_name } => {
-            println!("   - {YELLOW}Missing header:{RESET} '{header_name}'");
-            println!("     {DIM}{}{RESET}", reason.hint());
+            outln!("   - {yellow}Missing header:{reset} '{header_name}'");
+            outln!("     {dim}{}{reset}", reason.hint());
         }
         FailureReason::HeaderMismatch {
             header_name,
             expected,
             actual,
         } => {
-            println!("   - {YELLOW}Header mismatch:{RESET} '{header_name}'");
-            println!("     Expected: {GREEN}\"{expected}\"{RESET}");
-            println!("     Actual:   {RED}\"{actual}\"{RESET}");
+            outln!("   - {yellow}Header mismatch:{reset} '{header_name}'");
+            outln!("     Expected: {green}\"{expected}\"{reset}");
+            outln!("     Actual:   {red}\"{actual}\"{reset}");
         }
         FailureReason::BodyMissing { expected } => {
-            println!("   - {YELLOW}Missing body:{RESET} expected response body but got none");
-            println!("     {DIM}{}{RESET}", reason.hint());
-            println!("     Expected body:");
+            outln!("   - {yellow}Missing body:{reset} expected response body but got none");
+            outln!("     {dim}{}{reset}", reason.hint());
+            outln!("     Expected body:");
             for line in expected.lines().take(10) {
-                println!("       {GREEN}{line}{RESET}");
+                outln!("       {green}{line}{reset}");
             }
             if expected.lines().count() > 10 {
-                println!(
-                    "       {DIM}... ({} more lines){RESET}",
+                outln!(
+                    "       {dim}... ({} more lines){reset}",
                     expected.lines().count() - 10
                 );
             }
         }
         FailureReason::BodyMismatch { expected, actual } => {
-            println!("   - {YELLOW}Body mismatch:{RESET}");
-            println!("     {DIM}{}{RESET}", reason.hint());
+            outln!("   - {yellow}Body mismatch:{reset}");
+            outln!("     {dim}{}{reset}", reason.hint());
             print_diff(expected, actual);
         }
         FailureReason::RequestError(err) => {
-            println!("   - {YELLOW}Request error:{RESET} {err}");
-            println!("     {DIM}{}{RESET}", reason.hint());
+            outln!("   - {yellow}Request error:{reset} {err}");
+            outln!("     {dim}{}{reset}", reason.hint());
         }
         FailureReason::TransportResetExpected { actual } => {
-            println!(
-                "   - {YELLOW}Fault not triggered:{RESET} expected connection reset, got HTTP {actual}"
+            outln!(
+                "   - {yellow}Fault not triggered:{reset} expected connection reset, got HTTP {actual}"
             );
-            println!("     {DIM}{}{RESET}", reason.hint());
+            outln!("     {dim}{}{reset}", reason.hint());
         }
     }
 }
 
 /// Print a unified diff between expected and actual content
 fn print_diff(expected: &str, actual: &str) {
-    println!("     {DIM}Diff ({GREEN}-expected{DIM}, {RED}+actual{DIM}):{RESET}");
+    let Palette {
+        green,
+        red,
+        dim,
+        reset,
+        ..
+    } = palette();
+
+    outln!("     {dim}Diff ({green}-expected{dim}, {red}+actual{dim}):{reset}");
 
     let diff = TextDiff::from_lines(expected, actual);
 
     for change in diff.iter_all_changes() {
         let (sign, color) = match change.tag() {
-            ChangeTag::Delete => ("-", GREEN),
-            ChangeTag::Insert => ("+", RED),
-            ChangeTag::Equal => (" ", RESET),
+            ChangeTag::Delete => ("-", green),
+            ChangeTag::Insert => ("+", red),
+            ChangeTag::Equal => (" ", reset),
         };
 
         // Only show context and changes, skip too many equal lines
         if change.tag() == ChangeTag::Equal {
-            print!(
-                "     {DIM}{sign} {}{RESET}",
+            outw!(
+                "     {dim}{sign} {}{reset}",
                 change.value().trim_end_matches('\n')
             );
         } else {
-            print!(
-                "     {color}{sign} {}{RESET}",
+            outw!(
+                "     {color}{sign} {}{reset}",
                 change.value().trim_end_matches('\n')
             );
         }
-        println!();
+        outln!();
     }
 }
 
@@ -2250,39 +2411,47 @@ fn print_diff(expected: &str, actual: &str) {
 /// Demonstrates the enhanced error output by printing sample failure scenarios.
 /// Run with: cargo run --bin rift-verify -- --demo
 fn demo_enhanced_error_output() {
-    println!("{BOLD}{CYAN}Enhanced Error Reporting Demo{RESET}");
-    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    println!();
+    let Palette {
+        green,
+        cyan,
+        bold,
+        reset,
+        ..
+    } = palette();
+
+    outln!("{bold}{cyan}Enhanced Error Reporting Demo{reset}");
+    outln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    outln!();
 
     // Demo 1: Status Mismatch
-    println!("{BOLD}1. Status Code Mismatch:{RESET}");
+    outln!("{bold}1. Status Code Mismatch:{reset}");
     let status_fail = FailureReason::StatusMismatch {
         expected: 200,
         actual: 404,
     };
     print_failure_reason(&status_fail);
-    println!();
+    outln!();
 
     // Demo 2: Header Missing
-    println!("{BOLD}2. Missing Header:{RESET}");
+    outln!("{bold}2. Missing Header:{reset}");
     let header_missing = FailureReason::HeaderMissing {
         header_name: "X-Request-Id".to_string(),
     };
     print_failure_reason(&header_missing);
-    println!();
+    outln!();
 
     // Demo 3: Header Mismatch
-    println!("{BOLD}3. Header Value Mismatch:{RESET}");
+    outln!("{bold}3. Header Value Mismatch:{reset}");
     let header_mismatch = FailureReason::HeaderMismatch {
         header_name: "Content-Type".to_string(),
         expected: "application/json".to_string(),
         actual: "text/plain".to_string(),
     };
     print_failure_reason(&header_mismatch);
-    println!();
+    outln!();
 
     // Demo 4: Body Mismatch with Diff
-    println!("{BOLD}4. JSON Body Mismatch (with diff):{RESET}");
+    outln!("{bold}4. JSON Body Mismatch (with diff):{reset}");
     let expected_json = r#"{
   "users": [
     {"id": 1, "name": "Alice"},
@@ -2303,24 +2472,24 @@ fn demo_enhanced_error_output() {
         actual: actual_json.to_string(),
     };
     print_failure_reason(&body_mismatch);
-    println!();
+    outln!();
 
     // Demo 5: Connection Error
-    println!("{BOLD}5. Connection Error:{RESET}");
+    outln!("{bold}5. Connection Error:{reset}");
     let conn_error = FailureReason::RequestError("Connection refused (os error 61)".to_string());
     print_failure_reason(&conn_error);
-    println!();
+    outln!();
 
     // Demo 6: Body Missing
-    println!("{BOLD}6. Missing Response Body:{RESET}");
+    outln!("{bold}6. Missing Response Body:{reset}");
     let body_missing = FailureReason::BodyMissing {
         expected: r#"{"status": "ok"}"#.to_string(),
     };
     print_failure_reason(&body_missing);
-    println!();
+    outln!();
 
-    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    println!("{GREEN}Demo complete!{RESET}");
+    outln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    outln!("{green}Demo complete!{reset}");
 }
 
 #[cfg(test)]
