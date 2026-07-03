@@ -352,6 +352,8 @@ impl ImposterManager {
         let conn_shutdown_tx = shutdown_tx.clone();
         let mut shutdown_rx = shutdown_tx.subscribe();
         let response_decorator = self.response_decorator.clone();
+        // Read socket tuning once per listener, not per accepted connection.
+        let socket_tuning = crate::proxy::network::SocketTuning::from_env();
 
         let _handle = tokio::spawn(async move {
             loop {
@@ -359,6 +361,7 @@ impl ImposterManager {
                     result = listener.accept() => {
                         match result {
                             Ok((stream, addr)) => {
+                                crate::proxy::network::apply_stream_tuning(&stream, &socket_tuning);
                                 let imposter = Arc::clone(&imposter_clone);
                                 // Each connection watches the shutdown signal so existing
                                 // keep-alive connections are gracefully closed on delete,
