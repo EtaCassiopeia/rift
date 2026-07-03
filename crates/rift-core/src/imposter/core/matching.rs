@@ -15,7 +15,7 @@ impl Imposter {
         headers: &hyper::HeaderMap,
         query: Option<&str>,
         body: Option<&str>,
-    ) -> anyhow::Result<Option<(StubState, usize)>> {
+    ) -> anyhow::Result<Option<(Arc<StubState>, usize)>> {
         // Call the extended version with no client info (backward compatible). This convenience
         // wrapper still accepts a `HeaderMap` and converts once; the hot path (`handler.rs`)
         // passes an already-built header map to `find_matching_stub_with_client` directly.
@@ -34,7 +34,7 @@ impl Imposter {
         body: Option<&str>,
         request_from: Option<&str>,
         client_ip: Option<&str>,
-    ) -> anyhow::Result<Option<(StubState, usize)>> {
+    ) -> anyhow::Result<Option<(Arc<StubState>, usize)>> {
         let stubs = self.stubs.read();
         // `headers_map` is the single-value, Title-Case header view already built once by the
         // caller (#288) — no re-conversion from `HeaderMap` here.
@@ -78,19 +78,14 @@ impl Imposter {
                 imposter_port,
                 body_json.as_ref(),
             ) {
-                // PERF NOTE: this deep-clones the matched `Stub` on every request. The clone is
-                // load-bearing, not accidental: the caller (`handler.rs`) holds the returned
-                // `StubState` across `.await` points (async proxying / response building), so the
-                // `parking_lot` read guard held here MUST be released before returning — a guard
-                // cannot be held across an await without blocking all writers for the request's
-                // lifetime. Returning only `index` would force the caller to re-lock (racy against
-                // concurrent `replace_stub`) or hold the guard across await. The response-cycling
-                // state is already shared cheaply: `StubState.cycler` is an `Arc`, so advancing the
-                // cycler on this clone is visible through the stored stub. Eliminating the `Stub`
-                // clone cleanly would mean making `StubState.stub` an `Arc<Stub>` — a broader field
-                // retype across every `.stub` access/mutation site, deferred out of this
-                // behavior-preserving pass.
-                return Ok(Some((stub_state.clone(), index)));
+                // Bump the refcount instead of deep-cloning the whole `StubState` (issue #287).
+                // The caller (`handler.rs`) holds the returned `Arc<StubState>` across `.await`
+                // points, so the `parking_lot` read guard must be released before returning; the
+                // `Arc` lets it do so without a copy. Response-cycling state stays shared: the
+                // `cycler` is itself an `Arc`, so advancing it via this handle is visible through
+                // the stored stub, and an in-place replace swaps a new `Arc` while in-flight
+                // requests keep serving their snapshot.
+                return Ok(Some((Arc::clone(stub_state), index)));
             }
         }
         Ok(None)

@@ -98,13 +98,26 @@ impl StubState {
         let response_idx = self.cycler.peek_response_index(responses.len() as u32);
         self.stub.responses.get(response_idx as usize)
     }
+
+    /// A copy carrying `stub` but preserving this slot's response-cycling state (the shared
+    /// `cycler`) and `slot`. Used by the reconcile/replace paths to swap stub content in place
+    /// now that states live behind `Arc` and cannot be mutated through a shared reference.
+    #[must_use]
+    pub(crate) fn with_stub(&self, stub: Stub) -> Self {
+        Self {
+            stub,
+            cycler: Arc::clone(&self.cycler),
+            slot: self.slot,
+        }
+    }
 }
 
 /// Runtime state of an imposter
 pub struct Imposter {
     pub config: ImposterConfig,
-    /// Mutable stubs (can be modified at runtime)
-    pub stubs: RwLock<Vec<StubState>>,
+    /// Mutable stubs (can be modified at runtime). Stored behind `Arc` so a matched request
+    /// takes a refcount bump instead of deep-cloning the whole `StubState` (issue #287).
+    pub stubs: RwLock<Vec<Arc<StubState>>>,
     /// Proxy-recording backend (issue #315); defaults to a private port-scoped
     /// [`LocalProxyStore`] for this imposter's mode, or the embedder's shared store injected
     /// via [`ImposterManager::with_proxy_store`](crate::imposter::ImposterManager::with_proxy_store).
@@ -159,10 +172,10 @@ impl Imposter {
         sequencer: Option<Arc<dyn crate::behaviors::ResponseSequencer>>,
         journal: Option<Arc<dyn crate::imposter::journal::RequestJournal>>,
     ) -> Self {
-        let stubs: Vec<StubState> = config
+        let stubs: Vec<Arc<StubState>> = config
             .stubs
             .iter()
-            .map(|stub| StubState::new(stub.clone()))
+            .map(|stub| Arc::new(StubState::new(stub.clone())))
             .collect();
 
         // Extract proxy mode from stubs (use first proxy response's mode)
@@ -190,7 +203,7 @@ impl Imposter {
     pub fn replace_stubs(&self, new_stubs: Vec<Stub>) {
         let mut stubs = self.stubs.write();
         stubs.clear();
-        stubs.extend(new_stubs.into_iter().map(StubState::new));
+        stubs.extend(new_stubs.into_iter().map(|s| Arc::new(StubState::new(s))));
     }
 
     /// Create flow store based on _rift.flowState configuration.
@@ -344,6 +357,159 @@ mod tests {
             ..Default::default()
         };
         Imposter::new(config)
+    }
+
+    #[test]
+    fn matched_stub_is_shared_arc_not_deep_cloned() {
+        // Gate for #287: a match returns the Arc<StubState> stored in the stub vector (a refcount
+        // bump), not a deep clone — proven by pointer identity with the stored entry.
+        let cfg = serde_json::from_value(json!({
+            "port": 0,
+            "protocol": "http",
+            "stubs": [
+                { "predicates": [{ "equals": { "path": "/shared" } }],
+                  "responses": [{ "is": { "statusCode": 200, "body": "x" } }] }
+            ]
+        }))
+        .unwrap();
+        let imp = Imposter::new(cfg);
+        let headers = std::collections::HashMap::new();
+        let (matched, index) = imp
+            .find_matching_stub_with_client("GET", "/shared", &headers, None, None, None, None)
+            .expect("store is infallible")
+            .expect("request must match");
+        let stored = std::sync::Arc::clone(&imp.stubs.read()[index]);
+        assert!(
+            std::sync::Arc::ptr_eq(&matched, &stored),
+            "matched stub must be the shared Arc, not a deep clone"
+        );
+    }
+
+    /// Serve the state's next response body, advancing the shared cycler.
+    fn served_body(state: &StubState) -> String {
+        let resp = state.get_next_response().expect("stub has responses");
+        serde_json::to_value(resp).expect("serialize")["is"]["body"]
+            .as_str()
+            .expect("string body")
+            .to_string()
+    }
+
+    #[test]
+    fn replace_stub_preserves_response_cursor() {
+        // Gate for #287: the index-based in-place replace reuses the slot's cycler (via
+        // `with_stub`), so the response cursor survives a content swap rather than resetting.
+        let cfg = serde_json::from_value(json!({
+            "port": 0, "protocol": "http",
+            "stubs": [{
+                "predicates": [{ "equals": { "path": "/c" } }],
+                "responses": [
+                    { "is": { "statusCode": 200, "body": "A" } },
+                    { "is": { "statusCode": 200, "body": "B" } }
+                ]
+            }]
+        }))
+        .unwrap();
+        let imp = Imposter::new(cfg);
+        assert_eq!(served_body(&imp.stubs.read()[0]), "A"); // cursor now at index 1
+        let new = serde_json::from_value(json!({
+            "predicates": [{ "equals": { "path": "/c" } }],
+            "responses": [
+                { "is": { "statusCode": 200, "body": "C" } },
+                { "is": { "statusCode": 200, "body": "D" } }
+            ]
+        }))
+        .unwrap();
+        imp.replace_stub(0, new).expect("index in bounds");
+        assert_eq!(
+            served_body(&imp.stubs.read()[0]),
+            "D",
+            "cursor (index 1) preserved and content swapped"
+        );
+    }
+
+    #[test]
+    fn replace_stub_by_id_preserves_response_cursor() {
+        // Same guarantee for the id-based in-place replace (#287).
+        let cfg = serde_json::from_value(json!({
+            "port": 0, "protocol": "http",
+            "stubs": [{
+                "id": "s1",
+                "predicates": [{ "equals": { "path": "/c" } }],
+                "responses": [
+                    { "is": { "statusCode": 200, "body": "A" } },
+                    { "is": { "statusCode": 200, "body": "B" } }
+                ]
+            }]
+        }))
+        .unwrap();
+        let imp = Imposter::new(cfg);
+        assert_eq!(served_body(&imp.stubs.read()[0]), "A"); // cursor now at index 1
+        let new = serde_json::from_value(json!({
+            "predicates": [{ "equals": { "path": "/c" } }],
+            "responses": [
+                { "is": { "statusCode": 200, "body": "C" } },
+                { "is": { "statusCode": 200, "body": "D" } }
+            ]
+        }))
+        .unwrap();
+        assert!(imp.replace_stub_by_id("s1", new), "id exists");
+        assert_eq!(
+            served_body(&imp.stubs.read()[0]),
+            "D",
+            "cursor (index 1) preserved and content swapped"
+        );
+    }
+
+    #[test]
+    fn proxy_always_append_preserves_cursor_and_slot() {
+        // Gate for #287: the proxyAlways append branch rebuilds the entry via `with_stub`, so
+        // the appended-to stub keeps its slot token and response cursor rather than getting a
+        // fresh StubState.
+        let cfg = serde_json::from_value(json!({
+            "port": 0, "protocol": "http",
+            "stubs": [{ "responses": [{ "proxy": { "to": "http://upstream", "mode": "proxyAlways" } }] }]
+        }))
+        .unwrap();
+        let imp = Imposter::new(cfg);
+
+        // First record → inserted after the proxy stub (insert branch), 2 responses.
+        let rec = serde_json::from_value(json!({
+            "predicates": [{ "equals": { "path": "/rec" } }],
+            "responses": [
+                { "is": { "statusCode": 200, "body": "R1" } },
+                { "is": { "statusCode": 200, "body": "R2" } }
+            ]
+        }))
+        .unwrap();
+        imp.insert_or_append_proxy_stub(rec, "http://upstream", "proxyAlways");
+
+        let rec_index = imp
+            .stubs
+            .read()
+            .iter()
+            .position(|s| !s.stub.predicates.is_empty())
+            .expect("recorded stub present");
+        let slot_before = imp.stubs.read()[rec_index].slot;
+        assert_eq!(served_body(&imp.stubs.read()[rec_index]), "R1"); // cursor now at index 1
+
+        // Second record with identical predicates → append branch: responses become [R1, R2, R3].
+        let rec2 = serde_json::from_value(json!({
+            "predicates": [{ "equals": { "path": "/rec" } }],
+            "responses": [{ "is": { "statusCode": 200, "body": "R3" } }]
+        }))
+        .unwrap();
+        imp.insert_or_append_proxy_stub(rec2, "http://upstream", "proxyAlways");
+
+        assert_eq!(
+            imp.stubs.read()[rec_index].slot,
+            slot_before,
+            "append must reuse the slot token, not mint a fresh StubState"
+        );
+        assert_eq!(
+            served_body(&imp.stubs.read()[rec_index]),
+            "R2",
+            "cursor (index 1) preserved across the append"
+        );
     }
 
     // Fix #95: Multi-valued form fields are now comma-joined instead of overwritten
