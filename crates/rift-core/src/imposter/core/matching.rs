@@ -35,7 +35,7 @@ impl Imposter {
         request_from: Option<&str>,
         client_ip: Option<&str>,
     ) -> anyhow::Result<Option<(Arc<StubState>, usize)>> {
-        let stubs = self.stubs.read();
+        let stubs = self.stubs.load();
         // `headers_map` is the single-value, Title-Case header view already built once by the
         // caller (#288) — no re-conversion from `HeaderMap` here.
         // Parse form data if Content-Type is application/x-www-form-urlencoded
@@ -80,8 +80,8 @@ impl Imposter {
             ) {
                 // Bump the refcount instead of deep-cloning the whole `StubState` (issue #287).
                 // The caller (`handler.rs`) holds the returned `Arc<StubState>` across `.await`
-                // points, so the `parking_lot` read guard must be released before returning; the
-                // `Arc` lets it do so without a copy. Response-cycling state stays shared: the
+                // points, so the arc-swap load guard must be released before returning (issue #291);
+                // the `Arc` lets it do so without a copy. Response-cycling state stays shared: the
                 // `cycler` is itself an `Arc`, so advancing it via this handle is visible through
                 // the stored stub, and an in-place replace swaps a new `Arc` while in-flight
                 // requests keep serving their snapshot.
@@ -266,7 +266,7 @@ impl Imposter {
     pub fn scenario_names(&self) -> Vec<String> {
         let mut names: Vec<String> = self
             .stubs
-            .read()
+            .load()
             .iter()
             .filter_map(|s| s.stub.scenario_name.clone())
             .collect();
@@ -278,7 +278,7 @@ impl Imposter {
     /// Stubs scoped to a given correlation space (issue #223).
     pub fn space_stubs(&self, space: &str) -> Vec<Stub> {
         self.stubs
-            .read()
+            .load()
             .iter()
             .filter(|s| s.stub.space.as_deref() == Some(space))
             .map(|s| s.stub.clone())
@@ -291,9 +291,7 @@ impl Imposter {
         // Snapshot scenario names BEFORE pruning stubs: a scenario declared only on this space's
         // stubs would otherwise vanish from scenario_names() and its state would never be reset.
         let scenarios = self.scenario_names();
-        self.stubs
-            .write()
-            .retain(|s| s.stub.space.as_deref() != Some(space));
+        self.mutate_stubs(|stubs| stubs.retain(|s| s.stub.space.as_deref() != Some(space)));
         // Best-effort across the slice's clears so one failure doesn't leave later scenarios
         // stale, but the first failure still surfaces (issues #318, #330) — never report a
         // clean teardown while stale recorded requests or scenario state persist in the backend.

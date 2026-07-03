@@ -71,6 +71,7 @@ socket2 = "0.5"
 num_cpus = "1.16"
 libc = "0.2"
 parking_lot = "0.12"
+arc-swap = "1.7"
 crossbeam = "0.8"
 
 # XML/XPath support

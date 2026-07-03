@@ -1283,7 +1283,7 @@ mod tests {
 
         let untouched = manager.get_imposter(19410).unwrap();
         untouched.record_request(&recorded("/cycled"));
-        assert_eq!(next_body(&untouched.stubs.read()[0]), "a1");
+        assert_eq!(next_body(&untouched.stubs.load()[0]), "a1");
 
         let p2_changed = imposter_cfg(json!({
             "protocol": "http", "port": 19411,
@@ -1305,7 +1305,7 @@ mod tests {
         );
         assert_eq!(after.get_recorded_requests().len(), 1);
         assert_eq!(
-            next_body(&after.stubs.read()[0]),
+            next_body(&after.stubs.load()[0]),
             "a2",
             "cycler position survives a sibling patch"
         );
@@ -1632,11 +1632,11 @@ mod tests {
             .await
             .expect("create");
         let imposter = manager.get_imposter(19440).unwrap();
-        assert_eq!(next_body(&imposter.stubs.read()[0]), "a1");
+        assert_eq!(next_body(&imposter.stubs.load()[0]), "a1");
 
         manager.move_stub(19440, 0, 2).await.expect("move");
         {
-            let stubs = imposter.stubs.read();
+            let stubs = imposter.stubs.load();
             let first = serde_json::to_value(&stubs[0].stub).unwrap();
             assert_eq!(first["responses"][0]["is"]["body"], "b");
             assert_eq!(
@@ -2213,7 +2213,7 @@ mod tests {
             manager.add_stub(19524, spaced, None).await.expect("add");
 
             let imposter = manager.get_imposter(19524).unwrap();
-            let stub_state = imposter.stubs.read()[0].clone();
+            let stub_state = imposter.stubs.load()[0].clone();
             let _ = imposter
                 .execute_stub_with_rift(&stub_state)
                 .expect("sequencer ok");

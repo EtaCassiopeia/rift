@@ -71,7 +71,7 @@ impl Imposter {
 
     /// Get all stubs info for debug purposes (Rift extension)
     pub fn get_all_stubs_info(&self) -> Vec<DebugStubInfo> {
-        let stubs = self.stubs.read();
+        let stubs = self.stubs.load();
         stubs
             .iter()
             .map(|stub_state| &stub_state.stub)
@@ -87,7 +87,7 @@ impl Imposter {
 
     /// Get imposter info for debug purposes (Rift extension)
     pub fn get_debug_imposter_info(&self) -> DebugImposter {
-        let stubs = self.stubs.read();
+        let stubs = self.stubs.load();
         DebugImposter {
             port: self.config.port.unwrap_or(0),
             name: self.config.name.clone(),
