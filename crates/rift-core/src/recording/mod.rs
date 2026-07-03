@@ -18,12 +18,16 @@
 //! - `stub_generator` - Mountebank stub generation
 
 mod mode;
+mod proxy_store;
 mod store;
 mod stub_generator;
 mod types;
 
 // Re-export main types
 pub use mode::ProxyMode;
+pub use proxy_store::{
+    ClaimOutcome, ClaimToken, LocalProxyStore, ProxyRecordingStore, ProxyStoreError,
+};
 pub use store::RecordingStore;
 #[allow(unused_imports)]
 pub use stub_generator::generate_stub;

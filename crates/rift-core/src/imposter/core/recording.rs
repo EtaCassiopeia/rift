@@ -56,7 +56,7 @@ impl Imposter {
 
     /// Clear saved proxy responses
     pub fn clear_proxy_responses(&self) {
-        self.recording_store.clear();
+        self.proxy_store.clear(self.journal_port());
     }
 
     /// Count this request toward `numberOfRequests` (fires even when recording is off).

@@ -19,7 +19,10 @@ use super::types::{
 use crate::backends::InMemoryFlowStore;
 use crate::behaviors::{HasRepeatBehavior, RuleCycler};
 use crate::extensions::flow_state::{FlowStore, NoOpFlowStore};
-use crate::recording::{ProxyMode, RecordedResponse, RecordingStore, RequestSignature};
+use crate::recording::{
+    ClaimOutcome, LocalProxyStore, ProxyMode, ProxyRecordingStore, RecordedResponse,
+    RequestSignature,
+};
 use anyhow::Context;
 use parking_lot::RwLock;
 use std::collections::HashMap;
@@ -102,8 +105,10 @@ pub struct Imposter {
     pub config: ImposterConfig,
     /// Mutable stubs (can be modified at runtime)
     pub stubs: RwLock<Vec<StubState>>,
-    /// Recording store for proxy responses (for future proxy mode support)
-    pub recording_store: Arc<RecordingStore>,
+    /// Proxy-recording backend (issue #315); defaults to a private port-scoped
+    /// [`LocalProxyStore`] for this imposter's mode, or the embedder's shared store injected
+    /// via [`ImposterManager::with_proxy_store`](crate::imposter::ImposterManager::with_proxy_store).
+    pub(crate) proxy_store: Arc<dyn ProxyRecordingStore>,
     /// Recorded-request storage (issue #314); defaults to a private LocalJournal,
     /// or the embedder's shared journal injected via the manager.
     pub(crate) journal: Arc<dyn crate::imposter::journal::RequestJournal>,
@@ -170,7 +175,7 @@ impl Imposter {
         Self {
             config,
             stubs: RwLock::new(stubs),
-            recording_store: Arc::new(RecordingStore::new(proxy_mode)),
+            proxy_store: Arc::new(LocalProxyStore::new(proxy_mode)),
             journal: journal
                 .unwrap_or_else(|| Arc::new(crate::imposter::journal::LocalJournal::default())),
             enabled: AtomicBool::new(true),

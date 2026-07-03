@@ -12,6 +12,7 @@ use crate::behaviors::ResponseSequencer;
 use crate::extensions::decorate::ResponseDecorator;
 use crate::extensions::flow_state::FlowStoreProvider;
 use crate::imposter::journal::RequestJournal;
+use crate::recording::ProxyRecordingStore;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
@@ -110,6 +111,8 @@ pub struct ImposterManager {
     sequencer: Option<Arc<dyn ResponseSequencer>>,
     /// Pluggable recorded-request backend (issue #314); None = per-imposter LocalJournal.
     request_journal: Option<Arc<dyn RequestJournal>>,
+    /// Pluggable proxy-recording backend (issue #315); None = per-imposter LocalProxyStore.
+    proxy_store: Option<Arc<dyn ProxyRecordingStore>>,
 }
 
 impl ImposterManager {
@@ -131,6 +134,7 @@ impl ImposterManager {
             flow_store_provider: None,
             sequencer: None,
             request_journal: None,
+            proxy_store: None,
         }
     }
 
@@ -201,6 +205,21 @@ impl ImposterManager {
     #[must_use]
     pub fn with_request_journal(mut self, journal: Arc<dyn RequestJournal>) -> Self {
         self.request_journal = Some(journal);
+        self
+    }
+
+    /// Register a pluggable proxy-recording backend (issue #315), shared across imposters and
+    /// keyed by port. Without one, each imposter keeps a private in-memory
+    /// [`LocalProxyStore`](crate::recording::LocalProxyStore) for its own proxy mode with the
+    /// historical semantics (proxyOnce once-gate, caps) plus the release-on-error fix. Imposter
+    /// deletion clears the port's saved responses so a later imposter reusing the port starts
+    /// clean.
+    ///
+    /// A shared store carries a single proxy mode; embedders mixing proxy modes across ports
+    /// should keep the per-imposter default instead.
+    #[must_use]
+    pub fn with_proxy_store(mut self, store: Arc<dyn ProxyRecordingStore>) -> Self {
+        self.proxy_store = Some(store);
         self
     }
 
@@ -315,6 +334,12 @@ impl ImposterManager {
             self.sequencer.clone(),
             self.request_journal.clone(),
         );
+
+        // Inject the shared proxy-recording store, if one is registered (issue #315);
+        // otherwise the imposter keeps its private per-mode LocalProxyStore.
+        if let Some(store) = &self.proxy_store {
+            imposter.proxy_store = Arc::clone(store);
+        }
 
         // Create shutdown channel for this imposter
         let (shutdown_tx, _) = broadcast::channel(1);
@@ -485,6 +510,12 @@ impl ImposterManager {
         }
         if let Some(journal) = &self.request_journal {
             journal.clear(port);
+        }
+        // Reclaim the shared proxy store's port slice so a later imposter reusing the port
+        // doesn't inherit stale recordings (issue #315). The private default dies with the
+        // imposter, so it needs no explicit clear.
+        if let Some(store) = &self.proxy_store {
+            store.clear(port);
         }
 
         info!("Imposter on port {} deleted", port);
@@ -2615,6 +2646,235 @@ mod tests {
             assert!(
                 !read.complete && read.entries.len() == 1,
                 "the completeness flag is observable at the core API"
+            );
+
+            manager.delete_all().await;
+        }
+    }
+
+    // =========================================================================
+    // Issue #315: pluggable ProxyRecordingStore
+    // =========================================================================
+    mod proxy_store {
+        use super::*;
+        use crate::recording::{
+            ClaimOutcome, ClaimToken, LocalProxyStore, ProxyMode, ProxyRecordingStore,
+            ProxyStoreError, RecordedResponse, RequestSignature,
+        };
+
+        /// Delegates to a LocalProxyStore while recording every claim/release/clear it sees.
+        /// `fail_claim`/`fail_record` inject the `Err` paths a real external backend can take,
+        /// which the built-in store never exercises.
+        struct SpyProxyStore {
+            inner: LocalProxyStore,
+            fail_claim: bool,
+            fail_record: bool,
+            claims: Mutex<Vec<u16>>,
+            releases: Mutex<Vec<u16>>,
+            clears: Mutex<Vec<u16>>,
+        }
+
+        impl SpyProxyStore {
+            fn new() -> Self {
+                Self::with_faults(false, false)
+            }
+
+            fn with_faults(fail_claim: bool, fail_record: bool) -> Self {
+                Self {
+                    inner: LocalProxyStore::new(ProxyMode::ProxyOnce),
+                    fail_claim,
+                    fail_record,
+                    claims: Mutex::new(Vec::new()),
+                    releases: Mutex::new(Vec::new()),
+                    clears: Mutex::new(Vec::new()),
+                }
+            }
+        }
+
+        impl ProxyRecordingStore for SpyProxyStore {
+            fn try_claim(
+                &self,
+                port: u16,
+                sig: &RequestSignature,
+            ) -> std::result::Result<ClaimOutcome, ProxyStoreError> {
+                self.claims.lock().push(port);
+                if self.fail_claim {
+                    return Err(ProxyStoreError::Unavailable("spy".into()));
+                }
+                self.inner.try_claim(port, sig)
+            }
+            fn release_claim(&self, port: u16, sig: &RequestSignature, token: ClaimToken) {
+                self.releases.lock().push(port);
+                self.inner.release_claim(port, sig, token);
+            }
+            fn record(
+                &self,
+                port: u16,
+                sig: RequestSignature,
+                token: ClaimToken,
+                resp: RecordedResponse,
+            ) -> std::result::Result<(), ProxyStoreError> {
+                if self.fail_record {
+                    // Simulate a backend that fails WITHOUT self-clearing its claim, so the
+                    // caller's release-on-error is what keeps the signature retryable.
+                    return Err(ProxyStoreError::Unavailable("spy".into()));
+                }
+                self.inner.record(port, sig, token, resp)
+            }
+            fn lookup(&self, port: u16, sig: &RequestSignature) -> Option<RecordedResponse> {
+                self.inner.lookup(port, sig)
+            }
+            fn clear(&self, port: u16) {
+                self.clears.lock().push(port);
+                self.inner.clear(port);
+            }
+        }
+
+        async fn upstream(manager: &ImposterManager, port: u16) {
+            let cfg = imposter_cfg(json!({
+                "port": port, "protocol": "http",
+                "stubs": [{ "responses": [{ "is": { "statusCode": 200, "body": "UP" } }] }]
+            }));
+            manager.create_imposter(cfg).await.expect("create upstream");
+        }
+
+        // AC7: a shared proxy store is injected into imposters, keyed by port, exercised on the
+        // proxy hot path, and cleared on imposter deletion.
+        #[tokio::test]
+        async fn shared_store_is_used_and_cleared_on_delete() {
+            let spy = Arc::new(SpyProxyStore::new());
+            let manager = ImposterManager::new()
+                .with_proxy_store(spy.clone() as Arc<dyn ProxyRecordingStore>);
+
+            upstream(&manager, 19560).await;
+            manager
+                .create_imposter(imposter_cfg(json!({
+                    "port": 19561, "protocol": "http",
+                    "stubs": [{ "responses": [{ "proxy": {
+                        "to": "http://127.0.0.1:19560", "mode": "proxyOnce"
+                    }}]}]
+                })))
+                .await
+                .expect("create proxy imposter");
+
+            // The proxy imposter shares the injected store, not its private default.
+            let imposter = manager.get_imposter(19561).unwrap();
+            assert!(Arc::ptr_eq(
+                &imposter.proxy_store,
+                &(spy.clone() as Arc<dyn ProxyRecordingStore>)
+            ));
+
+            // Driving the proxy leg fires the shared store's claim, keyed by the imposter port.
+            let body = reqwest::get("http://127.0.0.1:19561/thing")
+                .await
+                .expect("request")
+                .text()
+                .await
+                .expect("body");
+            assert_eq!(body, "UP");
+            assert!(
+                spy.claims.lock().contains(&19561),
+                "shared store claimed on the imposter port"
+            );
+
+            // Deleting the imposter reclaims the shared store's port slice.
+            manager.delete_imposter(19561).await.expect("delete");
+            assert!(
+                spy.clears.lock().contains(&19561),
+                "delete clears the port's saved recordings"
+            );
+
+            manager.delete_all().await;
+        }
+
+        /// Build a proxyOnce imposter on `port` forwarding to `to`, sharing `spy`.
+        async fn proxy_imposter(manager: &ImposterManager, port: u16, to: &str) {
+            manager
+                .create_imposter(imposter_cfg(json!({
+                    "port": port, "protocol": "http",
+                    "stubs": [{ "responses": [{ "proxy": { "to": to, "mode": "proxyOnce" } }] }]
+                })))
+                .await
+                .expect("create proxy imposter");
+        }
+
+        // AC2 end-to-end: a failed upstream call releases the claim through
+        // handle_proxy_request, so an identical retry can claim again instead of wedging.
+        // Two identical failing requests each release → the signature never gets stuck InFlight.
+        #[tokio::test]
+        async fn upstream_failure_releases_claim_end_to_end() {
+            let spy = Arc::new(SpyProxyStore::new());
+            let manager = ImposterManager::new()
+                .with_proxy_store(spy.clone() as Arc<dyn ProxyRecordingStore>);
+            // Forward to a dead port so the upstream leg always fails.
+            proxy_imposter(&manager, 19571, "http://127.0.0.1:19999").await;
+
+            for _ in 0..2 {
+                let _ = reqwest::get("http://127.0.0.1:19571/wedge").await;
+            }
+
+            assert_eq!(
+                spy.releases.lock().len(),
+                2,
+                "each failed upstream call releases its claim; the signature stays reclaimable"
+            );
+
+            manager.delete_all().await;
+        }
+
+        // The record()-failure path (issue #315, review finding): a backend that returns Err
+        // from record without self-clearing must have its claim released by the caller, or the
+        // signature wedges. Two successful upstream calls whose record fails must each release.
+        #[tokio::test]
+        async fn record_failure_releases_claim_end_to_end() {
+            let spy = Arc::new(SpyProxyStore::with_faults(false, true));
+            let manager = ImposterManager::new()
+                .with_proxy_store(spy.clone() as Arc<dyn ProxyRecordingStore>);
+            upstream(&manager, 19572).await;
+            proxy_imposter(&manager, 19573, "http://127.0.0.1:19572").await;
+
+            for _ in 0..2 {
+                let body = reqwest::get("http://127.0.0.1:19573/rec")
+                    .await
+                    .expect("request")
+                    .text()
+                    .await
+                    .expect("body");
+                assert_eq!(body, "UP", "client still gets the upstream response");
+            }
+
+            assert_eq!(
+                spy.releases.lock().len(),
+                2,
+                "a failed record releases the claim, so the second request can claim again"
+            );
+
+            manager.delete_all().await;
+        }
+
+        // ProxyStoreError degrade path: when try_claim returns Err (backend unavailable), the
+        // imposter still forwards upstream successfully — it just doesn't record.
+        #[tokio::test]
+        async fn store_unavailable_still_forwards() {
+            let spy = Arc::new(SpyProxyStore::with_faults(true, false));
+            let manager = ImposterManager::new()
+                .with_proxy_store(spy.clone() as Arc<dyn ProxyRecordingStore>);
+            upstream(&manager, 19574).await;
+            proxy_imposter(&manager, 19575, "http://127.0.0.1:19574").await;
+
+            let body = reqwest::get("http://127.0.0.1:19575/degrade")
+                .await
+                .expect("request")
+                .text()
+                .await
+                .expect("body");
+            assert_eq!(
+                body, "UP",
+                "forwards upstream despite the store being unavailable"
+            );
+            assert!(
+                spy.releases.lock().is_empty(),
+                "no claim was granted, so nothing to release"
             );
 
             manager.delete_all().await;
