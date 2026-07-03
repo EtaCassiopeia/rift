@@ -4,6 +4,10 @@
 
 use super::*;
 
+/// Parts read from a successful upstream proxy response, before recording:
+/// `(status, headers, body, latency_ms)`.
+type ForwardedResponse = (u16, Vec<(String, String)>, bytes::Bytes, u64);
+
 impl Imposter {
     /// Generate predicates from request based on predicateGenerators config
     pub(crate) fn generate_predicates_from_request(
@@ -304,101 +308,146 @@ impl Imposter {
 
         // Create request signature for recording
         let signature = RequestSignature::new(method, uri.path(), uri.query(), &[]);
+        let port = self.journal_port();
 
-        // Check if we should replay cached response (based on proxy mode)
-        if !self.recording_store.should_proxy(&signature)
-            && let Some(recorded) = self.recording_store.get_recorded(&signature)
-        {
-            debug!("Returning recorded proxy response (proxyOnce mode)");
-            return Ok((
-                recorded.status,
-                recorded.headers.clone(),
-                recorded.body.clone(),
-                recorded.latency_ms,
-            ));
-        }
-
-        // Forward the request
-        let start = Instant::now();
-
-        let mut request = match method.to_uppercase().as_str() {
-            "GET" => client.get(&target_url),
-            "POST" => client.post(&target_url),
-            "PUT" => client.put(&target_url),
-            "DELETE" => client.delete(&target_url),
-            "PATCH" => client.patch(&target_url),
-            "HEAD" => client.head(&target_url),
-            _ => client.get(&target_url),
+        // Consult the proxy-recording gate. `AlreadyRecorded` replays; `Claimed` grants the
+        // right to record; `InFlight` (a concurrent proxyOnce loser) and an unavailable
+        // store proxy upstream without recording.
+        let claim_token = match self.proxy_store.try_claim(port, &signature) {
+            Ok(ClaimOutcome::AlreadyRecorded) => {
+                if let Some(recorded) = self.proxy_store.lookup(port, &signature) {
+                    debug!("Returning recorded proxy response (proxyOnce mode)");
+                    return Ok((
+                        recorded.status,
+                        recorded.headers,
+                        recorded.body,
+                        recorded.latency_ms,
+                    ));
+                }
+                // AlreadyRecorded but nothing to replay: a race (concurrent clear) or a
+                // misbehaving backend. Forward without recording rather than fail, but leave
+                // a trace since this is not an expected outcome.
+                warn!(
+                    "Proxy store reported AlreadyRecorded but lookup found nothing; forwarding without recording"
+                );
+                None
+            }
+            Ok(ClaimOutcome::InFlight) => None,
+            Ok(ClaimOutcome::Claimed(token)) => Some(token),
+            Err(e) => {
+                warn!("Proxy recording store unavailable; forwarding without recording: {e}");
+                None
+            }
         };
 
-        // Copy headers (excluding host)
-        for (key, value) in headers {
-            let key_lower = key.to_lowercase();
-            if key_lower != "host" && key_lower != "content-length" {
+        // Forward the request. Isolated so a failure releases the claim (issue #315): a
+        // proxyOnce signature must stay retryable, not wedge because the upstream call errored.
+        let start = Instant::now();
+        let forwarded: anyhow::Result<ForwardedResponse> = async {
+            let mut request = match method.to_uppercase().as_str() {
+                "GET" => client.get(&target_url),
+                "POST" => client.post(&target_url),
+                "PUT" => client.put(&target_url),
+                "DELETE" => client.delete(&target_url),
+                "PATCH" => client.patch(&target_url),
+                "HEAD" => client.head(&target_url),
+                _ => client.get(&target_url),
+            };
+
+            // Copy headers (excluding host)
+            for (key, value) in headers {
+                let key_lower = key.to_lowercase();
+                if key_lower != "host" && key_lower != "content-length" {
+                    request = request.header(key, value);
+                }
+            }
+
+            // Add inject headers
+            for (key, value) in &proxy_config.inject_headers {
                 request = request.header(key, value);
             }
+
+            // Add body if present
+            if let Some(body_str) = body {
+                request = request.body(body_str.to_string());
+            }
+
+            // Send request
+            let response = request
+                .send()
+                .await
+                .with_context(|| format!("Failed to send proxy request to {target_url}"))?;
+            let latency_ms = start.elapsed().as_millis() as u64;
+
+            let status = response.status().as_u16();
+            let response_headers: Vec<(String, String)> = response
+                .headers()
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
+                .collect();
+            // Check Content-Length before reading the full body to reject obviously oversized responses
+            if let Some(content_length) = response.content_length()
+                && content_length as usize > MAX_PROXY_RESPONSE_BODY_SIZE
+            {
+                anyhow::bail!(
+                    "Proxy response body from {target_url} exceeds maximum size ({content_length} > {MAX_PROXY_RESPONSE_BODY_SIZE} bytes)"
+                );
+            }
+
+            let body_bytes = response
+                .bytes()
+                .await
+                .with_context(|| format!("Failed to read response body from {target_url}"))?;
+
+            if body_bytes.len() > MAX_PROXY_RESPONSE_BODY_SIZE {
+                anyhow::bail!(
+                    "Proxy response body from {} exceeds maximum size ({} > {} bytes)",
+                    target_url,
+                    body_bytes.len(),
+                    MAX_PROXY_RESPONSE_BODY_SIZE
+                );
+            }
+
+            Ok((status, response_headers, body_bytes, latency_ms))
         }
+        .await;
 
-        // Add inject headers
-        for (key, value) in &proxy_config.inject_headers {
-            request = request.header(key, value);
-        }
-
-        // Add body if present
-        if let Some(body_str) = body {
-            request = request.body(body_str.to_string());
-        }
-
-        // Send request
-        let response = request
-            .send()
-            .await
-            .with_context(|| format!("Failed to send proxy request to {target_url}"))?;
-        let latency_ms = start.elapsed().as_millis() as u64;
-
-        let status = response.status().as_u16();
-        let response_headers: Vec<(String, String)> = response
-            .headers()
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
-            .collect();
-        // Check Content-Length before reading the full body to reject obviously oversized responses
-        if let Some(content_length) = response.content_length()
-            && content_length as usize > MAX_PROXY_RESPONSE_BODY_SIZE
-        {
-            anyhow::bail!(
-                "Proxy response body from {target_url} exceeds maximum size ({content_length} > {MAX_PROXY_RESPONSE_BODY_SIZE} bytes)"
-            );
-        }
-
-        let body_bytes = response
-            .bytes()
-            .await
-            .with_context(|| format!("Failed to read response body from {target_url}"))?;
-
-        if body_bytes.len() > MAX_PROXY_RESPONSE_BODY_SIZE {
-            anyhow::bail!(
-                "Proxy response body from {} exceeds maximum size ({} > {} bytes)",
-                target_url,
-                body_bytes.len(),
-                MAX_PROXY_RESPONSE_BODY_SIZE
-            );
-        }
-
-        // Record the response
-        let recorded_response = RecordedResponse {
-            status,
-            headers: response_headers.clone(),
-            body: body_bytes.to_vec(),
-            latency_ms: if proxy_config.add_wait_behavior {
-                Some(latency_ms)
-            } else {
-                None
-            },
-            timestamp_secs: crate::util::unix_timestamp(),
+        let (status, response_headers, body_bytes, latency_ms) = match forwarded {
+            Ok(parts) => parts,
+            Err(e) => {
+                if let Some(token) = claim_token {
+                    self.proxy_store.release_claim(port, &signature, token);
+                }
+                return Err(e);
+            }
         };
 
-        self.recording_store.record(signature, recorded_response);
+        // Record the response only if we hold a claim.
+        if let Some(token) = claim_token {
+            let recorded_response = RecordedResponse {
+                status,
+                headers: response_headers.clone(),
+                body: body_bytes.to_vec(),
+                latency_ms: if proxy_config.add_wait_behavior {
+                    Some(latency_ms)
+                } else {
+                    None
+                },
+                timestamp_secs: crate::util::unix_timestamp(),
+            };
+
+            if let Err(e) =
+                self.proxy_store
+                    .record(port, signature.clone(), token, recorded_response)
+            {
+                // A failed record must release the claim, or the signature wedges for
+                // proxyOnce (issue #315) — symmetric with the upstream-failure path above.
+                warn!(
+                    "Failed to record proxy response, releasing claim so it stays retryable: {e}"
+                );
+                self.proxy_store.release_claim(port, &signature, token);
+            }
+        }
 
         // Generate and insert stub if predicateGenerators, addWaitBehavior, or addDecorateBehavior is configured
         // (Mountebank generates stubs automatically when these are enabled)
