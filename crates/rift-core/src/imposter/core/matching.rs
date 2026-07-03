@@ -16,8 +16,11 @@ impl Imposter {
         query: Option<&str>,
         body: Option<&str>,
     ) -> anyhow::Result<Option<(Arc<StubState>, usize)>> {
-        // Call the extended version with no client info (backward compatible)
-        self.find_matching_stub_with_client(method, path, headers, query, body, None, None)
+        // Call the extended version with no client info (backward compatible). This convenience
+        // wrapper still accepts a `HeaderMap` and converts once; the hot path (`handler.rs`)
+        // passes an already-built header map to `find_matching_stub_with_client` directly.
+        let headers_map = Self::header_map_to_hashmap(headers);
+        self.find_matching_stub_with_client(method, path, &headers_map, query, body, None, None)
     }
 
     /// Find a matching stub with client address information (for requestFrom/ip predicates)
@@ -26,19 +29,23 @@ impl Imposter {
         &self,
         method: &str,
         path: &str,
-        headers: &hyper::HeaderMap,
+        headers_map: &HashMap<String, String>,
         query: Option<&str>,
         body: Option<&str>,
         request_from: Option<&str>,
         client_ip: Option<&str>,
     ) -> anyhow::Result<Option<(Arc<StubState>, usize)>> {
         let stubs = self.stubs.read();
-        let headers_map = Self::header_map_to_hashmap(headers);
+        // `headers_map` is the single-value, Title-Case header view already built once by the
+        // caller (#288) — no re-conversion from `HeaderMap` here.
         // Parse form data if Content-Type is application/x-www-form-urlencoded
-        let form = Self::parse_form_data(headers, body);
+        let form = Self::parse_form_data(headers_map, body);
 
         let imposter_port = self.config.port.unwrap_or(0);
-        let flow_id = self.resolve_flow_id(&headers_map);
+        let flow_id = self.resolve_flow_id(headers_map);
+        // Parse the request body as JSON once per request and reuse it across every stub's
+        // predicates, instead of re-parsing per predicate per stub (issue #290).
+        let body_json = body.and_then(|b| serde_json::from_str::<serde_json::Value>(b).ok());
         for (index, stub_state) in stubs.iter().enumerate() {
             let stub = &stub_state.stub;
             // Correlated-isolation gate (issue #223, runs first): a space-scoped stub only
@@ -58,17 +65,18 @@ impl Imposter {
                     continue;
                 }
             }
-            if stub_matches(
+            if stub_matches_inner(
                 &stub.predicates,
                 method,
                 path,
                 query,
-                &headers_map,
+                headers_map,
                 body,
                 request_from,
                 client_ip,
                 form.as_ref(),
                 imposter_port,
+                body_json.as_ref(),
             ) {
                 // Bump the refcount instead of deep-cloning the whole `StubState` (issue #287).
                 // The caller (`handler.rs`) holds the returned `Arc<StubState>` across `.await`
@@ -308,12 +316,15 @@ impl Imposter {
 
     /// Parse form-urlencoded data from body if Content-Type matches
     pub(crate) fn parse_form_data(
-        headers: &hyper::HeaderMap,
+        headers: &HashMap<String, String>,
         body: Option<&str>,
     ) -> Option<HashMap<String, String>> {
+        // Header keys are Title-Case in the pre-built map, so match Content-Type case-insensitively
+        // (HeaderMap lookups were case-insensitive; preserve that).
         let content_type = headers
-            .get("content-type")
-            .and_then(|v| v.to_str().ok())
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+            .map(|(_, v)| v.as_str())
             .unwrap_or("");
 
         if content_type.contains("application/x-www-form-urlencoded")
