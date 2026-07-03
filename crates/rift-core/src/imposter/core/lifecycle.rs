@@ -31,7 +31,7 @@ impl Imposter {
         let mut stubs = self.stubs.write();
         let idx = index.unwrap_or(stubs.len());
         let idx = idx.min(stubs.len());
-        stubs.insert(idx, StubState::new(stub));
+        stubs.insert(idx, Arc::new(StubState::new(stub)));
     }
 
     /// Add a stub, rejecting it if its `id` duplicates an existing stub (issue #202). The
@@ -46,7 +46,7 @@ impl Imposter {
             return false;
         }
         let idx = index.unwrap_or(stubs.len()).min(stubs.len());
-        stubs.insert(idx, StubState::new(stub));
+        stubs.insert(idx, Arc::new(StubState::new(stub)));
         true
     }
 
@@ -58,9 +58,10 @@ impl Imposter {
         match stubs.iter().position(|s| s.stub.id.as_deref() == Some(id)) {
             Some(i) => {
                 stub.id = Some(id.to_string());
-                // Swap the stub in place (like the index-based replace) to keep the slot's
-                // response-cycling state, rather than replacing the whole StubState.
-                stubs[i].stub = stub;
+                // Swap a fresh Arc that reuses the slot's cycler + slot token, so the slot's
+                // response-cycling state is kept and in-flight requests holding the old Arc keep
+                // serving their snapshot (issue #287).
+                stubs[i] = Arc::new(stubs[i].with_stub(stub));
                 true
             }
             None => false,
@@ -95,7 +96,8 @@ impl Imposter {
         if index >= stubs.len() {
             return Err(ImposterError::StubIndexOutOfBounds(index));
         }
-        stubs[index].stub = stub;
+        // Reuse the slot's cycler + slot token (issue #287); see `replace_stub_by_id`.
+        stubs[index] = Arc::new(stubs[index].with_stub(stub));
         Ok(())
     }
 

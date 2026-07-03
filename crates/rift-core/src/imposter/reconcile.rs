@@ -4,6 +4,7 @@
 use super::core::StubState;
 use super::types::{ImposterError, Stub};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use tracing::error;
 
 /// Outcome of [`ImposterManager::apply_config`](super::ImposterManager::apply_config):
@@ -110,7 +111,7 @@ pub(crate) enum StubReconcile {
 /// `replace_stub_by_id`. Returns `Degenerate` — without mutating — when the changed
 /// fraction exceeds 1/2 (pure moves cost nothing in that metric).
 pub(crate) fn reconcile_stub_states(
-    states: &mut Vec<StubState>,
+    states: &mut Vec<Arc<StubState>>,
     desired: Vec<Stub>,
 ) -> StubReconcile {
     let old_keys = stub_keys_iter(states.iter().map(|s| &s.stub));
@@ -143,19 +144,22 @@ pub(crate) fn reconcile_stub_states(
         return StubReconcile::Degenerate;
     }
 
-    let mut by_key: HashMap<String, StubState> =
+    let mut by_key: HashMap<String, Arc<StubState>> =
         old_keys.into_iter().zip(states.drain(..)).collect();
     *states = new_keys
         .into_iter()
         .zip(desired)
         .map(|(key, stub)| match by_key.remove(&key) {
-            Some(mut state) => {
+            // Same key: keep the slot's cycler + slot token; only rebuild the Arc when the
+            // stub content actually changed (issue #287).
+            Some(state) => {
                 if stubs_differ(&state.stub, &stub) {
-                    state.stub = stub;
+                    Arc::new(state.with_stub(stub))
+                } else {
+                    state
                 }
-                state
             }
-            None => StubState::new(stub),
+            None => Arc::new(StubState::new(stub)),
         })
         .collect();
     let removed_keys = by_key
@@ -208,6 +212,11 @@ mod tests {
                 {"is": {"statusCode": 200, "body": second}}
             ]
         }))
+    }
+
+    /// Build a live stub state (states are stored behind `Arc` since #287).
+    fn st(stub: Stub) -> Arc<StubState> {
+        Arc::new(StubState::new(stub))
     }
 
     /// Serve the state's next response and return its body (advances the cycler).
@@ -277,9 +286,9 @@ mod tests {
     #[test]
     fn patch_preserves_untouched_stub_cursors() {
         let mut states = vec![
-            StubState::new(two_resp("a1", "a2")),
-            StubState::new(one_resp("b")),
-            StubState::new(one_resp("c")),
+            st(two_resp("a1", "a2")),
+            st(one_resp("b")),
+            st(one_resp("c")),
         ];
         assert_eq!(next_body(&states[0]), "a1");
 
@@ -299,10 +308,7 @@ mod tests {
 
     #[test]
     fn pure_reorder_preserves_all_cursors() {
-        let mut states = vec![
-            StubState::new(two_resp("a1", "a2")),
-            StubState::new(two_resp("b1", "b2")),
-        ];
+        let mut states = vec![st(two_resp("a1", "a2")), st(two_resp("b1", "b2"))];
         assert_eq!(next_body(&states[0]), "a1");
         assert_eq!(next_body(&states[1]), "b1");
 
@@ -317,7 +323,7 @@ mod tests {
 
     #[test]
     fn degenerate_ratio_falls_back_without_mutating() {
-        let mut states = vec![StubState::new(one_resp("a")), StubState::new(one_resp("b"))];
+        let mut states = vec![st(one_resp("a")), st(one_resp("b"))];
         let outcome = reconcile_stub_states(&mut states, vec![one_resp("x"), one_resp("y")]);
         assert!(matches!(outcome, StubReconcile::Degenerate));
         assert_eq!(
@@ -330,7 +336,7 @@ mod tests {
 
     #[test]
     fn identical_stubs_are_unchanged() {
-        let mut states = vec![StubState::new(one_resp("a")), StubState::new(one_resp("b"))];
+        let mut states = vec![st(one_resp("a")), st(one_resp("b"))];
         let outcome = reconcile_stub_states(&mut states, vec![one_resp("a"), one_resp("b")]);
         assert!(matches!(outcome, StubReconcile::Unchanged));
     }
@@ -339,11 +345,7 @@ mod tests {
     fn same_id_content_change_patches_in_place_keeping_cursor() {
         let mut with_id = two_resp("v1a", "v1b");
         with_id.id = Some("s1".into());
-        let mut states = vec![
-            StubState::new(with_id),
-            StubState::new(one_resp("b")),
-            StubState::new(one_resp("c")),
-        ];
+        let mut states = vec![st(with_id), st(one_resp("b")), st(one_resp("c"))];
         assert_eq!(next_body(&states[0]), "v1a");
 
         let mut updated = two_resp("v2a", "v2b");
@@ -361,9 +363,9 @@ mod tests {
     #[test]
     fn insertion_below_threshold_patches() {
         let mut states = vec![
-            StubState::new(two_resp("a1", "a2")),
-            StubState::new(one_resp("b")),
-            StubState::new(one_resp("c")),
+            st(two_resp("a1", "a2")),
+            st(one_resp("b")),
+            st(one_resp("c")),
         ];
         assert_eq!(next_body(&states[0]), "a1");
 
