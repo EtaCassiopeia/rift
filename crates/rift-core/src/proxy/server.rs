@@ -293,9 +293,12 @@ impl ProxyServer {
         }
 
         let server = Arc::new(self);
+        // Read socket tuning once per listener, not per accepted connection.
+        let socket_tuning = super::network::SocketTuning::from_env();
 
         loop {
             let (stream, remote_addr) = listener.accept().await?;
+            super::network::apply_stream_tuning(&stream, &socket_tuning);
             let server = Arc::clone(&server);
             let tls_acceptor = tls_acceptor.clone();
 
