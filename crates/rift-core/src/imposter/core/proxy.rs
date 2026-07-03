@@ -187,10 +187,11 @@ impl Imposter {
     /// Insert a generated stub at the specified index
     pub fn insert_generated_stub(&self, stub: Stub, before_index: usize) {
         let new_stub_state = Arc::new(StubState::new(stub));
-        let mut stubs = self.stubs.write();
-        let index = before_index.min(stubs.len());
-        stubs.insert(index, new_stub_state);
-        debug!("Inserted generated stub at index {}", index);
+        self.mutate_stubs(|stubs| {
+            let index = before_index.min(stubs.len());
+            stubs.insert(index, new_stub_state);
+            debug!("Inserted generated stub at index {}", index);
+        });
     }
 
     /// Insert or append a generated stub based on proxy mode.
@@ -202,69 +203,69 @@ impl Imposter {
     /// For proxyOnce: Insert new stub BEFORE the proxy stub (so it matches first next time)
     /// For proxyAlways: Append response to existing stub AFTER proxy stub, or insert new AFTER proxy
     pub fn insert_or_append_proxy_stub(&self, stub: Stub, proxy_to: &str, proxy_mode: &str) {
-        let mut stubs = self.stubs.write();
-
-        // Re-locate the proxy stub under the write lock to avoid stale-index races.
-        let proxy_stub_index = stubs
-            .iter()
-            .position(|s| {
-                s.stub
-                    .responses
-                    .iter()
-                    .any(|r| matches!(r, StubResponse::Proxy { proxy } if proxy.to == proxy_to))
-            })
-            .unwrap_or(stubs.len());
-
-        if proxy_mode == "proxyAlways" {
-            // For proxyAlways, recorded stubs go AFTER the proxy stub
-            // This ensures proxy always runs first and records each request
-
-            // Try to find existing stub with matching predicates (after the proxy stub)
-            let matching_stub_idx = stubs
+        self.mutate_stubs(|stubs| {
+            // Re-locate the proxy stub inside the write critical section to avoid stale-index races.
+            let proxy_stub_index = stubs
                 .iter()
-                .map(|stub_state| &stub_state.stub)
-                .enumerate()
-                .skip(proxy_stub_index + 1) // Only look after the proxy stub
-                .find(|(_, existing)| {
-                    // Compare predicates (JSON comparison)
-                    let existing_preds =
-                        serde_json::to_string(&existing.predicates).unwrap_or_default();
-                    let new_preds = serde_json::to_string(&stub.predicates).unwrap_or_default();
-                    existing_preds == new_preds && !existing.predicates.is_empty()
+                .position(|s| {
+                    s.stub
+                        .responses
+                        .iter()
+                        .any(|r| matches!(r, StubResponse::Proxy { proxy } if proxy.to == proxy_to))
                 })
-                .map(|(idx, _)| idx);
+                .unwrap_or(stubs.len());
 
-            if let Some(idx) = matching_stub_idx {
-                // Append responses to the existing stub. States live behind `Arc` (issue #287),
-                // so rebuild the entry from a stub with the extended responses while reusing the
-                // slot's cycler + slot token.
-                let mut merged = stubs[idx].stub.clone();
-                merged.responses.extend(stub.responses);
-                let total = merged.responses.len();
-                stubs[idx] = Arc::new(stubs[idx].with_stub(merged));
+            if proxy_mode == "proxyAlways" {
+                // For proxyAlways, recorded stubs go AFTER the proxy stub
+                // This ensures proxy always runs first and records each request
+
+                // Try to find existing stub with matching predicates (after the proxy stub)
+                let matching_stub_idx = stubs
+                    .iter()
+                    .map(|stub_state| &stub_state.stub)
+                    .enumerate()
+                    .skip(proxy_stub_index + 1) // Only look after the proxy stub
+                    .find(|(_, existing)| {
+                        // Compare predicates (JSON comparison)
+                        let existing_preds =
+                            serde_json::to_string(&existing.predicates).unwrap_or_default();
+                        let new_preds = serde_json::to_string(&stub.predicates).unwrap_or_default();
+                        existing_preds == new_preds && !existing.predicates.is_empty()
+                    })
+                    .map(|(idx, _)| idx);
+
+                if let Some(idx) = matching_stub_idx {
+                    // Append responses to the existing stub. States live behind `Arc` (issue #287),
+                    // so rebuild the entry from a stub with the extended responses while reusing the
+                    // slot's cycler + slot token.
+                    let mut merged = stubs[idx].stub.clone();
+                    merged.responses.extend(stub.responses);
+                    let total = merged.responses.len();
+                    stubs[idx] = Arc::new(stubs[idx].with_stub(merged));
+                    debug!(
+                        "Appended response to existing stub at index {idx} (proxyAlways mode, {total} total responses)"
+                    );
+                    return;
+                }
+
+                // No matching stub found: insert new stub AFTER the proxy stub
+                let insert_index = (proxy_stub_index + 1).min(stubs.len());
+                stubs.insert(insert_index, Arc::new(StubState::new(stub)));
                 debug!(
-                    "Appended response to existing stub at index {idx} (proxyAlways mode, {total} total responses)"
+                    "Inserted generated stub at index {} after proxy (proxyAlways mode)",
+                    insert_index
                 );
-                return;
+            } else {
+                // For proxyOnce: insert new stub BEFORE the proxy stub
+                // This ensures the recorded stub matches first on subsequent requests
+                let index = proxy_stub_index.min(stubs.len());
+                stubs.insert(index, Arc::new(StubState::new(stub)));
+                debug!(
+                    "Inserted generated stub at index {} before proxy (proxyOnce mode)",
+                    index
+                );
             }
-
-            // No matching stub found: insert new stub AFTER the proxy stub
-            let insert_index = (proxy_stub_index + 1).min(stubs.len());
-            stubs.insert(insert_index, Arc::new(StubState::new(stub)));
-            debug!(
-                "Inserted generated stub at index {} after proxy (proxyAlways mode)",
-                insert_index
-            );
-        } else {
-            // For proxyOnce: insert new stub BEFORE the proxy stub
-            // This ensures the recorded stub matches first on subsequent requests
-            let index = proxy_stub_index.min(stubs.len());
-            stubs.insert(index, Arc::new(StubState::new(stub)));
-            debug!(
-                "Inserted generated stub at index {} before proxy (proxyOnce mode)",
-                index
-            );
-        }
+        });
     }
 
     /// Forward a request through proxy and optionally record the response
