@@ -122,6 +122,10 @@ pub struct Imposter {
     /// mutation atomically swaps in a fresh snapshot (issue #291). Serialize *writers* through
     /// [`Self::mutate_stubs`] / `stubs_write`; never `store()` this field directly.
     pub stubs: ArcSwap<Vec<Arc<StubState>>>,
+    /// Stage-1 path-anchor prefilter over the current `stubs` snapshot (issue #292). Rebuilt in
+    /// [`Self::mutate_stubs`] alongside `stubs`; the match hot path loads it wait-free and uses the
+    /// snapshot it embeds for both candidate selection and evaluation (so no torn read).
+    stub_index: ArcSwap<StubIndex>,
     /// Serializes stub *writers* so a read-copy-update (clone snapshot → mutate → store) can't
     /// lose a concurrent update (issue #291). Off the request hot path — held only by admin /
     /// reload / proxy-record mutations, never by readers.
@@ -185,6 +189,10 @@ impl Imposter {
             .iter()
             .map(|stub| Arc::new(StubState::new(stub.clone())))
             .collect();
+        // Share the exact snapshot with the Stage-1 index so a reader that loads the index gets a
+        // self-consistent (stubs, candidates) pair (issue #292).
+        let stubs_arc = Arc::new(stubs);
+        let stub_index = ArcSwap::from_pointee(StubIndex::build(Arc::clone(&stubs_arc)));
 
         // Extract proxy mode from stubs (use first proxy response's mode)
         let proxy_mode = Self::extract_proxy_mode(&config.stubs);
@@ -195,7 +203,8 @@ impl Imposter {
 
         Self {
             config,
-            stubs: ArcSwap::from_pointee(stubs),
+            stubs: ArcSwap::new(stubs_arc),
+            stub_index,
             stubs_write: Mutex::new(()),
             proxy_store: Arc::new(LocalProxyStore::new(proxy_mode)),
             journal: journal
@@ -222,7 +231,11 @@ impl Imposter {
         let _writer = self.stubs_write.lock();
         let mut next: Vec<Arc<StubState>> = self.stubs.load_full().as_ref().clone();
         let result = f(&mut next);
-        self.stubs.store(Arc::new(next));
+        // Store the snapshot and rebuild the Stage-1 index from the *same* Arc, under the write
+        // lock, so the two never diverge (issue #292).
+        let next_arc = Arc::new(next);
+        self.stubs.store(Arc::clone(&next_arc));
+        self.stub_index.store(Arc::new(StubIndex::build(next_arc)));
         result
     }
 
@@ -368,6 +381,8 @@ impl Imposter {
 
 mod lifecycle;
 mod matching;
+mod stub_index;
+use stub_index::StubIndex;
 mod proxy;
 mod recording;
 mod responses;

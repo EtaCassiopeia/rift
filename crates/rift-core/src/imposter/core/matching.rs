@@ -35,7 +35,14 @@ impl Imposter {
         request_from: Option<&str>,
         client_ip: Option<&str>,
     ) -> anyhow::Result<Option<(Arc<StubState>, usize)>> {
-        let stubs = self.stubs.load();
+        // Stage 1 (issue #292): the index embeds its stub snapshot, so `stubs` and the candidate
+        // set are always consistent. Non-anchored stubs sit in its fallback bucket, so `candidates`
+        // is a superset of the true matches, ascending — Stage-2 first-match-wins is unchanged.
+        // Note: a path-anchored stub whose anchor doesn't match the request is no longer visited, so
+        // its `required_scenario_state` backend read (which could `Err`, #318) is skipped for that
+        // request — correct, since a stub that provably can't match should not be consulted.
+        let snapshot = self.stub_index.load();
+        let stubs = snapshot.stubs();
         // `headers_map` is the single-value, Title-Case header view already built once by the
         // caller (#288) — no re-conversion from `HeaderMap` here.
         // Parse form data if Content-Type is application/x-www-form-urlencoded
@@ -46,7 +53,8 @@ impl Imposter {
         // Parse the request body as JSON once per request and reuse it across every stub's
         // predicates, instead of re-parsing per predicate per stub (issue #290).
         let body_json = body.and_then(|b| serde_json::from_str::<serde_json::Value>(b).ok());
-        for (index, stub_state) in stubs.iter().enumerate() {
+        for stub_idx in snapshot.candidates(path) {
+            let stub_state = &stubs[stub_idx];
             let stub = &stub_state.stub;
             // Correlated-isolation gate (issue #223, runs first): a space-scoped stub only
             // participates in matching when the request's resolved flow_id equals its space.
@@ -85,6 +93,58 @@ impl Imposter {
                 // `cycler` is itself an `Arc`, so advancing it via this handle is visible through
                 // the stored stub, and an in-place replace swaps a new `Arc` while in-flight
                 // requests keep serving their snapshot.
+                return Ok(Some((Arc::clone(stub_state), stub_idx)));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Reference implementation: the pre-#292 linear scan over *all* stubs. Shares every request
+    /// derivation and gate with the indexed path above; only the iteration differs. Used solely by
+    /// the differential test to prove the index preserves Mountebank first-match-wins exactly.
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn find_matching_stub_linear(
+        &self,
+        method: &str,
+        path: &str,
+        headers_map: &HashMap<String, String>,
+        query: Option<&str>,
+        body: Option<&str>,
+        request_from: Option<&str>,
+        client_ip: Option<&str>,
+    ) -> anyhow::Result<Option<(Arc<StubState>, usize)>> {
+        let stubs = self.stubs.load();
+        let form = Self::parse_form_data(headers_map, body);
+        let imposter_port = self.config.port.unwrap_or(0);
+        let flow_id = self.resolve_flow_id(headers_map);
+        let body_json = body.and_then(|b| serde_json::from_str::<serde_json::Value>(b).ok());
+        for (index, stub_state) in stubs.iter().enumerate() {
+            let stub = &stub_state.stub;
+            if let Some(space) = &stub.space
+                && flow_id != *space
+            {
+                continue;
+            }
+            if let Some(required) = &stub.required_scenario_state {
+                let scenario = stub.scenario_name.as_deref().unwrap_or("");
+                if self.scenario_state(&flow_id, scenario)? != *required {
+                    continue;
+                }
+            }
+            if stub_matches_inner(
+                &stub.predicates,
+                method,
+                path,
+                query,
+                headers_map,
+                body,
+                request_from,
+                client_ip,
+                form.as_ref(),
+                imposter_port,
+                body_json.as_ref(),
+            ) {
                 return Ok(Some((Arc::clone(stub_state), index)));
             }
         }
