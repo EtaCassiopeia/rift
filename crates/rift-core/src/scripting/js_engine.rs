@@ -1119,6 +1119,297 @@ pub struct MountebankDecorateResponse {
     pub body: String,
 }
 
+/// Minimal CommonJS module loader backing the `require()` global (issue #305).
+///
+/// Resolves `path` (absolute as-is, relative against the process CWD), reads the source,
+/// wraps it as `(function(module, exports, __filename, __dirname) { ... })` and evaluates it.
+/// Nested `require(...)` calls inside the loaded module resolve through the same global
+/// `require`, since the wrapper does not shadow it as a parameter.
+///
+/// `cache` memoizes `module.exports` by canonicalized path (falling back to the resolved path
+/// string when canonicalization fails) so requiring the same module twice within one decorate
+/// run only reads and evaluates it once.
+type RequireCache =
+    boa_engine::gc::Gc<boa_engine::gc::GcRefCell<std::collections::HashMap<String, JsValue>>>;
+
+fn require_impl(
+    cache: &RequireCache,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let path_str = args
+        .first()
+        .and_then(|v| v.as_string())
+        .map(|s| s.to_std_string_escaped())
+        .ok_or_else(|| JsNativeError::typ().with_message("require() path must be a string"))?;
+
+    let raw_path = std::path::PathBuf::from(&path_str);
+    let resolved_path = if raw_path.is_absolute() {
+        raw_path
+    } else {
+        let cwd = std::env::current_dir().map_err(|e| {
+            JsNativeError::error()
+                .with_message(format!("require('{path_str}'): cannot resolve cwd: {e}"))
+        })?;
+        cwd.join(raw_path)
+    };
+
+    let cache_key = std::fs::canonicalize(&resolved_path)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| resolved_path.to_string_lossy().into_owned());
+
+    if let Some(cached) = cache.borrow().get(&cache_key) {
+        return Ok(cached.clone());
+    }
+
+    let source = std::fs::read_to_string(&resolved_path)
+        .map_err(|e| JsNativeError::error().with_message(format!("require('{path_str}'): {e}")))?;
+
+    let wrapped_source =
+        format!("(function(module, exports, __filename, __dirname) {{\n{source}\n}})");
+    let wrapper = context.eval(Source::from_bytes(wrapped_source.as_bytes()))?;
+    let wrapper_obj = wrapper.as_object().ok_or_else(|| {
+        JsNativeError::typ().with_message(format!(
+            "require('{path_str}'): module wrapper is not callable"
+        ))
+    })?;
+
+    let module_obj = create_js_object(context);
+    let exports_obj = create_js_object(context);
+    module_obj.set(
+        js_string!("exports"),
+        JsValue::from(exports_obj.clone()),
+        false,
+        context,
+    )?;
+
+    // Publish the (still-empty) exports to the cache BEFORE evaluating the module, so a circular
+    // require() returns the partial module instead of recursing until the native stack overflows
+    // (Node's cycle-breaking contract). The final value is re-published after eval below.
+    cache
+        .borrow_mut()
+        .insert(cache_key.clone(), JsValue::from(exports_obj.clone()));
+
+    let filename = resolved_path.to_string_lossy().into_owned();
+    let dirname = resolved_path
+        .parent()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+
+    wrapper_obj.call(
+        &JsValue::undefined(),
+        &[
+            JsValue::from(module_obj.clone()),
+            JsValue::from(exports_obj),
+            JsValue::from(js_string!(filename)),
+            JsValue::from(js_string!(dirname)),
+        ],
+        context,
+    )?;
+
+    // A module can reassign `module.exports` (e.g. `module.exports = function ...`); publish the
+    // final value so later require()s of the same module get the real exports, not the placeholder.
+    let module_exports = module_obj.get(js_string!("exports"), context)?;
+    cache.borrow_mut().insert(cache_key, module_exports.clone());
+
+    Ok(module_exports)
+}
+
+/// Register a global `require()` implementing the minimal CommonJS loader above.
+///
+/// The module cache is a GC-traced `Gc<GcRefCell<HashMap<..>>>` passed as the native function's
+/// capture, so it is shared across every `require()` call made during one script evaluation
+/// (including nested requires triggered by a loaded module) and its cached `JsValue`s stay
+/// reachable to the collector for the lifetime of the enclosing `Context`.
+fn register_require(context: &mut Context) -> Result<()> {
+    // The cache holds `JsValue`s (module.exports), which are GC-managed, so it must be a
+    // GC-traced capture — a plain `Rc<RefCell<..>>` closure capture would be untraced and could
+    // let the GC free a cached export still referenced only from the cache (UB). `Gc<GcRefCell>`
+    // is traced, so `from_copy_closure_with_captures` registers it safely (no `unsafe`).
+    let cache: RequireCache = boa_engine::gc::Gc::new(boa_engine::gc::GcRefCell::new(
+        std::collections::HashMap::new(),
+    ));
+
+    let require_fn = NativeFunction::from_copy_closure_with_captures(
+        |_this, args, cache: &RequireCache, context| require_impl(cache, args, context),
+        cache,
+    );
+
+    let global = context.global_object();
+    global
+        .set(
+            js_string!("require"),
+            require_fn.to_js_function(context.realm()),
+            false,
+            context,
+        )
+        .map_err(|e| anyhow!("Failed to set require: {e}"))?;
+
+    Ok(())
+}
+
+/// Execute a Mountebank `config => {...}` / `function(config)` decorate in Boa, exposing a
+/// `config` object ({ request, response, path }) and a CommonJS `require()` so a decorate can
+/// load an external `.cjs`/`.js` module (issue #305). Returns the mutated response.
+pub fn execute_mountebank_config_decorate(
+    decorate_fn: &str,
+    request: &MountebankRequest,
+    response_body: &str,
+    response_status: u16,
+    response_headers: &std::collections::HashMap<String, String>,
+) -> Result<MountebankDecorateResponse> {
+    let mut context = Context::default();
+
+    // Create request object
+    let request_obj = create_mountebank_request_object(&mut context, request)?;
+
+    // Create response object
+    let response_obj = create_js_object(&context);
+
+    response_obj
+        .set(
+            js_string!("statusCode"),
+            JsValue::from(response_status as i32),
+            false,
+            &mut context,
+        )
+        .map_err(|e| anyhow!("Failed to set statusCode: {e}"))?;
+
+    response_obj
+        .set(
+            js_string!("body"),
+            JsValue::from(js_string!(response_body.to_string())),
+            false,
+            &mut context,
+        )
+        .map_err(|e| anyhow!("Failed to set body: {e}"))?;
+
+    // Create headers object for response
+    let headers_obj = create_js_object(&context);
+    for (k, v) in response_headers {
+        headers_obj
+            .set(
+                js_string!(k.clone()),
+                JsValue::from(js_string!(v.clone())),
+                false,
+                &mut context,
+            )
+            .map_err(|e| anyhow!("Failed to set header: {e}"))?;
+    }
+    response_obj
+        .set(js_string!("headers"), headers_obj, false, &mut context)
+        .map_err(|e| anyhow!("Failed to set headers: {e}"))?;
+
+    // Build the config object: { request, response, path }
+    let config_obj = create_js_object(&context);
+    config_obj
+        .set(js_string!("request"), request_obj, false, &mut context)
+        .map_err(|e| anyhow!("Failed to set config.request: {e}"))?;
+    config_obj
+        .set(
+            js_string!("response"),
+            JsValue::from(response_obj),
+            false,
+            &mut context,
+        )
+        .map_err(|e| anyhow!("Failed to set config.response: {e}"))?;
+    config_obj
+        .set(
+            js_string!("path"),
+            JsValue::from(js_string!(request.path.clone())),
+            false,
+            &mut context,
+        )
+        .map_err(|e| anyhow!("Failed to set config.path: {e}"))?;
+
+    // Register the CommonJS `require()` global before evaluating the decorate so it (and any
+    // module it loads) can use it.
+    register_require(&mut context)?;
+
+    // Set global variable
+    let global = context.global_object();
+    global
+        .set(
+            js_string!("__config"),
+            config_obj.clone(),
+            false,
+            &mut context,
+        )
+        .map_err(|e| anyhow!("Failed to set config: {e}"))?;
+
+    // Wrap the decorate function to call it with our config object (already set as the
+    // `__config` global above).
+    let wrapper_script = format!(
+        r#"
+        var __configFn = {decorate_fn};
+        __configFn(__config);
+        __config.response;
+        "#
+    );
+
+    // Execute the script
+    let result = context
+        .eval(Source::from_bytes(wrapper_script.as_bytes()))
+        .map_err(|e| anyhow!("Failed to execute config decorate function: {e}"))?;
+
+    // Parse the modified response
+    let obj = result.as_object().ok_or_else(|| {
+        anyhow!("Config decorate function must leave config.response as an object")
+    })?;
+
+    // Get statusCode
+    let status_code = obj
+        .get(js_string!("statusCode"), &mut context)
+        .ok()
+        .and_then(|v| v.as_number())
+        .map(|n| n as u16)
+        .unwrap_or(response_status);
+
+    // Get headers
+    let mut headers = response_headers.clone();
+    if let Ok(headers_val) = obj.get(js_string!("headers"), &mut context)
+        && let Some(headers_obj) = headers_val.as_object()
+        && let Ok(keys) = headers_obj.own_property_keys(&mut context)
+    {
+        for key in keys {
+            let key_str = match &key {
+                PropertyKey::String(s) => s.to_std_string_escaped(),
+                PropertyKey::Index(i) => i.get().to_string(),
+                PropertyKey::Symbol(_) => continue,
+            };
+            if let Ok(val) = headers_obj.get(key.clone(), &mut context)
+                && let Some(s) = val.as_string()
+            {
+                headers.insert(key_str, s.to_std_string_escaped());
+            }
+        }
+    }
+
+    // Get body
+    let body = obj
+        .get(js_string!("body"), &mut context)
+        .ok()
+        .map(|v| {
+            if let Some(s) = v.as_string() {
+                s.to_std_string_escaped()
+            } else if v.is_object() {
+                let json = js_to_json(&mut context, &v).unwrap_or(Value::Null);
+                serde_json::to_string(&json).unwrap_or_default()
+            } else if v.is_null() || v.is_undefined() {
+                String::new()
+            } else {
+                v.display().to_string()
+            }
+        })
+        .unwrap_or_else(|| response_body.to_string());
+
+    Ok(MountebankDecorateResponse {
+        status_code,
+        headers,
+        body,
+    })
+}
+
 /// Execute a Mountebank-style decorate behavior function
 /// Format: function(request, response) { ... modifies response ... }
 pub fn execute_mountebank_decorate(
@@ -1800,5 +2091,139 @@ function should_inject(request, flow_store) {
             result.err()
         );
         assert_eq!(result.unwrap().body, "state ok");
+    }
+
+    // Issue #305 gate: `config =>` decorate convention in Boa + CommonJS require().
+    fn config_req() -> MountebankRequest {
+        MountebankRequest {
+            method: "POST".to_string(),
+            path: "/req".to_string(),
+            query: HashMap::new(),
+            headers: HashMap::new(),
+            body: Some("REQ-BODY".to_string()),
+        }
+    }
+
+    // Writes a unique temp .cjs module and returns its path; caller removes it.
+    fn write_temp_cjs(tag: &str, source: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static SEQ: AtomicU32 = AtomicU32::new(0);
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        let path =
+            std::env::temp_dir().join(format!("rift_305_{tag}_{}_{n}.cjs", std::process::id()));
+        std::fs::write(&path, source).expect("write temp module");
+        path
+    }
+
+    // AC1: require() loads + runs an external module; its config.response mutation takes effect.
+    #[test]
+    fn test_config_decorate_require_runs_module() {
+        let module = write_temp_cjs(
+            "run",
+            "module.exports = function (config) {\n  config.response.body = 'REQUIRE-RAN';\n  config.response.headers = config.response.headers || {};\n  config.response.headers['X-Injected-By'] = 'mod.cjs';\n};\n",
+        );
+        let script = format!(
+            "config => {{ const s = require('{}'); s(config); }}",
+            module.display()
+        );
+        let result = execute_mountebank_config_decorate(
+            &script,
+            &config_req(),
+            "orig",
+            200,
+            &HashMap::new(),
+        );
+        let _ = std::fs::remove_file(&module);
+        let resp = result.expect("require decorate should run");
+        assert_eq!(resp.body, "REQUIRE-RAN");
+        assert_eq!(
+            resp.headers.get("X-Injected-By").map(String::as_str),
+            Some("mod.cjs")
+        );
+    }
+
+    // AC2: the config convention runs in Boa without require.
+    #[test]
+    fn test_config_decorate_direct_field_access() {
+        let script = "config => { config.response.body = 'DIRECT'; }";
+        let resp =
+            execute_mountebank_config_decorate(script, &config_req(), "orig", 200, &HashMap::new())
+                .expect("direct config decorate should run");
+        assert_eq!(resp.body, "DIRECT");
+    }
+
+    // AC3: config.request is exposed to the decorate.
+    #[test]
+    fn test_config_decorate_reads_request_body() {
+        let script = "config => { config.response.body = config.request.body; }";
+        let resp =
+            execute_mountebank_config_decorate(script, &config_req(), "orig", 200, &HashMap::new())
+                .expect("config.request decorate should run");
+        assert_eq!(resp.body, "REQ-BODY");
+    }
+
+    // Circular require() must terminate (Node cycle-break), not recurse into a stack overflow.
+    #[test]
+    fn test_config_decorate_require_circular_terminates() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static SEQ: AtomicU32 = AtomicU32::new(0);
+        let pid = std::process::id();
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir();
+        let path_a = dir.join(format!("rift_305_cyc_a_{pid}_{n}.cjs"));
+        let path_b = dir.join(format!("rift_305_cyc_b_{pid}_{n}.cjs"));
+        // a <-> b require each other (the cycle); b gets a's partial exports via the cache instead
+        // of recursing forever. The outer require(a) must still return a's FINAL exports.
+        std::fs::write(
+            &path_a,
+            format!(
+                "const b = require('{}');\nmodule.exports = {{ tag: 'A-LOADED' }};\n",
+                path_b.display()
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            &path_b,
+            format!(
+                "const a = require('{}');\nmodule.exports = {{ tag: 'B-LOADED' }};\n",
+                path_a.display()
+            ),
+        )
+        .unwrap();
+        // The guarantee is termination: require(a) drives the a->b->a cycle, which the cache-break
+        // resolves instead of recursing until the native stack overflows (which would abort the
+        // process). Execution then continues and sets the body. (Exact exports of a module observed
+        // mid-cycle are CommonJS-implementation-defined and out of scope here.)
+        let script = format!(
+            "config => {{ require('{}'); config.response.body = 'REACHED'; }}",
+            path_a.display()
+        );
+        let result = execute_mountebank_config_decorate(
+            &script,
+            &config_req(),
+            "orig",
+            200,
+            &HashMap::new(),
+        );
+        let _ = std::fs::remove_file(&path_a);
+        let _ = std::fs::remove_file(&path_b);
+        assert_eq!(
+            result
+                .expect("circular require must terminate, not overflow")
+                .body,
+            "REACHED"
+        );
+    }
+
+    // AC4: a require() of a missing module surfaces as an error, not a silent Ok/no-op.
+    #[test]
+    fn test_config_decorate_require_missing_errors() {
+        let script = "config => { const s = require('/no/such/rift305/module.cjs'); s(config); }";
+        let result =
+            execute_mountebank_config_decorate(script, &config_req(), "orig", 200, &HashMap::new());
+        assert!(
+            result.is_err(),
+            "a missing require() must surface as Err, not silently no-op"
+        );
     }
 }
