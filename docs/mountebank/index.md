@@ -1,7 +1,7 @@
 ---
 layout: default
 title: Mountebank Compatibility
-nav_order: 3
+nav_order: 5.5
 has_children: true
 permalink: /mountebank/
 ---
@@ -9,6 +9,10 @@ permalink: /mountebank/
 # Mountebank Compatibility
 
 Rift implements the [Mountebank](http://www.mbtest.org/) REST API and configuration format. This allows you to use Rift as a drop-in replacement for Mountebank with significantly better performance.
+
+> New to the model? Start with [Concepts]({{ site.baseurl }}/concepts/) — it explains imposters,
+> stubs, predicates, responses, and behaviors conceptually, then the Rift-specific stateful features.
+> This section is the syntax-level reference for the Mountebank-compatible surface.
 
 ---
 

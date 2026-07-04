@@ -126,7 +126,12 @@ See the [Node.js Integration Guide]({{ site.baseurl }}/getting-started/nodejs/) 
 - [Node.js Integration]({{ site.baseurl }}/getting-started/nodejs/) - npm package for Node.js projects
 - [Migration from Mountebank]({{ site.baseurl }}/getting-started/migration/) - Switch from Mountebank to Rift
 
-### Mountebank Compatibility
+### Concepts
+- [Concepts Overview]({{ site.baseurl }}/concepts/) - The Rift mental model, start here
+- [Core Building Blocks]({{ site.baseurl }}/concepts/building-blocks/) - Imposters, stubs, predicates, responses, behaviors
+- [The Rift Model]({{ site.baseurl }}/concepts/rift-model/) - Flow-state, scenarios, and correlated isolation
+
+### Mountebank Compatibility (reference)
 - [Imposters]({{ site.baseurl }}/mountebank/imposters/) - Creating and managing mock servers
 - [Predicates]({{ site.baseurl }}/mountebank/predicates/) - Request matching (equals, contains, regex, jsonpath, xpath)
 - [Responses]({{ site.baseurl }}/mountebank/responses/) - Configuring stub responses
@@ -151,6 +156,7 @@ See the [Node.js Integration Guide]({{ site.baseurl }}/getting-started/nodejs/) 
 ### Reference
 - [REST API]({{ site.baseurl }}/api/) - Admin API reference
 - [Performance]({{ site.baseurl }}/performance/) - Benchmark results
+- [Changelog]({{ site.baseurl }}/changelog/) - Notable user-facing changes
 
 ### Embedding & Extension
 - [Embedding & SPI]({{ site.baseurl }}/embedding/) - Embed Rift as a library, extend it via SPI traits
