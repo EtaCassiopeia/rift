@@ -287,6 +287,38 @@ pub fn apply_js_or_rhai_decorate(
     // Rhai request/response maps. Checked before the `function` route since arrow scripts don't
     // start with "function" and `function(config)` uses the config model, not (request, response).
     if is_js_config_decorate(script) {
+        // Issue #305: a `config =>` decorate that `require()`s an external CommonJS module
+        // can't be represented by the lossy Rhai rewrite below (it doesn't run real JS), so
+        // route it through the Boa engine instead, where `require()` actually works.
+        #[cfg(feature = "javascript")]
+        // `require(` / `require (` → needs the real JS engine (not the lossy Rhai rewrite). A false
+        // positive only routes a simple decorate through Boa (still correct); a false negative would
+        // fail loudly at Rhai-eval, never silently.
+        if script.contains("require(") || script.contains("require (") {
+            let mb_request = crate::scripting::MountebankRequest {
+                method: request.method.clone(),
+                path: request.path.clone(),
+                query: request.query.clone(),
+                headers: request.headers.clone(),
+                body: request.body.clone(),
+            };
+            return match crate::scripting::execute_mountebank_config_decorate(
+                script,
+                &mb_request,
+                body,
+                status,
+                headers,
+            ) {
+                Ok(result) => {
+                    for (k, v) in result.headers {
+                        headers.insert(k, v);
+                    }
+                    Ok((result.body, result.status_code))
+                }
+                Err(e) => Err(DecorateError::JavaScript(e.to_string())),
+            };
+        }
+
         let rhai_script = rewrite_js_config_to_rhai(script);
         return apply_decorate(&rhai_script, request, body, status, headers);
     }
@@ -382,6 +414,33 @@ mod tests {
         )
         .unwrap();
         assert_eq!(body, "REQ-BODY");
+    }
+
+    // Issue #305: a `config =>` decorate that require()s an external module must route to the JS
+    // engine (not the lossy Rhai rewrite) and actually run the module.
+    #[cfg(feature = "javascript")]
+    #[test]
+    fn decorate_js_config_require_routes_to_boa() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static SEQ: AtomicU32 = AtomicU32::new(0);
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        let module =
+            std::env::temp_dir().join(format!("rift_305_route_{}_{n}.cjs", std::process::id()));
+        std::fs::write(
+            &module,
+            "module.exports = function (config) { config.response.body = 'REQUIRE-RAN'; };\n",
+        )
+        .unwrap();
+        let script = format!(
+            "config => {{ const s = require('{}'); s(config); }}",
+            module.display()
+        );
+        let mut headers = std::collections::HashMap::new();
+        let result =
+            apply_js_or_rhai_decorate(&script, &decorate_req(), "original", 200, &mut headers);
+        let _ = std::fs::remove_file(&module);
+        let (body, _) = result.expect("require-based config decorate should run");
+        assert_eq!(body, "REQUIRE-RAN");
     }
 
     #[test]
