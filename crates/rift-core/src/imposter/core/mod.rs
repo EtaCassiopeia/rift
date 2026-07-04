@@ -301,10 +301,11 @@ impl Imposter {
                     info!("Creating deliberately failing FlowStore (test-backend feature)");
                     Ok(Arc::new(crate::extensions::flow_state::FailingFlowStore))
                 }
-                other => {
-                    warn!("Unknown flow state backend '{}', using NoOp", other);
-                    Ok(Arc::new(NoOpFlowStore))
-                }
+                // An explicitly-set but unrecognized backend is a config error, not a reason to
+                // silently downgrade to NoOp (issue #377) — fail construction like the redis arm.
+                other => anyhow::bail!(
+                    "flowState.backend is \"{other}\" but no such backend exists (expected \"inmemory\" or \"redis\")"
+                ),
             };
         }
 
@@ -511,6 +512,21 @@ mod tests {
         }))
         .expect("valid imposter config");
         assert!(Imposter::new_with_hooks_and_journal(cfg, None, None, None).is_ok());
+    }
+
+    // Issue #377: an explicitly-set but unrecognized backend (a typo) must fail construction, not
+    // silently downgrade to NoOp — the same fail-loud contract #325 gave the redis arm.
+    #[test]
+    fn explicit_unknown_backend_fails_construction() {
+        let cfg = serde_json::from_value(json!({
+            "port": 0, "protocol": "http", "stubs": [],
+            "_rift": { "flowState": { "backend": "postgres" } }
+        }))
+        .expect("valid imposter config");
+        assert!(
+            Imposter::new_with_hooks_and_journal(cfg, None, None, None).is_err(),
+            "an unrecognized flowState.backend must fail construction, not fall back to NoOp"
+        );
     }
 
     /// Serve the state's next response body, advancing the shared cycler.
