@@ -25,6 +25,9 @@ pub mod admin_api;
 // Inbound forward-proxy intercept listener (TLS-MITM, epic #394 slice 3)
 pub mod intercept;
 
+// Intercept rules (predicate match -> serve/forward) + admin control state (epic #394 slice 4)
+pub mod intercept_rules;
+
 // Imposter config loading (--configfile / --datadir), shared with hot-reload (issue #197)
 pub mod config_loader;
 

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// A single predicate: matcher parameters plus the operation to apply.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Predicate {
     #[serde(flatten)]
@@ -17,7 +17,7 @@ pub struct Predicate {
 }
 
 /// The matching operation a predicate performs (Mountebank-compatible).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum PredicateOperation {
     Equals(HashMap<String, serde_json::Value>),
@@ -34,7 +34,7 @@ pub enum PredicateOperation {
 }
 
 /// Matcher parameters shared across operations (case sensitivity, selectors, etc.).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PredicateParameters {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -48,7 +48,7 @@ pub struct PredicateParameters {
 }
 
 /// A structured selector applied to the request body before matching.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PredicateSelector {
     XPath {
