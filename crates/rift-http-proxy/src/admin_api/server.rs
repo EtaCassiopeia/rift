@@ -4,6 +4,7 @@ use crate::admin_api::router::route_request;
 use crate::config_loader::ConfigSource;
 use crate::extensions::decorate::{ResponsePhase, with_annotation_scope};
 use crate::imposter::ImposterManager;
+use crate::intercept_rules::InterceptState;
 use http_body_util::Full;
 use hyper::body::Bytes;
 use hyper::service::service_fn;
@@ -28,6 +29,7 @@ pub struct AdminApiServer {
     api_key: Option<Arc<String>>,
     config_source: Option<Arc<ConfigSource>>,
     allow_injection: bool,
+    intercept: Option<Arc<InterceptState>>,
 }
 
 impl AdminApiServer {
@@ -39,6 +41,7 @@ impl AdminApiServer {
             api_key: api_key.map(Arc::new),
             config_source: None,
             allow_injection: false,
+            intercept: None,
         }
     }
 
@@ -55,6 +58,15 @@ impl AdminApiServer {
     #[must_use]
     pub fn with_allow_injection(mut self, allow: bool) -> Self {
         self.allow_injection = allow;
+        self
+    }
+
+    /// Wire the `/intercept/...` admin routes (rule CRUD + CA/truststore export, epic #394 slice
+    /// 4) to `state`. Without this, `/intercept/...` responds `404` — the admin server has no
+    /// intercept surface unless an embedder explicitly opts in.
+    #[must_use]
+    pub fn with_intercept(mut self, state: Arc<InterceptState>) -> Self {
+        self.intercept = Some(state);
         self
     }
 
@@ -82,6 +94,7 @@ impl AdminApiServer {
                 self.api_key,
                 self.config_source,
                 self.allow_injection,
+                self.intercept,
                 loop_cancel,
                 loop_tracker,
             )
@@ -169,12 +182,14 @@ fn take_task<T>(slot: &Mutex<Option<JoinHandle<T>>>) -> Option<JoinHandle<T>> {
 
 /// Accept connections until `cancel` fires or the listener errors. Each connection is tracked
 /// so `shutdown` can wait for in-flight requests to drain.
+#[allow(clippy::too_many_arguments)]
 async fn accept_loop(
     listener: TcpListener,
     manager: Arc<ImposterManager>,
     api_key: Option<Arc<String>>,
     config_source: Option<Arc<ConfigSource>>,
     allow_injection: bool,
+    intercept: Option<Arc<InterceptState>>,
     cancel: CancellationToken,
     tracker: TaskTracker,
 ) -> anyhow::Result<()> {
@@ -187,6 +202,7 @@ async fn accept_loop(
         let manager = Arc::clone(&manager);
         let api_key = api_key.clone();
         let config_source = config_source.clone();
+        let intercept = intercept.clone();
         let conn_cancel = cancel.clone();
 
         tracker.spawn(async move {
@@ -194,6 +210,7 @@ async fn accept_loop(
                 let manager = Arc::clone(&manager);
                 let api_key = api_key.clone();
                 let config_source = config_source.clone();
+                let intercept = intercept.clone();
                 async move {
                     // Per-request annotation scope + response decorator (issue #318):
                     // every response through this listener — including the `/__rift/`
@@ -218,7 +235,7 @@ async fn accept_loop(
                                 return Ok::<_, hyper::Error>(unauthorized_response());
                             }
                         }
-                        route_request(req, manager, config_source, allow_injection).await
+                        route_request(req, manager, config_source, allow_injection, intercept).await
                     })
                     .await;
                     let mut response = result?;
