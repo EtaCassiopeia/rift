@@ -6,7 +6,7 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-nightly-orange)](https://www.rust-lang.org/)
 
-Rift is a high-performance, [Mountebank](https://www.mbtest.dev/)-compatible mock server that delivers **~20–50x faster simple stubs and 100–1300x on predicate-heavy workloads**. Use your existing Mountebank configurations and enjoy faster test execution.
+Rift is a high-performance, [Mountebank](https://www.mbtest.dev/)-compatible mock server that delivers **~20–150x faster throughput on typical workloads, and up to ~450x on large regex predicate sets**. Use your existing Mountebank configurations and enjoy faster test execution.
 
 **[Documentation](https://etacassiopeia.github.io/rift/)** | **[Quick Start](#quick-start)** | **[Examples](examples/)**
 
@@ -24,13 +24,13 @@ Rift is a high-performance, [Mountebank](https://www.mbtest.dev/)-compatible moc
 
 | Workload | Mountebank | Rift | Speedup |
 |:---------|-----------:|-----:|:--------|
-| Simple static stub | 4,270 RPS | 211,162 RPS | **~49x** |
-| Deep path match (410 stubs) | 1,357 RPS | 201,795 RPS | **~149x** |
-| Complex AND/OR predicates | 4,798 RPS | 185,550 RPS | **~39x** |
-| JSON body equals | 7,844 RPS | 191,746 RPS | **~24x** |
-| JSONPath predicate | 119 RPS | 153,988 RPS | **~1298x** |
-| XPath predicate | 327 RPS | 19,286 RPS | **~59x** |
-| Regex path (100 patterns) | 110 RPS | 48,710 RPS | **~442x** |
+| Simple static stub | 4,141 RPS | 214,028 RPS | **~52x** |
+| Deep path match (410 stubs) | 1,342 RPS | 208,580 RPS | **~155x** |
+| Complex AND/OR predicates | 4,619 RPS | 191,724 RPS | **~42x** |
+| JSON body equals | 7,780 RPS | 203,490 RPS | **~26x** |
+| JSONPath predicate | 3,586 RPS | 201,029 RPS | **~56x** |
+| XPath predicate | 5,640 RPS | 185,417 RPS | **~33x** |
+| Regex path (100 patterns) | 107 RPS | 48,029 RPS | **~449x** |
 
 <sub>Measured 2026-07-07 — Rift `0.11.0` (built from `master`) vs Mountebank `2.9.1`, native
 processes (no Docker) on Apple Silicon (macOS), `oha` at 50 keep-alive connections, 20s/scenario

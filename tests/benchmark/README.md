@@ -50,8 +50,10 @@ How it stays fair and correct:
 - **Hard teardown** — each engine is launched in its own process group and
   killed by group + `lsof`; its ports must be confirmed free before the next
   engine starts.
-- **Response assertions** — every scenario checks the HTTP status distribution,
-  so a mis-configured stub can't silently inflate throughput.
+- **Response assertions** — every scenario sends one real request first and
+  checks the returned **body** (not just a 2xx status) proves the intended stub
+  matched. A request that falls through to the empty no-match default aborts the
+  run, so a mis-configured stub can't silently inflate throughput.
 - **Identical configs** — both engines get byte-identical imposter JSON.
 
 > `oha` initialises a TLS stack that reads the macOS keychain even for

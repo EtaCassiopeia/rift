@@ -82,16 +82,26 @@ def json_body_stubs(n=50):
     } for i in range(1, n + 1)]
 
 def jsonpath_stubs(n=50):
+    # Mountebank applies a jsonpath selector as a modifier on a SINGLE-operator predicate, so the
+    # method/path match and the selected-value match must be separate predicates. Rift accepts the
+    # same canonical form; a combined predicate silently fails to match on MB (falls through to the
+    # empty no-match default), which would make the comparison bogus.
     return [{
-        "predicates": [{"equals": {"method": "POST", "path": f"/jsonpath/{i}"},
-            "jsonpath": {"selector": "$.user.id", "equals": i}}],
+        "predicates": [
+            {"equals": {"method": "POST", "path": f"/jsonpath/{i}"}},
+            {"equals": {"body": str(i)}, "jsonpath": {"selector": "$.user.id"}},
+        ],
         "responses": [{"is": {"statusCode": 200, "body": json.dumps({"jsonpath_matched": True, "user_id": i})}}],
     } for i in range(1, n + 1)]
 
 def xpath_stubs(n=50):
+    # Canonical MB form (see jsonpath_stubs): method/path is one predicate, the xpath selector
+    # modifies a second single-operator predicate. Rift matches the same shape.
     return [{
-        "predicates": [{"equals": {"method": "POST", "path": f"/xpath/{i}"},
-            "xpath": {"selector": f"//item[@id='{i}']", "exists": True}}],
+        "predicates": [
+            {"equals": {"method": "POST", "path": f"/xpath/{i}"}},
+            {"exists": {"body": True}, "xpath": {"selector": f"//item[@id='{i}']"}},
+        ],
         "responses": [{"is": {"statusCode": 200,
             "headers": {"Content-Type": "application/xml"},
             "body": f"<response><id>{i}</id></response>"}}],
@@ -154,9 +164,26 @@ SCENARIOS = [
     ("query_last",        4555, "GET",  "/query/search?page=100&size=10", None, {}),
 ]
 
-# both engines return an empty 200 as the default no-match response, so all
-# scenarios here expect 2xx; kept as a map in case future scenarios differ.
-EXPECT = {}
+# both engines return an empty 200 as the default no-match response, so a 2xx status alone does
+# NOT prove the intended stub matched — a mis-matching request falls through to that empty default
+# and would inflate throughput. Each scenario therefore declares a substring its MATCHED body must
+# contain (engine-agnostic: chosen to prove the match without asserting engine-specific rendering
+# like template substitution). `no_match` is the control: its body MUST be empty.
+EXPECT_BODY = {
+    "simple_health": "OK",
+    "api_first": '"total": 2',
+    "api_middle": '"name": "resource5_5"',
+    "api_last": '"name": "resource10_10"',
+    "no_match": None,
+    "regex_last": "regex 100",
+    "complex_predicate": '"complex": 25',
+    "json_body_equals": '"matched": "equals"',
+    "jsonpath": '"jsonpath_matched": true',
+    "xpath": "<id>25</id>",
+    "template": '"template": 25',
+    "header_last": '"routed_to": 100',
+    "query_last": '"page": 100',
+}
 
 # ---- admin API helpers ----
 
@@ -216,6 +243,25 @@ def run_oha(url, method, body, headers, duration, conns):
         raise RuntimeError(f"oha failed: {out.stderr[:300]}")
     return json.loads(out.stdout)
 
+def verify_body(engine, name, method, url, body, headers):
+    """Send one real request and prove the intended stub served it (not the empty no-match default).
+    Aborts the run on a fall-through, so a mis-matching config can never be measured as fast."""
+    data = body.encode() if body is not None else None
+    req = urllib.request.Request(url, data=data, method=method, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            text = r.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        text = e.read().decode("utf-8", "replace")
+    marker = EXPECT_BODY[name]
+    if marker is None:
+        if text != "":
+            raise SystemExit(f"{engine}/{name}: expected the empty no-match default, got {len(text)}B — aborting")
+    elif marker not in text:
+        raise SystemExit(
+            f"{engine}/{name}: stub did not match (marker {marker!r} absent from {len(text)}B body) — "
+            f"the request fell through to the no-match default; measuring this would be bogus. Aborting")
+
 def metric(j):
     s = j["summary"]
     lat = j.get("latencyPercentiles", {})
@@ -241,13 +287,11 @@ def bench(engine, admin_port, offset, duration, warmup, conns):
     rows = []
     for name, base_port, method, path, body, headers in SCENARIOS:
         url = f"http://localhost:{base_port + offset}{path}"
+        verify_body(engine, name, method, url, body, headers)       # prove the stub matched (not fall-through)
         run_oha(url, method, body, headers, warmup, conns)          # warmup (discarded)
         m = metric(run_oha(url, method, body, headers, duration, conns))
         total = sum(m["codes"].values())
-        if name in EXPECT:
-            good = all(EXPECT[name](c) for c in m["codes"])
-        else:
-            good = all(c.startswith("2") for c in m["codes"])
+        good = all(c.startswith("2") for c in m["codes"])
         status = "ok" if good and total > 0 else f"BAD codes={m['codes']}"
         print(f"  {name:20s} {m['rps']:>10.1f} rps  p50={m['p50_ms']}ms p99={m['p99_ms']}  {status}")
         if not (good and total > 0):
