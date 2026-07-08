@@ -1,6 +1,7 @@
 //! Stub management handlers.
 
 use crate::admin_api::handlers::imposters::handle_get as handle_get_imposter;
+use crate::admin_api::handlers::imposters::reject_stubs_if_injection_disallowed;
 use crate::admin_api::types::{
     AddStubRequest, ReplaceStubsRequest, StubWithLinks, collect_body, error_response,
     json_response, make_stub_links,
@@ -21,6 +22,7 @@ pub async fn handle_add(
     req: Request<Incoming>,
     base_url: &str,
     manager: Arc<ImposterManager>,
+    allow_injection: bool,
 ) -> Response<Full<Bytes>> {
     let body = match collect_body(req).await {
         Ok(b) => b,
@@ -33,6 +35,13 @@ pub async fn handle_add(
             return error_response(StatusCode::BAD_REQUEST, &format!("Invalid stub JSON: {e}"));
         }
     };
+
+    // Gate any scripting surface behind --allowInjection before mutating state (B3, issue #355).
+    if let Some(rejection) =
+        reject_stubs_if_injection_disallowed(std::slice::from_ref(&add_req.stub), allow_injection)
+    {
+        return rejection;
+    }
 
     // Issue #202: honor a caller-supplied `id`, but generate a stable one if absent so every
     // stub is addressable via the by-id endpoints.
@@ -94,6 +103,7 @@ pub async fn handle_replace_all(
     req: Request<Incoming>,
     base_url: &str,
     manager: Arc<ImposterManager>,
+    allow_injection: bool,
 ) -> Response<Full<Bytes>> {
     let body = match collect_body(req).await {
         Ok(b) => b,
@@ -106,6 +116,13 @@ pub async fn handle_replace_all(
             return error_response(StatusCode::BAD_REQUEST, &format!("Invalid stubs JSON: {e}"));
         }
     };
+
+    // Gate any scripting surface behind --allowInjection before mutating state (B3, issue #355).
+    if let Some(rejection) =
+        reject_stubs_if_injection_disallowed(&replace_req.stubs, allow_injection)
+    {
+        return rejection;
+    }
 
     // Validate all scripts in stubs before replacing
     let validation_result = validate_stubs(&replace_req.stubs);
@@ -189,6 +206,7 @@ pub async fn handle_replace(
     req: Request<Incoming>,
     base_url: &str,
     manager: Arc<ImposterManager>,
+    allow_injection: bool,
 ) -> Response<Full<Bytes>> {
     let body = match collect_body(req).await {
         Ok(b) => b,
@@ -201,6 +219,13 @@ pub async fn handle_replace(
             return error_response(StatusCode::BAD_REQUEST, &format!("Invalid stub JSON: {e}"));
         }
     };
+
+    // Gate any scripting surface behind --allowInjection before mutating state (B3, issue #355).
+    if let Some(rejection) =
+        reject_stubs_if_injection_disallowed(std::slice::from_ref(&stub), allow_injection)
+    {
+        return rejection;
+    }
 
     // Validate scripts in the stub before replacing
     let validation_result = validate_stub(&stub, index);
@@ -254,6 +279,7 @@ pub async fn handle_replace_by_id(
     req: Request<Incoming>,
     base_url: &str,
     manager: Arc<ImposterManager>,
+    allow_injection: bool,
 ) -> Response<Full<Bytes>> {
     let body = match collect_body(req).await {
         Ok(b) => b,
@@ -265,6 +291,12 @@ pub async fn handle_replace_by_id(
             return error_response(StatusCode::BAD_REQUEST, &format!("Invalid stub JSON: {e}"));
         }
     };
+    // Gate any scripting surface behind --allowInjection before mutating state (B3, issue #355).
+    if let Some(rejection) =
+        reject_stubs_if_injection_disallowed(std::slice::from_ref(&stub), allow_injection)
+    {
+        return rejection;
+    }
     let validation_result = validate_stub(&stub, 0);
     if !validation_result.is_valid() {
         return error_response(

@@ -4,6 +4,7 @@
 //! partitioned by `flow_id`. When a `flowId` is not supplied, the imposter's default
 //! flow (`resolve_flow_id` with no headers ⇒ the `imposter_port` flow) is used.
 
+use crate::admin_api::handlers::imposters::reject_stubs_if_injection_disallowed;
 use crate::admin_api::types::{collect_body, error_response, json_response};
 use crate::extensions::decorate::backend_error_response;
 use crate::imposter::{Imposter, ImposterManager, Stub};
@@ -212,6 +213,7 @@ pub async fn handle_add_space_stub(
     flow_id: &str,
     req: Request<Incoming>,
     manager: Arc<ImposterManager>,
+    allow_injection: bool,
 ) -> Response<Full<Bytes>> {
     let payload = match parse_json_body(req).await {
         Ok(v) => v,
@@ -221,6 +223,12 @@ pub async fn handle_add_space_stub(
         Ok(s) => s,
         Err(e) => return error_response(StatusCode::BAD_REQUEST, &format!("Invalid stub: {e}")),
     };
+    // Gate any scripting surface behind --allowInjection before mutating state (B3, issue #355).
+    if let Some(rejection) =
+        reject_stubs_if_injection_disallowed(std::slice::from_ref(&stub), allow_injection)
+    {
+        return rejection;
+    }
     // The path `:flowId` is the source of truth for the scope; ignore any `space` in the body.
     stub.space = Some(flow_id.to_string());
     match manager.add_stub(port, stub, None).await {

@@ -105,6 +105,41 @@ fn preprocess_ejs(content: &str, config_path: &Path) -> anyhow::Result<String> {
     result.push_str(&content[last..]);
     let content = result;
 
+    // Process `<%- stringify('relative/path') %>` (issue #355 Item 7): inline the referenced
+    // file's contents as a JSON-string-safe body. Must run BEFORE the final `<% ... %>` strip
+    // below — that catch-all matches `<%[^=].*?%>`, which would otherwise eat `<%-` tokens too.
+    // `<%-` is EJS's "unescaped output" tag; here the template already supplies the surrounding
+    // quotes (e.g. `"inject": "<%- stringify('inject.js') %>"`), so only the escaped INNER
+    // content is substituted — `serde_json::to_string` then stripping its own wrapping quotes —
+    // keeping the surrounding JSON valid.
+    let stringify_re =
+        regex::Regex::new(r#"<%-\s*stringify\(\s*['"]([^'"]+)['"]\s*\)\s*%>"#).unwrap();
+    let mut result = String::new();
+    let mut last = 0;
+    for cap in stringify_re.captures_iter(&content) {
+        let full = cap.get(0).unwrap();
+        let rel_path = cap.get(1).unwrap().as_str();
+        result.push_str(&content[last..full.start()]);
+        let abs_path = config_dir.join(rel_path);
+        let file_contents = std::fs::read_to_string(&abs_path).map_err(|e| {
+            anyhow::anyhow!(
+                "EJS stringify file '{}' not found ({}): {}",
+                rel_path,
+                abs_path.display(),
+                e
+            )
+        })?;
+        let json_quoted = serde_json::to_string(&file_contents).map_err(|e| {
+            anyhow::anyhow!("failed to JSON-encode stringify file '{rel_path}': {e}")
+        })?;
+        // Strip the wrapping quotes serde_json added; the template's own quotes surround the tag.
+        let inner = &json_quoted[1..json_quoted.len() - 1];
+        result.push_str(inner);
+        last = full.end();
+    }
+    result.push_str(&content[last..]);
+    let content = result;
+
     // Process expression tags: `<%= expr %>`
     let expr_re = regex::Regex::new(r"<%=\s*(.*?)\s*%>").unwrap();
     let env_var_re = regex::Regex::new(
@@ -290,6 +325,57 @@ mod tests {
         assert!(result.is_err(), "missing include file should return Err");
         assert!(
             result.unwrap_err().to_string().contains("nonexistent.json"),
+            "error message should name the missing file"
+        );
+    }
+
+    // Issue #355 Item 7: `<%- stringify('path') %>` inlines a file's contents as a JSON-string-
+    // safe body, producing the same parsed config as writing the script inline.
+    #[test]
+    fn ejs_stringify_inlines_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("inject.js"),
+            "function (config) {\n  return { statusCode: 200, body: 'hi' };\n}",
+        )
+        .unwrap();
+        let content = r#"{"port": 9000, "protocol": "http", "stubs": [{"responses": [{"inject": "<%- stringify('inject.js') %>"}]}]}"#;
+        let config_path = dir.path().join("config.ejs");
+        let processed = preprocess_ejs(content, &config_path).unwrap();
+
+        // The substituted content must keep the surrounding JSON valid.
+        let processed_value: serde_json::Value =
+            serde_json::from_str(&processed).expect("stringify output must stay valid JSON");
+
+        let inlined = serde_json::json!({
+            "port": 9000, "protocol": "http",
+            "stubs": [{"responses": [{
+                "inject": "function (config) {\n  return { statusCode: 200, body: 'hi' };\n}"
+            }]}]
+        });
+        assert_eq!(
+            processed_value["stubs"][0]["responses"][0]["inject"],
+            inlined["stubs"][0]["responses"][0]["inject"],
+            "stringify output must match the inline-string equivalent"
+        );
+
+        let processed_config: ImposterConfig = serde_json::from_value(processed_value).unwrap();
+        let inlined_config: ImposterConfig = serde_json::from_value(inlined).unwrap();
+        assert_eq!(
+            serde_json::to_value(&processed_config).unwrap(),
+            serde_json::to_value(&inlined_config).unwrap(),
+            "the stringify'd config must parse identically to the inlined-string version"
+        );
+    }
+
+    #[test]
+    fn ejs_stringify_missing_file_is_fatal_error() {
+        let content = r#"{"inject": "<%- stringify('nope-355.js') %>"}"#;
+        let path = PathBuf::from("config.json");
+        let result = preprocess_ejs(content, &path);
+        assert!(result.is_err(), "missing stringify file should return Err");
+        assert!(
+            result.unwrap_err().to_string().contains("nope-355.js"),
             "error message should name the missing file"
         );
     }
