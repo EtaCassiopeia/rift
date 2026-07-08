@@ -11,12 +11,25 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use p12::{CertBag, ContentInfo, MacData, PFX, PKCS12Attribute, SafeBag, SafeBagKind};
+use p12::{
+    CertBag, ContentInfo, MacData, OtherAttribute, PFX, PKCS12Attribute, SafeBag, SafeBagKind,
+};
+use yasna::models::ObjectIdentifier;
 
 use super::intercept_ca::CertificateAuthority;
 
 /// Alias/friendly-name given to the single CA entry in an exported truststore.
 const CA_ALIAS: &str = "rift-intercept-ca";
+
+/// Oracle JDK's "trusted key usage" attribute OID (`2.16.840.1.113894.746875.1.1`). The JVM's
+/// PKCS#12 `KeyStore` surfaces a cert bag as a `trustedCertEntry` only when it carries this marker
+/// (the one `keytool -importcert` writes); without it Java loads the file but exposes zero trust
+/// anchors and TLS validation fails with an empty-`trustAnchors` error (#417).
+const ORACLE_TRUSTED_KEY_USAGE_OID: &[u64] = &[2, 16, 840, 1, 113_894, 746_875, 1, 1];
+
+/// `anyExtendedKeyUsage` (`2.5.29.37.0`) — the trusted-key-usage value that marks the CA as trusted
+/// for every purpose, matching what `keytool` records for an imported trusted certificate.
+const ANY_EXTENDED_KEY_USAGE_OID: &[u64] = &[2, 5, 29, 37, 0];
 
 /// A truststore password. Its `Debug`/`Display` never render the secret so it cannot leak into
 /// logs or error messages.
@@ -63,9 +76,20 @@ pub fn export_pkcs12(
     // OS RNG is unavailable (seccomp-restricted sandbox, very early boot). Contain that panic and
     // surface it as a typed error so this `Result`-returning function never unwinds into callers.
     std::panic::catch_unwind(move || {
+        // The trusted-key-usage attribute value is a SET containing the anyExtendedKeyUsage OID.
+        // `data` holds DER-encoded values; p12 wraps them in the SET when writing the attribute.
+        let trusted_key_usage = PKCS12Attribute::Other(OtherAttribute {
+            oid: ObjectIdentifier::from_slice(ORACLE_TRUSTED_KEY_USAGE_OID),
+            data: vec![yasna::construct_der(|w| {
+                w.write_oid(&ObjectIdentifier::from_slice(ANY_EXTENDED_KEY_USAGE_OID));
+            })],
+        });
         let cert_bag = SafeBag {
             bag: SafeBagKind::CertBag(CertBag::X509(ca_der)),
-            attributes: vec![PKCS12Attribute::FriendlyName(CA_ALIAS.to_string())],
+            attributes: vec![
+                PKCS12Attribute::FriendlyName(CA_ALIAS.to_string()),
+                trusted_key_usage,
+            ],
         };
         // SafeContents ::= SEQUENCE OF SafeBag
         let safe_contents = yasna::construct_der(|w| {
@@ -83,7 +107,16 @@ pub fn export_pkcs12(
         };
         pfx.to_der()
     })
-    .map_err(|_| anyhow::anyhow!("failed to build PKCS#12 truststore (system RNG unavailable?)"))
+    .map_err(|payload| {
+        // Preserve the real panic message so an RNG failure (getrandom) is not conflated with an
+        // encoding failure (e.g. a malformed OID constant, which `write_oid` panics on).
+        let cause = payload
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+            .unwrap_or("unknown panic (system RNG unavailable?)");
+        anyhow::anyhow!("failed to build PKCS#12 truststore: {cause}")
+    })
 }
 
 /// Export a JKS truststore containing the CA certificate as a single `trustedCertEntry`,
@@ -200,6 +233,52 @@ mod tests {
     }
 
     #[test]
+    fn pkcs12_cert_bag_carries_oracle_trusted_key_usage() {
+        let ca = test_ca();
+        let der = export_pkcs12(&ca, &TrustStorePassword::new("changeit")).expect("export pkcs12");
+
+        let pfx = PFX::parse(&der).expect("parse pkcs12");
+        let bags = pfx.bags("changeit").expect("read safe bags");
+        let cert_bag = bags
+            .iter()
+            .find(|b| matches!(b.bag, SafeBagKind::CertBag(_)))
+            .expect("a cert bag is present");
+
+        // Pin the exact marker the JVM reads with literals independent of the production
+        // constants, so a typo in `ORACLE_TRUSTED_KEY_USAGE_OID`/`ANY_EXTENDED_KEY_USAGE_OID` is
+        // caught here: OID 2.16.840.1.113894.746875.1.1, value = DER of the anyExtendedKeyUsage
+        // OID 2.5.29.37.0 (`06 04 55 1D 25 00`).
+        let expected_oid = ObjectIdentifier::from_slice(&[2, 16, 840, 1, 113_894, 746_875, 1, 1]);
+        let expected_value: &[u8] = &[0x06, 0x04, 0x55, 0x1D, 0x25, 0x00];
+
+        let trusted_usage = cert_bag
+            .attributes
+            .iter()
+            .find_map(|attr| match attr {
+                PKCS12Attribute::Other(other) if other.oid == expected_oid => Some(other),
+                _ => None,
+            })
+            .expect(
+                "cert bag must carry the Oracle TrustedKeyUsage attribute so a JVM PKCS#12 \
+                 KeyStore surfaces the CA as a trustedCertEntry (>=1 trust anchor)",
+            );
+        assert_eq!(
+            trusted_usage.data,
+            vec![expected_value.to_vec()],
+            "trusted-key-usage value must be anyExtendedKeyUsage (trusted for all purposes)"
+        );
+
+        // The friendly-name alias must remain alongside the trust marker (appended, not replaced).
+        assert!(
+            cert_bag
+                .attributes
+                .iter()
+                .any(|a| matches!(a, PKCS12Attribute::FriendlyName(n) if n == CA_ALIAS)),
+            "FriendlyName alias must coexist with the trust marker"
+        );
+    }
+
+    #[test]
     fn jks_has_valid_structure_and_digest() {
         let ca = test_ca();
         let pw = TrustStorePassword::new("changeit");
@@ -275,6 +354,48 @@ mod tests {
             pre.extend_from_slice(body);
             assert_eq!(sha1(&pre), digest, "jks digest for {pw:?}");
         }
+    }
+
+    /// Documents JVM compatibility: `keytool` surfaces the exported PKCS#12 CA as a
+    /// `trustedCertEntry` (the #417 fix). Ignored by default because it requires a JDK on the runner.
+    #[test]
+    #[ignore = "requires keytool (JDK) on PATH"]
+    fn pkcs12_is_readable_by_keytool_as_trusted_cert() {
+        use std::io::Write;
+        use std::process::Command;
+
+        let ca = test_ca();
+        let pw = "changeit";
+        let bytes = export_pkcs12(&ca, &TrustStorePassword::new(pw)).expect("export pkcs12");
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("rift-intercept-{}.p12", std::process::id()));
+        std::fs::File::create(&path)
+            .and_then(|mut f| f.write_all(&bytes))
+            .expect("write p12");
+
+        let out = Command::new("keytool")
+            .args([
+                "-list",
+                "-storetype",
+                "PKCS12",
+                "-storepass",
+                pw,
+                "-keystore",
+            ])
+            .arg(&path)
+            .output()
+            .expect("run keytool");
+        let _ = std::fs::remove_file(&path);
+        assert!(out.status.success(), "keytool -list should succeed");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout.contains(CA_ALIAS),
+            "keytool should list the CA alias"
+        );
+        assert!(
+            stdout.contains("trustedCertEntry"),
+            "the CA must be surfaced as a trustedCertEntry, not hidden as a supporting cert"
+        );
     }
 
     /// Documents JVM compatibility: `keytool` can list the exported JKS. Ignored by default
