@@ -349,6 +349,7 @@ async fn handle_request_inner(
                 &inject_fn,
                 &mb_request,
                 imposter.config.port.unwrap_or(0),
+                stub_state.stub.id.as_deref(),
             ) {
                 Ok(inject_response) => {
                     // Advance the cycler for this inject response
@@ -376,10 +377,21 @@ async fn handle_request_inner(
                 }
                 Err(e) => {
                     warn!("Inject function failed: {}", e);
+                    // Mountebank-shaped error parity (issue #355 Item 5): a failing inject is a
+                    // 400 with `{"errors":[{"code":"invalid injection","message":"..."}]}`, not a
+                    // bare 500 — the script failed to produce a valid response, which is a client
+                    // (config) problem, not a server fault.
+                    let body = serde_json::json!({
+                        "errors": [{
+                            "code": "invalid injection",
+                            "message": format!("{e}"),
+                        }]
+                    })
+                    .to_string();
                     return Ok(build_response_with_headers(
-                        StatusCode::INTERNAL_SERVER_ERROR,
+                        StatusCode::BAD_REQUEST,
                         [("x-rift-imposter", "true"), ("x-rift-inject-error", "true")],
-                        format!(r#"{{"error": "Inject error: {e}"}}"#),
+                        body,
                     ));
                 }
             }
@@ -641,6 +653,8 @@ async fn handle_request_inner(
                             &body,
                             status,
                             &mut single,
+                            imposter.config.port.unwrap_or(0),
+                            stub_state.stub.id.as_deref(),
                         ) {
                             Ok((new_body, new_status)) => {
                                 body = new_body;

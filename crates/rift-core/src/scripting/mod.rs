@@ -27,6 +27,11 @@ pub use lua_engine::{LuaEngine, compile_to_bytecode};
 
 #[cfg(feature = "javascript")]
 mod js_engine;
+/// Exposed so other modules (e.g. `behaviors::wait`) that run a standalone JS snippet outside the
+/// MB inject/predicate/decorate hooks still get the same interpreter-level guards (issue #355
+/// Items 3/6) rather than an unbounded `Context::default()`.
+#[cfg(feature = "javascript")]
+pub(crate) use js_engine::bounded_js_context;
 #[cfg(feature = "javascript")]
 pub use js_engine::{
     JsEngine, MountebankRequest, clear_imposter_state, compile_js_to_bytecode,

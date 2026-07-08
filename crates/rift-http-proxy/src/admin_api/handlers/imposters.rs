@@ -3,13 +3,14 @@
 use crate::admin_api::request_filter::{parse_match_clauses, request_matches};
 use crate::admin_api::types::{
     ImposterDetail, ImposterListEntry, ImposterQueryParams, ImposterSummary, ListImpostersResponse,
-    RiftImposterExtensions, StubWithLinks, collect_body, error_response, json_response,
-    make_imposter_links, make_stub_links,
+    RiftImposterExtensions, StubWithLinks, build_response_with_headers, collect_body,
+    error_response, json_response, make_imposter_links, make_stub_links,
 };
 use crate::extensions::decorate::backend_error_response;
 use crate::extensions::stub_analysis::analyze_stubs;
 use crate::imposter::{
-    Imposter, ImposterConfig, ImposterError, ImposterManager, RecordedRequest, StubResponse,
+    Imposter, ImposterConfig, ImposterError, ImposterManager, Predicate, PredicateOperation,
+    RecordedRequest, Stub, StubResponse,
 };
 use crate::scripting::validate_stubs;
 use bytes::Bytes;
@@ -20,11 +21,113 @@ use serde::Deserialize;
 use std::sync::Arc;
 use tracing::{error, info, warn};
 
+/// True if any stub in `stubs` uses a Mountebank scripting surface gated by `--allowInjection`
+/// (issue #355 Item 4): an inject response, a decorate behavior (`_behaviors.decorate` / a
+/// proxy's `addDecorateBehavior`), a `_behaviors.shellTransform` (runs a host shell command),
+/// a `wait` behavior expressed as a JS function (which this engine now executes on Boa), a
+/// predicate `inject`, a `predicateGenerators.inject`, or `_rift.script`. Mirrors Mountebank's
+/// `allowInjection` gate.
+fn stubs_contain_script_surface(stubs: &[Stub]) -> bool {
+    stubs.iter().any(|stub| {
+        stub.predicates.iter().any(predicate_has_inject)
+            || stub.responses.iter().any(response_has_script_surface)
+    })
+}
+
+/// True if `predicate` (or anything nested under a `not`/`or`/`and`) is an `inject` predicate.
+fn predicate_has_inject(predicate: &Predicate) -> bool {
+    match &predicate.operation {
+        PredicateOperation::Inject(_) => true,
+        PredicateOperation::Not(inner) => predicate_has_inject(inner),
+        PredicateOperation::Or(preds) | PredicateOperation::And(preds) => {
+            preds.iter().any(predicate_has_inject)
+        }
+        _ => false,
+    }
+}
+
+/// True if `response` uses any script surface: an inject response, a decorate behavior, a
+/// shellTransform behavior, a JS-function `wait` behavior, or `_rift.script`.
+fn response_has_script_surface(response: &StubResponse) -> bool {
+    match response {
+        StubResponse::Inject { .. } => true,
+        StubResponse::RiftScript { rift } => rift.script.is_some(),
+        StubResponse::Is {
+            behaviors, rift, ..
+        } => {
+            let behavior_is_scripted = behaviors
+                .as_ref()
+                .and_then(|b| {
+                    serde_json::from_value::<crate::behaviors::ResponseBehaviors>(b.clone()).ok()
+                })
+                .is_some_and(|b| behaviors_contain_script_surface(&b));
+            behavior_is_scripted || rift.as_ref().is_some_and(|r| r.script.is_some())
+        }
+        StubResponse::Proxy { proxy } => {
+            proxy.add_decorate_behavior.is_some()
+                || proxy
+                    .predicate_generators
+                    .iter()
+                    .any(|g| g.get("inject").and_then(|v| v.as_str()).is_some())
+        }
+        StubResponse::Fault { .. } => false,
+    }
+}
+
+/// True if the parsed `_behaviors` block carries a scripting surface: `decorate` (JS/Rhai),
+/// `shellTransform` (runs a host shell command — B1), or a `wait` expressed as a JS function
+/// (executed on Boa since issue #355 Item 6 — B2). A numeric `wait` (`Fixed`/`Range`) is NOT a
+/// scripting surface and stays allowed.
+fn behaviors_contain_script_surface(behaviors: &crate::behaviors::ResponseBehaviors) -> bool {
+    behaviors.decorate.is_some()
+        || !behaviors.shell_transform.is_empty()
+        || matches!(
+            behaviors.wait,
+            Some(crate::behaviors::WaitBehavior::Function(_))
+        )
+}
+
+/// Reject a set of stubs carrying a Mountebank scripting surface when `--allowInjection` is off,
+/// mirroring Mountebank's gate (issue #355 Item 4). `None` when the stubs are allowed through.
+/// Shared by the imposter CRUD handlers and the stub sub-resource handlers (B3) so the gate can't
+/// be bypassed by adding a script-bearing stub through `POST/PUT /imposters/:port/stubs[...]`.
+pub(crate) fn reject_stubs_if_injection_disallowed(
+    stubs: &[Stub],
+    allow_injection: bool,
+) -> Option<Response<Full<Bytes>>> {
+    if allow_injection || !stubs_contain_script_surface(stubs) {
+        return None;
+    }
+    let body = serde_json::json!({
+        "errors": [{
+            "code": "invalid injection",
+            "message": "inject requires --allowInjection to be set. See \
+                        http://www.mbtest.org/docs/api/injection for more information.",
+        }]
+    })
+    .to_string();
+    Some(build_response_with_headers(
+        StatusCode::BAD_REQUEST,
+        [("Content-Type", "application/json")],
+        body,
+    ))
+}
+
+/// Reject a whole imposter config when its stubs carry a scripting surface and `--allowInjection`
+/// is off. Delegates to [`reject_stubs_if_injection_disallowed`].
+fn reject_if_injection_disallowed(
+    config: &ImposterConfig,
+    allow_injection: bool,
+) -> Option<Response<Full<Bytes>>> {
+    reject_stubs_if_injection_disallowed(&config.stubs, allow_injection)
+}
+
 /// POST /imposters - Create a new imposter
 pub async fn handle_create(
     req: Request<Incoming>,
     base_url: &str,
     manager: Arc<ImposterManager>,
+    allow_injection: bool,
 ) -> Response<Full<Bytes>> {
     let body = match collect_body(req).await {
         Ok(b) => b,
@@ -40,6 +143,10 @@ pub async fn handle_create(
             );
         }
     };
+
+    if let Some(rejection) = reject_if_injection_disallowed(&config, allow_injection) {
+        return rejection;
+    }
 
     // Validate all scripts in stubs before creating the imposter
     let validation_result = validate_stubs(&config.stubs);
@@ -131,6 +238,7 @@ pub async fn handle_replace_all(
     req: Request<Incoming>,
     base_url: &str,
     manager: Arc<ImposterManager>,
+    allow_injection: bool,
 ) -> Response<Full<Bytes>> {
     let body = match collect_body(req).await {
         Ok(b) => b,
@@ -148,6 +256,14 @@ pub async fn handle_replace_all(
             return error_response(StatusCode::BAD_REQUEST, &format!("Invalid batch JSON: {e}"));
         }
     };
+
+    // Reject the whole batch (before making any changes) if any imposter carries a script
+    // surface and --allowInjection is off (issue #355 Item 4).
+    for config in &batch.imposters {
+        if let Some(rejection) = reject_if_injection_disallowed(config, allow_injection) {
+            return rejection;
+        }
+    }
 
     // Validate all scripts in all imposters before making any changes
     for (idx, config) in batch.imposters.iter().enumerate() {
@@ -460,6 +576,230 @@ fn filter_proxy_stubs(stubs: Vec<crate::imposter::Stub>) -> Vec<crate::imposter:
             }
         })
         .collect()
+}
+
+// Issue #355 Item 4: `--allowInjection` gates any Mountebank scripting surface on
+// POST/PUT /imposters. Exercised at the `reject_if_injection_disallowed` level (the exact
+// decision `handle_create`/`handle_replace_all` apply) rather than through a live HTTP request,
+// since building a real `hyper::body::Incoming` outside a running server is impractical in a
+// `--lib` unit test; the handlers above are a thin `if let Some(rejection) = ... { return }`
+// wrapper around this function.
+#[cfg(test)]
+mod allow_injection_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn cfg(value: serde_json::Value) -> ImposterConfig {
+        serde_json::from_value(value).expect("test imposter config")
+    }
+
+    #[test]
+    fn non_script_imposter_always_accepted() {
+        let config = cfg(json!({
+            "protocol": "http",
+            "stubs": [{
+                "predicates": [{ "equals": { "path": "/ok" } }],
+                "responses": [{ "is": { "statusCode": 200, "body": "fine" } }]
+            }]
+        }));
+        assert!(reject_if_injection_disallowed(&config, false).is_none());
+        assert!(reject_if_injection_disallowed(&config, true).is_none());
+    }
+
+    #[test]
+    fn inject_response_rejected_when_disallowed_allowed_when_enabled() {
+        let config = cfg(json!({
+            "protocol": "http",
+            "stubs": [{
+                "responses": [{ "inject": "function(config) { return { statusCode: 200 }; }" }]
+            }]
+        }));
+        let rejection = reject_if_injection_disallowed(&config, false)
+            .expect("inject response must be rejected when allowInjection is off");
+        assert_eq!(rejection.status(), StatusCode::BAD_REQUEST);
+        assert!(reject_if_injection_disallowed(&config, true).is_none());
+    }
+
+    #[test]
+    fn decorate_behavior_rejected_when_disallowed() {
+        let config = cfg(json!({
+            "protocol": "http",
+            "stubs": [{
+                "responses": [{
+                    "is": { "statusCode": 200, "body": "x" },
+                    "_behaviors": { "decorate": "function(config) { }" }
+                }]
+            }]
+        }));
+        assert!(reject_if_injection_disallowed(&config, false).is_some());
+        assert!(reject_if_injection_disallowed(&config, true).is_none());
+    }
+
+    #[test]
+    fn proxy_add_decorate_behavior_rejected_when_disallowed() {
+        let config = cfg(json!({
+            "protocol": "http",
+            "stubs": [{
+                "responses": [{
+                    "proxy": { "to": "http://example.com", "addDecorateBehavior": "function(config) {}" }
+                }]
+            }]
+        }));
+        assert!(reject_if_injection_disallowed(&config, false).is_some());
+    }
+
+    #[test]
+    fn predicate_inject_rejected_when_disallowed() {
+        let config = cfg(json!({
+            "protocol": "http",
+            "stubs": [{
+                "predicates": [{ "inject": "function(config) { return true; }" }],
+                "responses": [{ "is": { "statusCode": 200 } }]
+            }]
+        }));
+        assert!(reject_if_injection_disallowed(&config, false).is_some());
+        assert!(reject_if_injection_disallowed(&config, true).is_none());
+    }
+
+    #[test]
+    fn predicate_inject_nested_under_not_is_still_detected() {
+        let config = cfg(json!({
+            "protocol": "http",
+            "stubs": [{
+                "predicates": [{ "not": { "inject": "function(config) { return true; }" } }],
+                "responses": [{ "is": { "statusCode": 200 } }]
+            }]
+        }));
+        assert!(reject_if_injection_disallowed(&config, false).is_some());
+    }
+
+    #[test]
+    fn predicate_generator_inject_rejected_when_disallowed() {
+        let config = cfg(json!({
+            "protocol": "http",
+            "stubs": [{
+                "responses": [{
+                    "proxy": {
+                        "to": "http://example.com",
+                        "predicateGenerators": [{ "inject": "function(config, logger, preds) { return preds; }" }]
+                    }
+                }]
+            }]
+        }));
+        assert!(reject_if_injection_disallowed(&config, false).is_some());
+        assert!(reject_if_injection_disallowed(&config, true).is_none());
+    }
+
+    #[test]
+    fn rift_script_response_rejected_when_disallowed() {
+        let config = cfg(json!({
+            "protocol": "http",
+            "stubs": [{
+                "responses": [{
+                    "_rift": { "script": { "engine": "javascript", "code": "function f(){}" } }
+                }]
+            }]
+        }));
+        assert!(reject_if_injection_disallowed(&config, false).is_some());
+        assert!(reject_if_injection_disallowed(&config, true).is_none());
+    }
+
+    // B1: shellTransform runs a host shell command and MUST be gated.
+    #[test]
+    fn shell_transform_rejected_when_disallowed_allowed_when_enabled() {
+        let config = cfg(json!({
+            "protocol": "http",
+            "stubs": [{
+                "responses": [{
+                    "is": { "statusCode": 200, "body": "x" },
+                    "_behaviors": { "shellTransform": "cat" }
+                }]
+            }]
+        }));
+        assert!(
+            reject_if_injection_disallowed(&config, false).is_some(),
+            "shellTransform is a host-command execution surface and must be gated"
+        );
+        assert!(reject_if_injection_disallowed(&config, true).is_none());
+    }
+
+    // B2: a `wait` expressed as a JS function is now executed on Boa, so it's an injection surface.
+    #[test]
+    fn wait_function_rejected_when_disallowed() {
+        let config = cfg(json!({
+            "protocol": "http",
+            "stubs": [{
+                "responses": [{
+                    "is": { "statusCode": 200, "body": "x" },
+                    "_behaviors": { "wait": "function() { return 10; }" }
+                }]
+            }]
+        }));
+        assert!(
+            reject_if_injection_disallowed(&config, false).is_some(),
+            "a JS-function wait is executed on Boa and must be gated"
+        );
+        assert!(reject_if_injection_disallowed(&config, true).is_none());
+    }
+
+    // B2: a numeric wait (Fixed/Range) is NOT a scripting surface and must stay allowed.
+    #[test]
+    fn numeric_wait_always_allowed() {
+        let fixed = cfg(json!({
+            "protocol": "http",
+            "stubs": [{
+                "responses": [{
+                    "is": { "statusCode": 200, "body": "x" },
+                    "_behaviors": { "wait": 250 }
+                }]
+            }]
+        }));
+        assert!(
+            reject_if_injection_disallowed(&fixed, false).is_none(),
+            "a numeric (Fixed) wait must never be gated"
+        );
+
+        let range = cfg(json!({
+            "protocol": "http",
+            "stubs": [{
+                "responses": [{
+                    "is": { "statusCode": 200, "body": "x" },
+                    "_behaviors": { "wait": { "min": 100, "max": 200 } }
+                }]
+            }]
+        }));
+        assert!(
+            reject_if_injection_disallowed(&range, false).is_none(),
+            "a numeric (Range) wait must never be gated"
+        );
+    }
+
+    // B3: the shared stub-slice gate rejects a script-bearing single stub when off, and the same
+    // gate the stub sub-resource handlers call.
+    #[test]
+    fn reject_stubs_gate_rejects_script_bearing_slice() {
+        let config = cfg(json!({
+            "protocol": "http",
+            "stubs": [{
+                "responses": [{ "inject": "function(config) { return { statusCode: 200 }; }" }]
+            }]
+        }));
+        let stubs = &config.stubs;
+        assert!(
+            reject_stubs_if_injection_disallowed(stubs, false).is_some(),
+            "the shared stub-slice gate must reject a script-bearing stub when injection is off"
+        );
+        assert!(reject_stubs_if_injection_disallowed(stubs, true).is_none());
+
+        let clean = cfg(json!({
+            "protocol": "http",
+            "stubs": [{ "responses": [{ "is": { "statusCode": 200 } }] }]
+        }));
+        assert!(
+            reject_stubs_if_injection_disallowed(&clean.stubs, false).is_none(),
+            "a non-script stub slice is always allowed"
+        );
+    }
 }
 
 // Issue #201: filter recorded requests by header / flow_id via

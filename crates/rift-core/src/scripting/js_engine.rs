@@ -222,6 +222,35 @@ fn execute_js_script(
 /// interrupt mechanism that 0.20 lacks.
 const JS_SCRIPT_LOOP_ITERATION_LIMIT: u64 = 10_000_000;
 
+/// Recursion depth cap applied to every bounded Boa `Context` (issue #355 Item 3). Boa's own
+/// default is already 512; set explicitly so the contract doesn't silently drift if Boa's default
+/// ever changes.
+const JS_SCRIPT_RECURSION_LIMIT: usize = 512;
+
+/// Stack size cap (bytes) applied to every bounded Boa `Context` (issue #355 Item 3), mirroring
+/// Boa's own default (10 * 1024).
+const JS_SCRIPT_STACK_SIZE_LIMIT: usize = 10 * 1024;
+
+/// Build a `Context` with the interpreter-level guards every Mountebank JS hook (inject response,
+/// predicate inject, `predicateGenerators.inject`, decorate) must run under (issue #355 Items 2/3).
+///
+/// Boa 0.20 has no per-instruction wall-clock interrupt, so these MB hooks — which execute
+/// synchronously, inline in the request path, with no `spawn_blocking` wrapper — can't honor a
+/// wall-clock deadline the way `_rift.script` does (see `bounded.rs::should_inject_bounded`).
+/// The loop-iteration cap is what makes a `while(true){}` throw instead of hanging its thread; the
+/// recursion/stack-size limits catch runaway recursion the same way. This is the enforcement layer
+/// that stands in for the `_rift.script` wall-clock budget (`bounded::DEFAULT_SCRIPT_TIMEOUT_MS`)
+/// for these sync call sites — every one of them must build its `Context` through this helper
+/// rather than `Context::default()`.
+pub(crate) fn bounded_js_context() -> Context {
+    let mut context = Context::default();
+    let limits = context.runtime_limits_mut();
+    limits.set_loop_iteration_limit(JS_SCRIPT_LOOP_ITERATION_LIMIT);
+    limits.set_recursion_limit(JS_SCRIPT_RECURSION_LIMIT);
+    limits.set_stack_size_limit(JS_SCRIPT_STACK_SIZE_LIMIT);
+    context
+}
+
 /// Inner function that does the actual JavaScript execution
 fn execute_js_script_inner(
     script: &str,
@@ -559,6 +588,186 @@ fn create_flow_store_object(context: &mut Context) -> Result<JsValue> {
     Ok(obj.into())
 }
 
+// =============================================================================
+// Mountebank v2 `config` calling convention support (issue #355 Item 0)
+// =============================================================================
+
+/// Flatten every field of a Mountebank request object onto `config` itself
+/// (`config.method`, `config.path`, `config.query`, `config.headers`, `config.body`), mirroring
+/// Mountebank v2's `downcastInjectionConfig`. This is why `function(config){config.request.path}`,
+/// `function(request){request.path}` (with `config` passed positionally where `request` used to
+/// be), and `function(config){config.path}` all address the same data.
+fn flatten_request_onto(
+    config_obj: &JsObject,
+    request_obj: &JsValue,
+    context: &mut Context,
+) -> Result<()> {
+    let Some(req) = request_obj.as_object() else {
+        return Ok(());
+    };
+    for key in ["method", "path", "query", "headers", "body"] {
+        let val = req
+            .get(js_string!(key), context)
+            .map_err(|e| anyhow!("Failed to read request.{key} for config flattening: {e}"))?;
+        config_obj
+            .set(js_string!(key), val, false, context)
+            .map_err(|e| anyhow!("Failed to flatten config.{key}: {e}"))?;
+    }
+    Ok(())
+}
+
+// =============================================================================
+// Native logger (issue #355 Item 1)
+// =============================================================================
+
+/// Log one Mountebank script `logger.<level>(...)` call at target `"rift::script"`, tagging the
+/// event with the imposter port and (where available) the stub id. All arguments are best-effort
+/// stringified and joined with a space, mirroring a console-style logger call.
+fn log_script_event(
+    level: tracing::Level,
+    port: u16,
+    stub_id: Option<&str>,
+    args: &[JsValue],
+    context: &mut Context,
+) {
+    let message: String = args
+        .iter()
+        .map(|v| js_value_to_log_string(context, v))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let stub_id = stub_id.unwrap_or("");
+    match level {
+        tracing::Level::ERROR => {
+            tracing::error!(target: "rift::script", port, stub_id, "{message}")
+        }
+        tracing::Level::WARN => {
+            tracing::warn!(target: "rift::script", port, stub_id, "{message}")
+        }
+        tracing::Level::INFO => {
+            tracing::info!(target: "rift::script", port, stub_id, "{message}")
+        }
+        tracing::Level::DEBUG => {
+            tracing::debug!(target: "rift::script", port, stub_id, "{message}")
+        }
+        tracing::Level::TRACE => {
+            tracing::trace!(target: "rift::script", port, stub_id, "{message}")
+        }
+    }
+}
+
+/// Best-effort stringify of a single logger argument: strings pass through; objects are
+/// JSON-stringified; everything else uses JS `display()`.
+fn js_value_to_log_string(context: &mut Context, value: &JsValue) -> String {
+    if let Some(s) = value.as_string() {
+        return s.to_std_string_escaped();
+    }
+    if value.is_object() {
+        let json = js_to_json(context, value).unwrap_or(Value::Null);
+        return serde_json::to_string(&json).unwrap_or_default();
+    }
+    value.display().to_string()
+}
+
+/// Captures shared by every native logger method registered on one script's `logger` object:
+/// the imposter port and (where the caller has one) the stub id.
+type LoggerCaptures = (u16, Option<String>);
+
+fn logger_debug(
+    _this: &JsValue,
+    args: &[JsValue],
+    captures: &LoggerCaptures,
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    log_script_event(
+        tracing::Level::DEBUG,
+        captures.0,
+        captures.1.as_deref(),
+        args,
+        context,
+    );
+    Ok(JsValue::undefined())
+}
+
+fn logger_info(
+    _this: &JsValue,
+    args: &[JsValue],
+    captures: &LoggerCaptures,
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    log_script_event(
+        tracing::Level::INFO,
+        captures.0,
+        captures.1.as_deref(),
+        args,
+        context,
+    );
+    Ok(JsValue::undefined())
+}
+
+fn logger_warn(
+    _this: &JsValue,
+    args: &[JsValue],
+    captures: &LoggerCaptures,
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    log_script_event(
+        tracing::Level::WARN,
+        captures.0,
+        captures.1.as_deref(),
+        args,
+        context,
+    );
+    Ok(JsValue::undefined())
+}
+
+fn logger_error(
+    _this: &JsValue,
+    args: &[JsValue],
+    captures: &LoggerCaptures,
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    log_script_event(
+        tracing::Level::ERROR,
+        captures.0,
+        captures.1.as_deref(),
+        args,
+        context,
+    );
+    Ok(JsValue::undefined())
+}
+
+/// Build a native `logger` object (`debug`/`info`/`warn`/`error`) that routes to `tracing` at
+/// target `"rift::script"`, tagged with the imposter port and, where available, the stub id
+/// (issue #355 Item 1). A real native object — not a JS no-op shim — so script log calls actually
+/// reach the process's tracing subscriber.
+/// Function pointer type shared by every native logger method (see [`create_script_logger_object`]).
+type LoggerMethodFn = fn(&JsValue, &[JsValue], &LoggerCaptures, &mut Context) -> JsResult<JsValue>;
+
+fn create_script_logger_object(
+    context: &mut Context,
+    port: u16,
+    stub_id: Option<String>,
+) -> Result<JsValue> {
+    let obj = create_js_object(context);
+    let captures: LoggerCaptures = (port, stub_id);
+
+    let methods: [(&str, LoggerMethodFn); 4] = [
+        ("debug", logger_debug),
+        ("info", logger_info),
+        ("warn", logger_warn),
+        ("error", logger_error),
+    ];
+
+    for (name, func) in methods {
+        let native_fn = NativeFunction::from_copy_closure_with_captures(func, captures.clone())
+            .to_js_function(context.realm());
+        obj.set(js_string!(name), native_fn, false, context)
+            .map_err(|e| anyhow!("Failed to set logger.{name}: {e}"))?;
+    }
+
+    Ok(obj.into())
+}
+
 /// Parse fault decision from JavaScript result
 fn parse_fault_decision(
     context: &mut Context,
@@ -801,65 +1010,111 @@ pub fn clear_imposter_state(port: u16) {
     states.remove(&port);
 }
 
-/// Execute a Mountebank-style inject function
+/// Execute a Mountebank-style inject function.
 ///
-/// Mountebank inject functions have the signature:
-/// - `function(request) { return response; }`
+/// Implements Mountebank v2's `config`-first calling convention (issue #355 Item 0), built like
+/// Mountebank's `downcastInjectionConfig`: a `config` object (`{ request, state, logger,
+/// callback }`) with every request field ALSO flattened onto `config` itself, so
+/// `function(config){config.request.path}`, `function(request){request.path}` (legacy — `config`
+/// is passed where `request` used to be, and works because of the flattening), and
+/// `function(config){config.path}` all resolve the same data. Legacy positional args follow
+/// `config` unchanged, so old scripts keep working:
+///
+/// - `function(config) { return response; }` (v2)
+/// - `function(request) { return response; }` (legacy, `config` stands in for `request`)
 /// - `function(request, state) { return response; }`
 /// - `function(request, state, logger, callback) { callback(response); }`
+///
+/// Full call signature: `fn(config, injectState, logger, done, imposterState)`. `injectState`
+/// (arg 2) and `imposterState` (arg 5) are the SAME object as `config.state` — the per-imposter
+/// state persisted across calls via `get_imposter_state`/`save_imposter_state`, shared with
+/// predicate injects and decorate for the same imposter port. `done` (arg 4, aliased as
+/// `config.callback`) is the async-style callback; if the function returns `undefined` its
+/// invocation is used instead (this engine is fully synchronous, so "waiting" for `done` just
+/// means checking whether it was called during the synchronous call).
 ///
 /// Where response is: `{ statusCode: number, headers: object?, body: string }`
 pub fn execute_mountebank_inject(
     inject_fn: &str,
     request: &MountebankRequest,
     imposter_port: u16,
+    stub_id: Option<&str>,
 ) -> Result<MountebankInjectResponse> {
-    let mut context = Context::default();
+    let mut context = bounded_js_context();
 
     // Create request object
     let request_obj = create_mountebank_request_object(&mut context, request)?;
 
-    // Get current state for this imposter
+    // Get current (persisted, per-port) state for this imposter — shared across predicate
+    // injects, response injects, and decorate for the same imposter (issue #355 Item 0).
     let state_map = get_imposter_state(imposter_port);
     let state_obj = json_to_js(&mut context, &Value::Object(state_map))?;
 
-    // Set global variables
-    let global = context.global_object();
-    global
+    let logger_obj =
+        create_script_logger_object(&mut context, imposter_port, stub_id.map(str::to_owned))?;
+
+    // Build config = { request, state, logger } and flatten request fields onto config itself.
+    let config_obj = create_js_object(&context);
+    config_obj
         .set(
-            js_string!("__request"),
+            js_string!("request"),
             request_obj.clone(),
             false,
             &mut context,
         )
-        .map_err(|e| anyhow!("Failed to set request: {e}"))?;
+        .map_err(|e| anyhow!("Failed to set config.request: {e}"))?;
+    config_obj
+        .set(js_string!("state"), state_obj.clone(), false, &mut context)
+        .map_err(|e| anyhow!("Failed to set config.state: {e}"))?;
+    config_obj
+        .set(
+            js_string!("logger"),
+            logger_obj.clone(),
+            false,
+            &mut context,
+        )
+        .map_err(|e| anyhow!("Failed to set config.logger: {e}"))?;
+    flatten_request_onto(&config_obj, &request_obj, &mut context)?;
+
+    // Set global variables consumed by the wrapper script below.
+    let global = context.global_object();
+    global
+        .set(js_string!("__config"), config_obj, false, &mut context)
+        .map_err(|e| anyhow!("Failed to set config: {e}"))?;
+    global
+        .set(js_string!("__logger"), logger_obj, false, &mut context)
+        .map_err(|e| anyhow!("Failed to set logger: {e}"))?;
+    // injectState and imposterState are the SAME shared, persisted state object as config.state.
     global
         .set(
-            js_string!("__state"),
+            js_string!("__injectState"),
             state_obj.clone(),
             false,
             &mut context,
         )
-        .map_err(|e| anyhow!("Failed to set state: {e}"))?;
+        .map_err(|e| anyhow!("Failed to set injectState: {e}"))?;
+    global
+        .set(
+            js_string!("__imposterState"),
+            state_obj,
+            false,
+            &mut context,
+        )
+        .map_err(|e| anyhow!("Failed to set imposterState: {e}"))?;
 
-    // Wrap the inject function to call it with our arguments
-    // Support both sync and callback styles
-    // For callback style, we capture the result in __callbackResult
+    // Wrap the inject function to call it with (config, injectState, logger, done, imposterState).
+    // `config.callback` aliases `done` so scripts using either the positional callback or the
+    // config field convention both work. If the function returns undefined, use whatever `done`/
+    // `config.callback` was invoked with instead (synchronous stand-in for MB's async wait).
     let wrapper_script = format!(
         r#"
-        var __injectFn = {inject_fn};
         var __callbackResult = null;
-        var __logger = function() {{}};  // No-op logger
-        var __callback = function(r) {{ __callbackResult = r; }};
-        var __directResult;
-
-        if (__injectFn.length >= 4) {{
-            // Callback style: function(request, state, logger, callback)
-            __injectFn(__request, __state, __logger, __callback);
+        var __done = function(r) {{ __callbackResult = r; }};
+        __config.callback = __done;
+        var __injectFn = {inject_fn};
+        var __directResult = __injectFn(__config, __injectState, __logger, __done, __imposterState);
+        if (__directResult === undefined) {{
             __directResult = __callbackResult;
-        }} else {{
-            // Sync style: function(request) or function(request, state)
-            __directResult = __injectFn(__request, __state, __logger);
         }}
         __directResult;
         "#
@@ -870,9 +1125,9 @@ pub fn execute_mountebank_inject(
         .eval(Source::from_bytes(wrapper_script.as_bytes()))
         .map_err(|e| anyhow!("Failed to execute inject function: {e}"))?;
 
-    // Save updated state back
+    // Save updated state back (config.state/injectState/imposterState all alias the same object).
     let updated_state = global
-        .get(js_string!("__state"), &mut context)
+        .get(js_string!("__imposterState"), &mut context)
         .map_err(|e| anyhow!("Failed to get updated state: {e}"))?;
 
     if let Ok(Value::Object(map)) = js_to_json(&mut context, &updated_state) {
@@ -884,14 +1139,18 @@ pub fn execute_mountebank_inject(
 }
 
 /// Execute a Mountebank-style predicate inject function.
-/// The function signature is: `function(request, logger, imposterState) { return bool; }`
-/// Returns `true` if the predicate matches, `false` otherwise.
+///
+/// v2 `config`-first calling convention (issue #355 Item 0): full signature
+/// `fn(config, logger, imposterState) { return bool; }`, where `config` also stands in for the
+/// legacy `request` positional argument (request fields are flattened onto `config`), and
+/// `imposterState` aliases `config.state` — the same per-port state shared with response injects
+/// and decorate for the same imposter. Returns `true` if the predicate matches, `false` otherwise.
 pub fn execute_predicate_inject(
     inject_fn: &str,
     request: &MountebankRequest,
     imposter_port: u16,
 ) -> bool {
-    let mut context = Context::default();
+    let mut context = bounded_js_context();
 
     let request_obj = match create_mountebank_request_object(&mut context, request) {
         Ok(obj) => obj,
@@ -910,15 +1169,57 @@ pub fn execute_predicate_inject(
         }
     };
 
+    // stub_id is left None here: predicate matching operates on a `PredicateOperation` tree and
+    // the owning stub's id is not threaded through the matcher without an invasive change to the
+    // predicate-matching signatures (issue #355 AC1 note).
+    let logger_obj = match create_script_logger_object(&mut context, imposter_port, None) {
+        Ok(obj) => obj,
+        Err(e) => {
+            tracing::warn!("inject predicate: failed to build logger object: {e}");
+            return false;
+        }
+    };
+
+    let config_obj = create_js_object(&context);
+    if config_obj
+        .set(
+            js_string!("request"),
+            request_obj.clone(),
+            false,
+            &mut context,
+        )
+        .is_err()
+        || config_obj
+            .set(js_string!("state"), state_obj.clone(), false, &mut context)
+            .is_err()
+        || config_obj
+            .set(
+                js_string!("logger"),
+                logger_obj.clone(),
+                false,
+                &mut context,
+            )
+            .is_err()
+        || flatten_request_onto(&config_obj, &request_obj, &mut context).is_err()
+    {
+        tracing::warn!("inject predicate: failed to build config object");
+        return false;
+    }
+
     let global = context.global_object();
-    let _ = global.set(js_string!("__request"), request_obj, false, &mut context);
-    let _ = global.set(js_string!("__state"), state_obj, false, &mut context);
+    let _ = global.set(js_string!("__config"), config_obj, false, &mut context);
+    let _ = global.set(js_string!("__logger"), logger_obj, false, &mut context);
+    let _ = global.set(
+        js_string!("__imposterState"),
+        state_obj,
+        false,
+        &mut context,
+    );
 
     let wrapper_script = format!(
         r#"
         var __injectFn = {inject_fn};
-        var __logger = {{ debug: function() {{}}, info: function() {{}}, warn: function() {{}}, error: function() {{}} }};
-        var __result = __injectFn(__request, __logger, __state);
+        var __result = __injectFn(__config, __logger, __imposterState);
         Boolean(__result);
         "#
     );
@@ -931,8 +1232,8 @@ pub fn execute_predicate_inject(
         }
     };
 
-    // Update state
-    if let Ok(updated_state) = global.get(js_string!("__state"), &mut context)
+    // Update the persisted, shared per-port state.
+    if let Ok(updated_state) = global.get(js_string!("__imposterState"), &mut context)
         && let Ok(Value::Object(map)) = js_to_json(&mut context, &updated_state)
     {
         save_imposter_state(imposter_port, map);
@@ -951,7 +1252,7 @@ pub fn execute_predicate_generator_inject(
     request: &MountebankRequest,
     existing_predicates: &[serde_json::Value],
 ) -> Vec<serde_json::Value> {
-    let mut context = Context::default();
+    let mut context = bounded_js_context();
 
     let request_obj = match create_mountebank_request_object(&mut context, request) {
         Ok(obj) => obj,
@@ -970,8 +1271,19 @@ pub fn execute_predicate_generator_inject(
         }
     };
 
+    // No imposter is running yet during proxy recording, so there is no per-port state to tag
+    // the logger with (port 0 placeholder) and no stub id exists yet (stub_id left None).
+    let logger_obj = match create_script_logger_object(&mut context, 0, None) {
+        Ok(obj) => obj,
+        Err(e) => {
+            tracing::warn!("predicateGenerator inject: failed to build logger object: {e}");
+            return Vec::new();
+        }
+    };
+
     let global = context.global_object();
     let _ = global.set(js_string!("__request"), request_obj, false, &mut context);
+    let _ = global.set(js_string!("__logger"), logger_obj, false, &mut context);
     let _ = global.set(
         js_string!("__predicates"),
         predicates_val,
@@ -983,7 +1295,6 @@ pub fn execute_predicate_generator_inject(
         r#"
         var __injectFn = {inject_fn};
         var __config = {{ request: __request }};
-        var __logger = {{ debug: function() {{}}, info: function() {{}}, warn: function() {{}}, error: function(){{}} }};
         var __result = __injectFn(__config, __logger, __predicates);
         JSON.stringify(__result);
         "#
@@ -1300,16 +1611,21 @@ fn register_require(context: &mut Context) -> Result<()> {
 }
 
 /// Execute a Mountebank `config => {...}` / `function(config)` decorate in Boa, exposing a
-/// `config` object ({ request, response, path }) and a CommonJS `require()` so a decorate can
-/// load an external `.cjs`/`.js` module (issue #305). Returns the mutated response.
+/// `config` object ({ request, response, path, state, logger }) — with every request field also
+/// flattened onto `config` itself (issue #355 Item 0) — and a CommonJS `require()` so a decorate
+/// can load an external `.cjs`/`.js` module (issue #305). `config.state` is the per-port state
+/// persisted via `get_imposter_state`/`save_imposter_state`, shared with predicate injects and
+/// response injects for the same imposter. Returns the mutated response.
 pub fn execute_mountebank_config_decorate(
     decorate_fn: &str,
     request: &MountebankRequest,
     response_body: &str,
     response_status: u16,
     response_headers: &std::collections::HashMap<String, String>,
+    imposter_port: u16,
+    stub_id: Option<&str>,
 ) -> Result<MountebankDecorateResponse> {
-    let mut context = Context::default();
+    let mut context = bounded_js_context();
 
     // Create request object
     let request_obj = create_mountebank_request_object(&mut context, request)?;
@@ -1351,10 +1667,22 @@ pub fn execute_mountebank_config_decorate(
         .set(js_string!("headers"), headers_obj, false, &mut context)
         .map_err(|e| anyhow!("Failed to set headers: {e}"))?;
 
-    // Build the config object: { request, response, path }
+    // Get current (persisted, per-port) state for this imposter — shared with predicate/response
+    // injects for the same imposter (issue #355 Item 0).
+    let state_map = get_imposter_state(imposter_port);
+    let state_obj = json_to_js(&mut context, &Value::Object(state_map))?;
+    let logger_obj =
+        create_script_logger_object(&mut context, imposter_port, stub_id.map(str::to_owned))?;
+
+    // Build the config object: { request, response, path, state, logger } + flattened request.
     let config_obj = create_js_object(&context);
     config_obj
-        .set(js_string!("request"), request_obj, false, &mut context)
+        .set(
+            js_string!("request"),
+            request_obj.clone(),
+            false,
+            &mut context,
+        )
         .map_err(|e| anyhow!("Failed to set config.request: {e}"))?;
     config_obj
         .set(
@@ -1372,6 +1700,13 @@ pub fn execute_mountebank_config_decorate(
             &mut context,
         )
         .map_err(|e| anyhow!("Failed to set config.path: {e}"))?;
+    config_obj
+        .set(js_string!("state"), state_obj.clone(), false, &mut context)
+        .map_err(|e| anyhow!("Failed to set config.state: {e}"))?;
+    config_obj
+        .set(js_string!("logger"), logger_obj, false, &mut context)
+        .map_err(|e| anyhow!("Failed to set config.logger: {e}"))?;
+    flatten_request_onto(&config_obj, &request_obj, &mut context)?;
 
     // Register the CommonJS `require()` global before evaluating the decorate so it (and any
     // module it loads) can use it.
@@ -1454,6 +1789,11 @@ pub fn execute_mountebank_config_decorate(
         })
         .unwrap_or_else(|| response_body.to_string());
 
+    // Persist any mutation the decorate made to the shared, per-port state.
+    if let Ok(Value::Object(map)) = js_to_json(&mut context, &state_obj) {
+        save_imposter_state(imposter_port, map);
+    }
+
     Ok(MountebankDecorateResponse {
         status_code,
         headers,
@@ -1461,16 +1801,25 @@ pub fn execute_mountebank_config_decorate(
     })
 }
 
-/// Execute a Mountebank-style decorate behavior function
-/// Format: function(request, response) { ... modifies response ... }
+/// Execute a Mountebank-style decorate behavior function.
+///
+/// Full call signature (issue #355 Item 0): `fn(config, response, logger, state)`, where `config`
+/// stands in for the legacy `request` positional argument (request fields flattened onto
+/// `config`), and `state` is the per-port state persisted via `get_imposter_state`/
+/// `save_imposter_state` — shared with predicate injects and response injects for the same
+/// imposter (previously this was a throwaway `{}` per call).
+/// Legacy forms: `function(request, response) { ... }`, `function(request, response, logger)`,
+/// `function(request, response, logger, state)`.
 pub fn execute_mountebank_decorate(
     decorate_fn: &str,
     request: &MountebankRequest,
     response_body: &str,
     response_status: u16,
     response_headers: &std::collections::HashMap<String, String>,
+    imposter_port: u16,
+    stub_id: Option<&str>,
 ) -> Result<MountebankDecorateResponse> {
-    let mut context = Context::default();
+    let mut context = bounded_js_context();
 
     // Create request object
     let request_obj = create_mountebank_request_object(&mut context, request)?;
@@ -1512,16 +1861,36 @@ pub fn execute_mountebank_decorate(
         .set(js_string!("headers"), headers_obj, false, &mut context)
         .map_err(|e| anyhow!("Failed to set headers: {e}"))?;
 
-    // Set global variables
-    let global = context.global_object();
-    global
+    // Config-first convention (issue #355 Item 0): config stands in for the legacy `request` arg,
+    // with request fields flattened onto it, and carries the shared per-port state + native
+    // logger. Built even though this entrypoint's legacy convention doesn't take a `config`
+    // param, so `function(config, response, ...)`-style scripts also work through this path.
+    let config_obj = create_js_object(&context);
+    config_obj
         .set(
-            js_string!("__request"),
+            js_string!("request"),
             request_obj.clone(),
             false,
             &mut context,
         )
+        .map_err(|e| anyhow!("Failed to set config.request: {e}"))?;
+    flatten_request_onto(&config_obj, &request_obj, &mut context)?;
+
+    // Get current (persisted, per-port) state for this imposter — shared with predicate/response
+    // injects for the same imposter (previously a throwaway `{}` per call; issue #355 Item 0).
+    let state_map = get_imposter_state(imposter_port);
+    let state_obj = json_to_js(&mut context, &Value::Object(state_map))?;
+    let logger_obj =
+        create_script_logger_object(&mut context, imposter_port, stub_id.map(str::to_owned))?;
+
+    // Set global variables
+    let global = context.global_object();
+    global
+        .set(js_string!("__request"), request_obj, false, &mut context)
         .map_err(|e| anyhow!("Failed to set request: {e}"))?;
+    global
+        .set(js_string!("__config"), config_obj, false, &mut context)
+        .map_err(|e| anyhow!("Failed to set config: {e}"))?;
     global
         .set(
             js_string!("__response"),
@@ -1530,16 +1899,25 @@ pub fn execute_mountebank_decorate(
             &mut context,
         )
         .map_err(|e| anyhow!("Failed to set response: {e}"))?;
+    global
+        .set(js_string!("__logger"), logger_obj, false, &mut context)
+        .map_err(|e| anyhow!("Failed to set logger: {e}"))?;
+    global
+        .set(
+            js_string!("__state"),
+            state_obj.clone(),
+            false,
+            &mut context,
+        )
+        .map_err(|e| anyhow!("Failed to set state: {e}"))?;
 
-    // Wrap the decorate function to call it with our arguments.
-    // Provide a no-op logger (Mountebank's 3rd arg) and empty state (4th arg) so
-    // scripts that reference logger.info(...) or state.counter don't throw ReferenceError.
+    // Wrap the decorate function to call it with (config, response, logger, state). `config`
+    // stands in for the legacy `request` positional arg (request fields flattened onto it), so
+    // both `function(request, response, ...)` and `function(config, response, ...)` scripts work.
     let wrapper_script = format!(
         r#"
         var __decorateFn = {decorate_fn};
-        var __logger = {{ debug: function() {{}}, info: function() {{}}, warn: function() {{}}, error: function() {{}} }};
-        var __state = {{}};
-        __decorateFn(__request, __response, __logger, __state);
+        __decorateFn(__config, __response, __logger, __state);
         __response;
         "#
     );
@@ -1548,6 +1926,11 @@ pub fn execute_mountebank_decorate(
     let result = context
         .eval(Source::from_bytes(wrapper_script.as_bytes()))
         .map_err(|e| anyhow!("Failed to execute decorate function: {e}"))?;
+
+    // Persist any mutation the decorate made to the shared, per-port state.
+    if let Ok(Value::Object(map)) = js_to_json(&mut context, &state_obj) {
+        save_imposter_state(imposter_port, map);
+    }
 
     // Parse the modified response
     let obj = result
@@ -2177,6 +2560,14 @@ function should_inject(request, flow_store) {
         }
     }
 
+    // Allocates a fresh, never-reused port number for each test that touches the process-global
+    // `IMPOSTER_STATE` map, so parallel tests never see each other's persisted state.
+    fn test_port() -> u16 {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static NEXT: AtomicU32 = AtomicU32::new(40_100);
+        NEXT.fetch_add(1, Ordering::Relaxed) as u16
+    }
+
     #[test]
     fn test_decorate_with_logger_arg() {
         let request = MountebankRequest {
@@ -2190,7 +2581,15 @@ function should_inject(request, flow_store) {
 
         // Script that uses logger as 3rd argument — must not throw ReferenceError
         let script = r#"function(request, response, logger) { logger.info("decorating"); response.body = "logged"; }"#;
-        let result = execute_mountebank_decorate(script, &request, "original", 200, &headers);
+        let result = execute_mountebank_decorate(
+            script,
+            &request,
+            "original",
+            200,
+            &headers,
+            test_port(),
+            None,
+        );
         assert!(
             result.is_ok(),
             "logger arg should not throw: {:?}",
@@ -2212,7 +2611,15 @@ function should_inject(request, flow_store) {
 
         // Script that uses state as 4th argument — must not throw ReferenceError
         let script = r#"function(request, response, logger, state) { state.count = 1; response.body = "state ok"; }"#;
-        let result = execute_mountebank_decorate(script, &request, "original", 200, &headers);
+        let result = execute_mountebank_decorate(
+            script,
+            &request,
+            "original",
+            200,
+            &headers,
+            test_port(),
+            None,
+        );
         assert!(
             result.is_ok(),
             "state arg should not throw: {:?}",
@@ -2260,6 +2667,8 @@ function should_inject(request, flow_store) {
             "orig",
             200,
             &HashMap::new(),
+            test_port(),
+            None,
         );
         let _ = std::fs::remove_file(&module);
         let resp = result.expect("require decorate should run");
@@ -2274,9 +2683,16 @@ function should_inject(request, flow_store) {
     #[test]
     fn test_config_decorate_direct_field_access() {
         let script = "config => { config.response.body = 'DIRECT'; }";
-        let resp =
-            execute_mountebank_config_decorate(script, &config_req(), "orig", 200, &HashMap::new())
-                .expect("direct config decorate should run");
+        let resp = execute_mountebank_config_decorate(
+            script,
+            &config_req(),
+            "orig",
+            200,
+            &HashMap::new(),
+            test_port(),
+            None,
+        )
+        .expect("direct config decorate should run");
         assert_eq!(resp.body, "DIRECT");
     }
 
@@ -2284,9 +2700,16 @@ function should_inject(request, flow_store) {
     #[test]
     fn test_config_decorate_reads_request_body() {
         let script = "config => { config.response.body = config.request.body; }";
-        let resp =
-            execute_mountebank_config_decorate(script, &config_req(), "orig", 200, &HashMap::new())
-                .expect("config.request decorate should run");
+        let resp = execute_mountebank_config_decorate(
+            script,
+            &config_req(),
+            "orig",
+            200,
+            &HashMap::new(),
+            test_port(),
+            None,
+        )
+        .expect("config.request decorate should run");
         assert_eq!(resp.body, "REQ-BODY");
     }
 
@@ -2332,6 +2755,8 @@ function should_inject(request, flow_store) {
             "orig",
             200,
             &HashMap::new(),
+            test_port(),
+            None,
         );
         let _ = std::fs::remove_file(&path_a);
         let _ = std::fs::remove_file(&path_b);
@@ -2347,11 +2772,393 @@ function should_inject(request, flow_store) {
     #[test]
     fn test_config_decorate_require_missing_errors() {
         let script = "config => { const s = require('/no/such/rift305/module.cjs'); s(config); }";
-        let result =
-            execute_mountebank_config_decorate(script, &config_req(), "orig", 200, &HashMap::new());
+        let result = execute_mountebank_config_decorate(
+            script,
+            &config_req(),
+            "orig",
+            200,
+            &HashMap::new(),
+            test_port(),
+            None,
+        );
         assert!(
             result.is_err(),
             "a missing require() must surface as Err, not silently no-op"
+        );
+    }
+
+    // =========================================================================================
+    // Issue #355 Item 0: Mountebank v2 `config` calling convention (dual-convention, zero
+    // breakage) for response inject, predicate inject, and decorate.
+    // =========================================================================================
+
+    fn mb_req(method: &str, path: &str) -> MountebankRequest {
+        MountebankRequest {
+            method: method.to_string(),
+            path: path.to_string(),
+            query: HashMap::new(),
+            headers: HashMap::new(),
+            body: None,
+        }
+    }
+
+    // (a) v2 config convention: function(config) { ...config.request.path... }
+    #[test]
+    fn inject_v2_config_request_path() {
+        let script =
+            r#"function(config) { return { statusCode: 200, body: config.request.path }; }"#;
+        let resp = execute_mountebank_inject(script, &mb_req("GET", "/a-path"), test_port(), None)
+            .expect("v2 config convention should run");
+        assert_eq!(resp.body, "/a-path");
+    }
+
+    // (b) legacy positional: function(request, state, logger) { ...request.path... }
+    #[test]
+    fn inject_legacy_positional_request_path() {
+        let script = r#"function(request, state, logger) { return { statusCode: 200, body: request.path }; }"#;
+        let resp = execute_mountebank_inject(script, &mb_req("GET", "/legacy"), test_port(), None)
+            .expect("legacy positional convention should run");
+        assert_eq!(resp.body, "/legacy");
+    }
+
+    // (c) flattened: function(config) { ...config.path... } (no config.request access)
+    #[test]
+    fn inject_flattened_config_path() {
+        let script = r#"function(config) { return { statusCode: 200, body: config.path + " " + config.method }; }"#;
+        let resp = execute_mountebank_inject(script, &mb_req("POST", "/flat"), test_port(), None)
+            .expect("flattened config fields should be readable");
+        assert_eq!(resp.body, "/flat POST");
+    }
+
+    // (d) the `var req = config.request || config;` shim used by scripts written to run under
+    // either the old or new convention.
+    #[test]
+    fn inject_request_or_config_shim() {
+        let script = r#"function(config) {
+            var req = config.request || config;
+            return { statusCode: 200, body: req.path };
+        }"#;
+        let resp = execute_mountebank_inject(script, &mb_req("GET", "/shim"), test_port(), None)
+            .expect("request-or-config shim should run");
+        assert_eq!(resp.body, "/shim");
+    }
+
+    // (e) hybrid: function(config, state) { ... } — a script naming the 2nd positional param
+    // "state" (matching Mountebank's legacy name) still works positionally.
+    #[test]
+    fn inject_hybrid_config_state() {
+        let script = r#"function(config, state) {
+            state.hits = (state.hits || 0) + 1;
+            return { statusCode: 200, body: "hits:" + state.hits };
+        }"#;
+        let resp = execute_mountebank_inject(script, &mb_req("GET", "/hybrid"), test_port(), None)
+            .expect("hybrid config+state signature should run");
+        assert_eq!(resp.body, "hits:1");
+    }
+
+    // The async-callback convention: `done` (arg 4) is called instead of returning a value;
+    // `config.callback` is an alias of the same function, so either spelling works.
+    #[test]
+    fn inject_callback_style_done() {
+        let script = r#"function(config, injectState, logger, done) {
+            done({ statusCode: 200, body: "via-done" });
+        }"#;
+        let resp = execute_mountebank_inject(script, &mb_req("GET", "/cb"), test_port(), None)
+            .expect("callback-style inject should run");
+        assert_eq!(resp.body, "via-done");
+    }
+
+    #[test]
+    fn inject_callback_style_config_callback_alias() {
+        let script = r#"function(config) {
+            config.callback({ statusCode: 200, body: "via-config-callback" });
+        }"#;
+        let resp = execute_mountebank_inject(script, &mb_req("GET", "/cb2"), test_port(), None)
+            .expect("config.callback alias should run");
+        assert_eq!(resp.body, "via-config-callback");
+    }
+
+    // Predicate inject: same five conventions, adapted to a boolean-returning function.
+    #[test]
+    fn predicate_v2_config_request_path() {
+        let script = r#"function(config) { return config.request.path === "/match"; }"#;
+        assert!(execute_predicate_inject(
+            script,
+            &mb_req("GET", "/match"),
+            test_port()
+        ));
+    }
+
+    #[test]
+    fn predicate_legacy_positional() {
+        let script = r#"function(request, logger, state) { return request.path === "/match"; }"#;
+        assert!(execute_predicate_inject(
+            script,
+            &mb_req("GET", "/match"),
+            test_port()
+        ));
+    }
+
+    #[test]
+    fn predicate_flattened_config_path() {
+        let script = r#"function(config) { return config.path === "/match"; }"#;
+        assert!(execute_predicate_inject(
+            script,
+            &mb_req("GET", "/match"),
+            test_port()
+        ));
+    }
+
+    #[test]
+    fn predicate_request_or_config_shim() {
+        let script = r#"function(config) {
+            var req = config.request || config;
+            return req.path === "/match";
+        }"#;
+        assert!(execute_predicate_inject(
+            script,
+            &mb_req("GET", "/match"),
+            test_port()
+        ));
+    }
+
+    #[test]
+    fn predicate_hybrid_config_state() {
+        let script = r#"function(config, state) {
+            state.checked = true;
+            return config.method === "GET";
+        }"#;
+        assert!(execute_predicate_inject(
+            script,
+            &mb_req("GET", "/match"),
+            test_port()
+        ));
+    }
+
+    // Decorate: same five conventions.
+    #[test]
+    fn decorate_v2_config_request_path() {
+        let script = r#"function(config, response) { response.body = config.request.path; }"#;
+        let resp = execute_mountebank_decorate(
+            script,
+            &mb_req("GET", "/dec-a"),
+            "orig",
+            200,
+            &HashMap::new(),
+            test_port(),
+            None,
+        )
+        .expect("v2 config decorate should run");
+        assert_eq!(resp.body, "/dec-a");
+    }
+
+    #[test]
+    fn decorate_legacy_positional() {
+        let script = r#"function(request, response, logger) { response.body = request.path; }"#;
+        let resp = execute_mountebank_decorate(
+            script,
+            &mb_req("GET", "/dec-legacy"),
+            "orig",
+            200,
+            &HashMap::new(),
+            test_port(),
+            None,
+        )
+        .expect("legacy positional decorate should run");
+        assert_eq!(resp.body, "/dec-legacy");
+    }
+
+    #[test]
+    fn decorate_flattened_config_path() {
+        let script = r#"function(config, response) { response.body = config.path; }"#;
+        let resp = execute_mountebank_decorate(
+            script,
+            &mb_req("GET", "/dec-flat"),
+            "orig",
+            200,
+            &HashMap::new(),
+            test_port(),
+            None,
+        )
+        .expect("flattened config decorate should run");
+        assert_eq!(resp.body, "/dec-flat");
+    }
+
+    #[test]
+    fn decorate_request_or_config_shim() {
+        let script = r#"function(config, response) {
+            var req = config.request || config;
+            response.body = req.path;
+        }"#;
+        let resp = execute_mountebank_decorate(
+            script,
+            &mb_req("GET", "/dec-shim"),
+            "orig",
+            200,
+            &HashMap::new(),
+            test_port(),
+            None,
+        )
+        .expect("request-or-config shim decorate should run");
+        assert_eq!(resp.body, "/dec-shim");
+    }
+
+    #[test]
+    fn decorate_hybrid_config_state() {
+        let script = r#"function(config, response, logger, state) {
+            state.decorated = true;
+            response.body = "decorated:" + config.method;
+        }"#;
+        let resp = execute_mountebank_decorate(
+            script,
+            &mb_req("GET", "/dec-hybrid"),
+            "orig",
+            200,
+            &HashMap::new(),
+            test_port(),
+            None,
+        )
+        .expect("hybrid config+state decorate should run");
+        assert_eq!(resp.body, "decorated:GET");
+    }
+
+    // State written by a predicate inject must be visible to a later response inject on the same
+    // imposter port (issue #355 Item 0: config.state / imposterState is shared per-port).
+    #[test]
+    fn state_shared_between_predicate_and_response_inject() {
+        let port = test_port();
+        let predicate_script =
+            r#"function(config) { config.state.seen = "from-predicate"; return true; }"#;
+        assert!(execute_predicate_inject(
+            predicate_script,
+            &mb_req("GET", "/shared"),
+            port
+        ));
+
+        let inject_script = r#"function(config) { return { statusCode: 200, body: config.state.seen || "missing" }; }"#;
+        let resp = execute_mountebank_inject(inject_script, &mb_req("GET", "/shared"), port, None)
+            .expect("response inject should run");
+        assert_eq!(
+            resp.body, "from-predicate",
+            "state written by a predicate inject must be visible to a later response inject \
+             on the same imposter port"
+        );
+    }
+
+    // =========================================================================================
+    // Issue #355 Item 1: native logger routes to `tracing`.
+    // =========================================================================================
+
+    /// Minimal capturing `tracing::Subscriber` (no external test-capture crate needed): records
+    /// every event's target + fields as one formatted string per event.
+    struct CapturingSubscriber {
+        events: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl tracing::Subscriber for CapturingSubscriber {
+        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            struct Visitor(String);
+            impl tracing::field::Visit for Visitor {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    self.0.push_str(&format!("{}={:?} ", field.name(), value));
+                }
+                fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                    self.0.push_str(&format!("{}={} ", field.name(), value));
+                }
+            }
+            let mut visitor = Visitor(format!("target={} ", event.metadata().target()));
+            event.record(&mut visitor);
+            self.events.lock().unwrap().push(visitor.0);
+        }
+        fn enter(&self, _span: &tracing::span::Id) {}
+        fn exit(&self, _span: &tracing::span::Id) {}
+    }
+
+    // The native logger's methods are callable without throwing, AND the messages actually reach
+    // the process's tracing subscriber at target "rift::script", tagged with the imposter port and
+    // — when the caller provides one — the stub id (issue #355 Item 1 + AC1).
+    #[test]
+    fn mb_logger_routes_to_tracing() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = CapturingSubscriber {
+            events: Arc::clone(&events),
+        };
+        let port = test_port();
+
+        let script = r#"function(config) {
+            config.logger.debug("dbg-msg");
+            config.logger.info("hello-from-script");
+            config.logger.warn("warn-msg");
+            config.logger.error("err-msg");
+            return { statusCode: 200, body: "logged" };
+        }"#;
+
+        let result = tracing::subscriber::with_default(subscriber, || {
+            execute_mountebank_inject(script, &mb_req("GET", "/log"), port, Some("stub-log-42"))
+        });
+
+        assert!(
+            result.is_ok(),
+            "logger calls must not throw: {:?}",
+            result.err()
+        );
+
+        let logs = events.lock().unwrap();
+        assert!(
+            logs.iter()
+                .any(|l| l.contains("rift::script") && l.contains("hello-from-script")),
+            "expected an info event carrying the script's message, got: {logs:?}"
+        );
+        assert!(
+            logs.iter().any(|l| l.contains(&port.to_string())),
+            "expected the imposter port to be tagged on a logged event, got: {logs:?}"
+        );
+        assert!(
+            logs.iter().any(|l| l.contains("stub-log-42")),
+            "expected the stub id to be tagged on a logged event when provided, got: {logs:?}"
+        );
+    }
+
+    // =========================================================================================
+    // Issue #355 Item 3: Boa RuntimeLimits on every MB JS hook Context.
+    // =========================================================================================
+
+    // An inject fn with a genuine infinite loop must terminate (Err), not hang, because
+    // `bounded_js_context()` caps loop iterations on every Context these hooks build.
+    #[test]
+    fn mb_inject_infinite_loop_terminates() {
+        let script = r#"function(config) { while (true) {} }"#;
+        let result = execute_mountebank_inject(script, &mb_req("GET", "/loop"), test_port(), None);
+        assert!(
+            result.is_err(),
+            "an infinite loop in an inject fn must terminate with an error, not hang"
+        );
+    }
+
+    // =========================================================================================
+    // Issue #355 Item 5 (AC5): a throwing inject fn surfaces as an Err (the handler maps this to
+    // a Mountebank-shaped 400 — see issue_355_inject_error_parity.rs for the end-to-end assertion).
+    // =========================================================================================
+    #[test]
+    fn mb_inject_throwing_returns_err() {
+        let script = r#"function(config) { throw new Error('boom-inject'); }"#;
+        let result = execute_mountebank_inject(script, &mb_req("GET", "/throw"), test_port(), None);
+        let err = result.expect_err("a throwing inject must surface as Err, not silently succeed");
+        assert!(
+            err.to_string().contains("boom-inject"),
+            "the error must carry the script's failure message, got: {err}"
         );
     }
 }

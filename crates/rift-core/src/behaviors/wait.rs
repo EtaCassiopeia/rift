@@ -31,19 +31,83 @@ impl WaitBehavior {
             WaitBehavior::Function(js_func) => {
                 // Parse JavaScript function and execute
                 // Format: "function() { return Math.floor(Math.random() * 100) + 50; }"
-                Self::execute_js_wait_function(js_func).unwrap_or(100)
+                // A failed/unusable wait function falls back to 100ms — but loudly, so it is
+                // distinguishable from a genuine 100ms wait (B4, issue #355).
+                Self::execute_js_wait_function(js_func).unwrap_or_else(|| {
+                    tracing::warn!(
+                        target: "rift::script",
+                        "wait function produced no usable delay; falling back to 100ms"
+                    );
+                    100
+                })
             }
         }
     }
 
-    /// Execute a JavaScript wait function
+    /// Execute a JavaScript wait function.
+    ///
+    /// When the `javascript` feature is enabled, this actually runs the function body on a
+    /// bounded Boa `Context` (issue #355 Item 6) rather than pattern-matching a couple of known
+    /// `Math.random` shapes — so any wait function (not just the ones the old regex recognized)
+    /// produces a correct value. Without the feature, falls back to the original regex-based
+    /// extraction so `--no-default-features` still builds and works for the common patterns.
     fn execute_js_wait_function(js_func: &str) -> Option<u64> {
-        // Extract the function body
         let trimmed = js_func.trim();
         if !trimmed.starts_with("function") {
             return None;
         }
 
+        #[cfg(feature = "javascript")]
+        {
+            if let Some(ms) = Self::execute_js_wait_function_boa(trimmed) {
+                return Some(ms);
+            }
+        }
+
+        Self::execute_js_wait_function_regex(trimmed)
+    }
+
+    /// Run the wait function body for real on a bounded Boa `Context`: evaluate `(<js_func>)()`
+    /// and coerce the numeric result to a `u64` delay, floored and capped at 60s so a
+    /// pathological/negative/huge result can't turn into an enormous or nonsensical sleep.
+    #[cfg(feature = "javascript")]
+    fn execute_js_wait_function_boa(js_func: &str) -> Option<u64> {
+        const MAX_WAIT_MS: u64 = 60_000;
+        let mut context = crate::scripting::bounded_js_context();
+        let wrapped = format!("({js_func})()");
+        // A script/runtime error must not be swallowed silently (B4, issue #355): log it, then
+        // return None so the caller's regex safety net / 100ms fallback still applies.
+        let result = match context.eval(boa_engine::Source::from_bytes(wrapped.as_bytes())) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(target: "rift::script", "wait function script error: {e}");
+                return None;
+            }
+        };
+        let n = match result.to_number(&mut context) {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::warn!(
+                    target: "rift::script",
+                    "wait function returned a non-numeric result: {e}"
+                );
+                return None;
+            }
+        };
+        if !n.is_finite() {
+            tracing::warn!(
+                target: "rift::script",
+                "wait function returned a non-finite number: {n}"
+            );
+            return None;
+        }
+        let ms = n.max(0.0).floor() as u64;
+        Some(ms.min(MAX_WAIT_MS))
+    }
+
+    /// Regex-based fallback: used as the sole path when the `javascript` feature is disabled,
+    /// and as a safety net if the Boa path above fails to produce a value while it's enabled.
+    fn execute_js_wait_function_regex(trimmed: &str) -> Option<u64> {
         if let Some(body) = extract_function_body(trimmed) {
             // Handle Solo pattern:
             // var min = Math.ceil(N); var max = Math.floor(M); var num = Math.floor(Math.random() * (max - min + 1)); var wait = (num + min); return wait;
@@ -199,5 +263,28 @@ mod tests {
                 "Duration {duration} not in range 50-150"
             );
         }
+    }
+
+    // Issue #355 Item 6: the wait function body is actually EXECUTED (not regex-scraped), so a
+    // function that isn't one of the previously-recognized `Math.random` shapes still works.
+    #[test]
+    fn wait_function_executes_js() {
+        let wait = WaitBehavior::Function("function() { return 42; }".to_string());
+        assert_eq!(wait.get_duration_ms(), 42);
+    }
+
+    // A negative return value must not become an enormous u64 delay (underflow) or a negative
+    // sleep; it clamps to 0.
+    #[test]
+    fn wait_function_negative_clamps_to_zero() {
+        let wait = WaitBehavior::Function("function() { return -5; }".to_string());
+        assert_eq!(wait.get_duration_ms(), 0);
+    }
+
+    // A huge return value is capped rather than producing an unbounded sleep.
+    #[test]
+    fn wait_function_huge_value_is_capped() {
+        let wait = WaitBehavior::Function("function() { return 999999999; }".to_string());
+        assert_eq!(wait.get_duration_ms(), 60_000);
     }
 }

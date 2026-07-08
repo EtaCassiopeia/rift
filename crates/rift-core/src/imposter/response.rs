@@ -276,14 +276,26 @@ pub fn create_stub_from_proxy_response(
     }
 }
 
-/// Apply decorate behavior - handles both JavaScript and Rhai scripts
+/// Apply decorate behavior - handles both JavaScript and Rhai scripts.
+///
+/// `imposter_port` identifies the per-imposter state shared with predicate injects and response
+/// injects for the same imposter (issue #355 Item 0) — decorate reads and writes the same
+/// persisted state rather than a throwaway object. `stub_id` tags the script logger's tracing
+/// events with the owning stub, when known (issue #355 AC1).
 pub fn apply_js_or_rhai_decorate(
     script: &str,
     request: &RequestContext,
     body: &str,
     status: u16,
     headers: &mut HashMap<String, String>,
+    imposter_port: u16,
+    stub_id: Option<&str>,
 ) -> Result<(String, u16), DecorateError> {
+    // Only the JS engine call sites below consume `imposter_port`/`stub_id`; without the feature
+    // the parameters would otherwise be unused.
+    #[cfg(not(feature = "javascript"))]
+    let _ = (imposter_port, stub_id);
+
     // Mountebank's JS `config =>` convention (issue #191): rewrite simple field access onto the
     // Rhai request/response maps. Checked before the `function` route since arrow scripts don't
     // start with "function" and `function(config)` uses the config model, not (request, response).
@@ -309,6 +321,8 @@ pub fn apply_js_or_rhai_decorate(
                 body,
                 status,
                 headers,
+                imposter_port,
+                stub_id,
             ) {
                 Ok(result) => {
                     for (k, v) in result.headers {
@@ -343,6 +357,8 @@ pub fn apply_js_or_rhai_decorate(
                 body,
                 status,
                 headers,
+                imposter_port,
+                stub_id,
             ) {
                 Ok(result) => {
                     // Update headers from the result
@@ -377,6 +393,14 @@ pub fn apply_js_or_rhai_decorate(
 mod tests {
     use super::*;
 
+    // Allocates a fresh port per test so parallel tests never share `IMPOSTER_STATE` (disjoint
+    // from the range used by `rift-core/src/scripting/js_engine.rs`'s own tests in this binary).
+    fn test_port() -> u16 {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static NEXT: AtomicU32 = AtomicU32::new(41_100);
+        NEXT.fetch_add(1, Ordering::Relaxed) as u16
+    }
+
     // Issue #191: the JS `config =>` decorate convention runs (rewritten to Rhai) end-to-end.
     fn decorate_req() -> RequestContext {
         RequestContext {
@@ -397,6 +421,8 @@ mod tests {
             "original",
             200,
             &mut headers,
+            test_port(),
+            None,
         )
         .unwrap();
         assert_eq!(body, "hello");
@@ -412,6 +438,8 @@ mod tests {
             "original",
             200,
             &mut headers,
+            test_port(),
+            None,
         )
         .unwrap();
         assert_eq!(body, "REQ-BODY");
@@ -437,8 +465,15 @@ mod tests {
             module.display()
         );
         let mut headers = std::collections::HashMap::new();
-        let result =
-            apply_js_or_rhai_decorate(&script, &decorate_req(), "original", 200, &mut headers);
+        let result = apply_js_or_rhai_decorate(
+            &script,
+            &decorate_req(),
+            "original",
+            200,
+            &mut headers,
+            test_port(),
+            None,
+        );
         let _ = std::fs::remove_file(&module);
         let (body, _) = result.expect("require-based config decorate should run");
         assert_eq!(body, "REQUIRE-RAN");
@@ -453,6 +488,8 @@ mod tests {
             "original",
             200,
             &mut headers,
+            test_port(),
+            None,
         )
         .unwrap();
         assert_eq!(status, 404);
@@ -469,6 +506,8 @@ mod tests {
             "original",
             200,
             &mut headers,
+            test_port(),
+            None,
         )
         .unwrap();
         assert_eq!(body, "fn");
@@ -485,6 +524,8 @@ mod tests {
             "original",
             200,
             &mut headers,
+            test_port(),
+            None,
         )
         .unwrap();
         assert_eq!(body, "bare");
@@ -499,6 +540,8 @@ mod tests {
             "original",
             200,
             &mut headers,
+            test_port(),
+            None,
         )
         .unwrap();
         assert_eq!(body, "/orders", "existing Rhai decorate must be unchanged");
