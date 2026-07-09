@@ -253,13 +253,15 @@ impl Imposter {
     }
 
     /// Create flow store based on _rift.flowState configuration.
-    /// Falls back to a default in-memory store (not NoOp) when stubs declare the scenario FSM,
-    /// so declarative scenarios work out of the box without explicit `_rift.flowState`.
+    /// Falls back to a default in-memory store (not NoOp) when stubs declare the scenario FSM or
+    /// carry a `_rift.script` that might call `ctx.state` (issue #358), so both work out of the
+    /// box without explicit `_rift.flowState`. Only an imposter with neither surface gets the
+    /// silent `NoOpFlowStore` — such an imposter never touches the store anyway.
     ///
-    /// Note: the store is chosen at construction. Scenario stubs added later via an in-place
-    /// `PUT /imposters/:port/stubs` to an imposter that started with no scenario stubs (and no
-    /// `_rift.flowState`) will hit the NoOp store and not advance — declare scenario stubs at
-    /// creation, configure `_rift.flowState`, use `PUT /imposters` (which recreates), or set a
+    /// Note: the store is chosen at construction. Scenario/script stubs added later via an
+    /// in-place `PUT /imposters/:port/stubs` to an imposter that started with neither (and no
+    /// `_rift.flowState`) will hit the NoOp store and not persist — declare them at creation,
+    /// configure `_rift.flowState`, use `PUT /imposters` (which recreates), or set a
     /// manager-scoped `FlowStoreProvider` returning a shared store (issue #312).
     fn create_flow_store(
         config: &ImposterConfig,
@@ -316,6 +318,23 @@ impl Imposter {
             )));
         }
 
+        if Self::uses_script(&config.stubs) {
+            // A script may call `ctx.state`/`flow_store` at runtime — not visible statically — so
+            // provision a real store rather than let it silently discard writes (issue #358). This
+            // is a convenience default, not a production recommendation: warn so an operator who
+            // didn't mean to rely on it notices in their logs.
+            tracing::warn!(
+                target: "rift::script",
+                ttl_seconds = DEFAULT_FLOW_STATE_TTL_SECS,
+                "imposter has a _rift.script stub but no _rift.flowState configured; \
+                 auto-provisioning an in-memory FlowStore. State will NOT persist across restarts \
+                 or be shared across a cluster — configure _rift.flowState for production."
+            );
+            return Ok(Arc::new(InMemoryFlowStore::new(
+                DEFAULT_FLOW_STATE_TTL_SECS,
+            )));
+        }
+
         Ok(Arc::new(NoOpFlowStore))
     }
 
@@ -326,9 +345,30 @@ impl Imposter {
             .any(|s| s.required_scenario_state.is_some() || s.new_scenario_state.is_some())
     }
 
+    /// Whether any stub can execute a Rift script (`_rift.script` on an `Is` response, or the
+    /// script-only `RiftScript` response) — such a stub might call `ctx.state`/`flow_store` at
+    /// runtime, so its imposter needs a real flow store even without `_rift.flowState`
+    /// configured (issue #358). Conservative like [`Self::uses_tcp_faults`]: a `RiftScript`
+    /// response always counts, since whether it actually touches the store isn't visible here.
+    fn uses_script(stubs: &[Stub]) -> bool {
+        stubs
+            .iter()
+            .flat_map(|s| &s.responses)
+            .any(|resp| match resp {
+                StubResponse::Is { rift: Some(r), .. } => r.script.is_some(),
+                StubResponse::RiftScript { .. } => true,
+                _ => false,
+            })
+    }
+
     /// Whether any current stub can trigger a connection-level TCP fault (`_rift.fault.tcp`, or a
     /// Mountebank `fault` that maps to one). Such imposters must be served HTTP/1-only: a TCP fault
     /// aborts the whole socket, which is incompatible with HTTP/2 stream multiplexing (issue #295).
+    ///
+    /// A `_rift.script` (RiftScript) stub also counts (issue #357 B2): a script can dynamically
+    /// call `reset()` — the v2 connection-reset result constructor — which lowers to the same
+    /// transport-level abort as `_rift.fault.tcp`, so a script-bearing stub must likewise be
+    /// served HTTP/1-only even though its reset path isn't visible in the static config.
     pub(crate) fn uses_tcp_faults(&self) -> bool {
         use crate::imposter::fault_io::TcpFaultKind;
         let rift_has_tcp = |rift: &RiftResponseExtension| {
@@ -344,7 +384,8 @@ impl Imposter {
             .any(|resp| match resp {
                 StubResponse::Fault { fault } => TcpFaultKind::parse(fault).is_some(),
                 StubResponse::Is { rift: Some(r), .. } => rift_has_tcp(r),
-                StubResponse::RiftScript { rift } => rift_has_tcp(rift),
+                // A script may call `reset()` at runtime, so conservatively force H1-only.
+                StubResponse::RiftScript { .. } => true,
                 _ => false,
             })
     }
@@ -494,6 +535,79 @@ mod tests {
             result.is_err(),
             "redis backend without the redis-backend feature must fail construction, not NoOp"
         );
+    }
+
+    // Issue #325/#358: an unreachable redis URL must fail imposter creation loudly (via
+    // `RedisFlowStore::new`'s eager PING), not silently downgrade to NoOp/in-memory.
+    #[cfg(feature = "redis-backend")]
+    #[test]
+    fn redis_unreachable_url_fails_construction() {
+        let cfg = serde_json::from_value(json!({
+            "port": 0, "protocol": "http", "stubs": [],
+            "_rift": { "flowState": { "backend": "redis", "redis": { "url": "redis://127.0.0.1:1" } } }
+        }))
+        .expect("valid imposter config");
+        let result = Imposter::new_with_hooks_and_journal(cfg, None, None, None);
+        assert!(
+            result.is_err(),
+            "an unreachable redis URL must fail imposter construction, not NoOp"
+        );
+    }
+
+    // Issue #358: a `_rift.script` stub might call `ctx.state`/`flow_store` at runtime — without
+    // `_rift.flowState` configured it must get a REAL in-memory store, not the silent NoOp (state
+    // must persist across calls; NoOp's `increment` always returns 1).
+    #[test]
+    fn script_stub_without_flow_state_auto_provisions_in_memory() {
+        let cfg = serde_json::from_value(json!({
+            "port": 0, "protocol": "http",
+            "stubs": [{
+                "responses": [{
+                    "is": { "statusCode": 200 },
+                    "_rift": { "script": { "engine": "rhai", "code": "fn respond(ctx) { pass() }" } }
+                }]
+            }]
+        }))
+        .expect("valid imposter config");
+        let imp = Imposter::new(cfg).expect("test imposter");
+        assert_eq!(imp.flow_store.increment("f", "attempts").expect("incr"), 1);
+        assert_eq!(
+            imp.flow_store.increment("f", "attempts").expect("incr"),
+            2,
+            "NoOpFlowStore would return 1 both times; the auto-provisioned in-memory store must persist"
+        );
+    }
+
+    // Same guarantee for the script-only `RiftScript` response variant (no `is` wrapper).
+    #[test]
+    fn script_only_response_without_flow_state_auto_provisions_in_memory() {
+        let cfg = serde_json::from_value(json!({
+            "port": 0, "protocol": "http",
+            "stubs": [{
+                "responses": [{
+                    "_rift": { "script": { "engine": "rhai", "code": "fn respond(ctx) { http(200) }" } }
+                }]
+            }]
+        }))
+        .expect("valid imposter config");
+        let imp = Imposter::new(cfg).expect("test imposter");
+        assert_eq!(imp.flow_store.increment("f", "attempts").expect("incr"), 1);
+        assert_eq!(imp.flow_store.increment("f", "attempts").expect("incr"), 2);
+    }
+
+    // An imposter with neither a scenario stub nor a script stub keeps the silent NoOp — it never
+    // touches the store, so provisioning a real one would be pure waste.
+    #[test]
+    fn plain_stub_without_flow_state_stays_noop() {
+        let cfg = serde_json::from_value(json!({
+            "port": 0, "protocol": "http",
+            "stubs": [{ "responses": [{ "is": { "statusCode": 200 } }] }]
+        }))
+        .expect("valid imposter config");
+        let imp = Imposter::new(cfg).expect("test imposter");
+        // NoOpFlowStore.increment always returns 1 — it never persists.
+        assert_eq!(imp.flow_store.increment("f", "attempts").expect("incr"), 1);
+        assert_eq!(imp.flow_store.increment("f", "attempts").expect("incr"), 1);
     }
 
     #[test]

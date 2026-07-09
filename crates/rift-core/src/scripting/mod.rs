@@ -1,4 +1,4 @@
-use crate::extensions::flow_state::{FlowStore, flow_result, strict_flow_store};
+use crate::extensions::flow_state::{CasOutcome, FlowStore, flow_result};
 use anyhow::{Result, anyhow};
 use rhai::Dynamic;
 use serde_json::Value;
@@ -7,8 +7,12 @@ use std::sync::Arc;
 
 // Engine modules (only used by proxy.rs for compilation)
 mod bounded;
+mod compiled_cache;
 mod rhai_engine;
-pub use bounded::{DEFAULT_SCRIPT_TIMEOUT_MS, resolve_script_timeout_ms, should_inject_bounded};
+pub use bounded::{
+    DEFAULT_SCRIPT_TIMEOUT_MS, resolve_script_timeout_ms, should_inject_bounded,
+    should_inject_bounded_with_ctx, should_inject_bounded_with_ctx_traced,
+};
 
 pub use rhai_engine::RhaiEngine;
 
@@ -20,18 +24,18 @@ pub use script_pool::{CompiledScript, ScriptPool, ScriptPoolConfig};
 mod decision_cache;
 pub use decision_cache::{CacheKey, DecisionCache, DecisionCacheConfig};
 
-#[cfg(feature = "lua")]
-mod lua_engine;
-#[cfg(feature = "lua")]
-pub use lua_engine::{LuaEngine, compile_to_bytecode};
-
 #[cfg(feature = "javascript")]
 mod js_engine;
+/// Exposed so other modules (e.g. `behaviors::wait`) that run a standalone JS snippet outside the
+/// MB inject/predicate/decorate hooks still get the same interpreter-level guards (issue #355
+/// Items 3/6) rather than an unbounded `Context::default()`.
+#[cfg(feature = "javascript")]
+pub(crate) use js_engine::bounded_js_context;
 #[cfg(feature = "javascript")]
 pub use js_engine::{
-    JsEngine, MountebankRequest, clear_imposter_state, compile_js_to_bytecode,
-    execute_mountebank_config_decorate, execute_mountebank_decorate, execute_mountebank_inject,
-    execute_predicate_generator_inject, execute_predicate_inject,
+    JsEngine, MountebankRequest, PredicateInjectionError, clear_imposter_state,
+    compile_js_to_bytecode, execute_mountebank_config_decorate, execute_mountebank_decorate,
+    execute_mountebank_inject, execute_predicate_generator_inject, execute_predicate_inject,
 };
 #[cfg(feature = "javascript")]
 #[allow(unused_imports)]
@@ -49,14 +53,6 @@ mod rhai_validator;
 pub use rhai_validator::RhaiValidationError;
 pub use rhai_validator::RhaiValidator;
 
-#[cfg(feature = "lua")]
-mod lua_validator;
-#[cfg(feature = "lua")]
-#[allow(unused_imports)]
-pub use lua_validator::LuaValidationError;
-#[cfg(feature = "lua")]
-pub use lua_validator::LuaValidator;
-
 #[cfg(feature = "javascript")]
 mod js_validator;
 #[cfg(feature = "javascript")]
@@ -68,6 +64,15 @@ pub use js_validator::JsValidator;
 // Stub script validation for Admin API
 mod stub_validator;
 pub use stub_validator::{validate_stub, validate_stubs};
+
+// Static entrypoint/arity checking, for `rift script check` (issue #360)
+mod entrypoint_check;
+pub use entrypoint_check::{EntrypointCheckError, EntrypointMatch, check_entrypoint};
+
+// Script decision/log tracing, for `rift script run` and the debug-mode per-request trace
+// (issue #360)
+mod trace;
+pub use trace::{ScriptTraceEntry, cap_trace_logs, capture_script_logs, render_decision};
 
 /// Script execution result for fault injection decisions
 #[derive(Debug, Clone)]
@@ -84,15 +89,214 @@ pub enum FaultDecision {
         rule_id: String,
         headers: std::collections::HashMap<String, String>,
     },
+    /// Connection reset, requested via the v2 `reset()` result constructor (issue #357 Item 3) —
+    /// the scripting analogue of the Mountebank-compatible `_rift.fault.tcp` / top-level `fault`
+    /// carrier (see `imposter::fault_io::TcpFaultKind`). Callers apply it the same way: attach
+    /// `TcpFaultKind::Reset` to a carrier response's extensions so the serve loop's `FaultIo`
+    /// aborts the connection instead of framing a clean HTTP response.
+    Reset {
+        rule_id: String,
+    },
 }
 
-/// Unified script engine that supports Rhai, Lua, and JavaScript
+/// Everything about the calling stub thread into `ctx.stub` (issue #357 Item 1). Fields are
+/// `None` where unavailable, mirroring P1's `stub_id` contract (issue #355).
+#[derive(Debug, Clone, Default)]
+pub struct ScriptStubContext {
+    pub scenario_name: Option<String>,
+    pub scenario_state: Option<String>,
+    pub stub_id: Option<String>,
+}
+
+/// The in-flight response, exposed as `ctx.response` on transform/decorate hooks only (issue
+/// #357 Item 1). Absent (`None` on `ScriptCtxInput`) for every other hook point.
+#[derive(Debug, Clone)]
+pub struct ScriptResponseContext {
+    pub status: u16,
+    pub headers: HashMap<String, String>,
+    pub body: String,
+}
+
+/// Everything the shared `ctx` builder (issue #357 Item 1) needs, engine-agnostic. Each engine
+/// (`rhai_engine`, `js_engine`) turns this into its own native `ctx` value; the
+/// field names/semantics are identical across engines by contract — keep them that way.
+#[derive(Debug, Clone)]
+pub struct ScriptCtxInput<'a> {
+    pub request: &'a ScriptRequest,
+    pub response: Option<ScriptResponseContext>,
+    pub flow_id: String,
+    pub stub: ScriptStubContext,
+    /// Imposter port, used only to tag `ctx.logger` output; 0 when not running under an imposter
+    /// (e.g. the proxy path, or a bare `ScriptEngine::should_inject_fault` call in tests).
+    pub port: u16,
+}
+
+impl<'a> ScriptCtxInput<'a> {
+    pub fn new(request: &'a ScriptRequest, flow_id: impl Into<String>) -> Self {
+        Self {
+            request,
+            response: None,
+            flow_id: flow_id.into(),
+            stub: ScriptStubContext::default(),
+            port: 0,
+        }
+    }
+
+    #[must_use]
+    pub fn with_response(mut self, response: ScriptResponseContext) -> Self {
+        self.response = Some(response);
+        self
+    }
+
+    #[must_use]
+    pub fn with_stub(mut self, stub: ScriptStubContext) -> Self {
+        self.stub = stub;
+        self
+    }
+
+    #[must_use]
+    pub fn with_port(mut self, port: u16) -> Self {
+        self.port = port;
+        self
+    }
+}
+
+/// Extra, optional context a caller can thread into `ctx` beyond the bare `(request, flow_store)`
+/// pair (issue #357 Item 1). Callers with no imposter context (the proxy path, direct engine unit
+/// tests) use `Default`, which falls back to `request.headers["x-flow-id"]` (or `""`) for
+/// `ctx.flowId` and leaves `ctx.stub` fields `None` — the real HTTP path
+/// (`imposter::handler`) supplies the resolved flow id and stub metadata for full fidelity.
+#[derive(Debug, Clone, Default)]
+pub struct ScriptCtxExtras {
+    pub flow_id: Option<String>,
+    pub stub: ScriptStubContext,
+    pub port: u16,
+}
+
+impl ScriptCtxExtras {
+    pub fn build_ctx_input<'a>(&self, request: &'a ScriptRequest) -> ScriptCtxInput<'a> {
+        let flow_id = self.flow_id.clone().unwrap_or_else(|| {
+            request
+                .headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("x-flow-id"))
+                .map(|(_, v)| v.clone())
+                .unwrap_or_default()
+        });
+        ScriptCtxInput::new(request, flow_id)
+            .with_stub(self.stub.clone())
+            .with_port(self.port)
+    }
+}
+
+/// A `respond`/bare-expression return value that isn't a string or a JSON-shaped value (issue
+/// #357 Item 3 — body values). `http(status, body)` decides which of these to serialize based on
+/// the script value's own type: a string passes through verbatim; a map/array is JSON-serialized.
+#[derive(Debug, Clone)]
+pub enum ScriptResultBody {
+    Json(Value),
+    Str(String),
+}
+
+/// The v2 result constructors (issue #357 Item 3), engine-agnostic: `http()`/`delay()`/`reset()`/
+/// `pass()` all build one of these, which `into_fault_decision` then turns into the
+/// [`FaultDecision`] the caller applies. Each engine wraps this in its own native "builder" value
+/// so `.header(k, v)` can chain.
+#[derive(Debug, Clone)]
+pub enum ScriptResult {
+    /// `pass()` or a script returning nothing: respond normally, no injection.
+    Pass,
+    /// `delay(ms)`.
+    Delay(u64),
+    /// `reset()`: connection reset (the old `fault: "tcp"` shape).
+    Reset,
+    /// `http(status, body?)`, with zero or more `.header(k, v)` calls applied.
+    Http {
+        status: u16,
+        body: Option<ScriptResultBody>,
+        headers: Vec<(String, String)>,
+    },
+}
+
+impl ScriptResult {
+    pub fn http(status: u16, body: Option<ScriptResultBody>) -> Self {
+        ScriptResult::Http {
+            status,
+            body,
+            headers: Vec::new(),
+        }
+    }
+
+    /// Apply a `.header(k, v)` builder call. A no-op on `Delay`/`Reset`/`Pass` — only `http()`
+    /// results carry headers.
+    pub fn add_header(&mut self, key: String, value: String) {
+        if let ScriptResult::Http { headers, .. } = self {
+            headers.push((key, value));
+        }
+    }
+
+    /// Convert a result constructor (issue #357 Item 3) into the [`FaultDecision`] the caller
+    /// applies. A JSON `body` gets `Content-Type: application/json` UNLESS the script already set
+    /// a `content-type` header itself (case-insensitive match; an explicit header always wins).
+    pub fn into_fault_decision(self, rule_id: &str) -> FaultDecision {
+        match self {
+            ScriptResult::Pass => FaultDecision::None,
+            ScriptResult::Delay(duration_ms) => FaultDecision::Latency {
+                duration_ms,
+                rule_id: rule_id.to_string(),
+            },
+            ScriptResult::Reset => FaultDecision::Reset {
+                rule_id: rule_id.to_string(),
+            },
+            ScriptResult::Http {
+                status,
+                body,
+                headers,
+            } => {
+                let mut header_map: HashMap<String, String> = HashMap::new();
+                let mut has_content_type = false;
+                for (k, v) in headers {
+                    if k.eq_ignore_ascii_case("content-type") {
+                        has_content_type = true;
+                    }
+                    header_map.insert(k, v);
+                }
+                let body_str = match body {
+                    None => String::new(),
+                    Some(ScriptResultBody::Str(s)) => s,
+                    Some(ScriptResultBody::Json(v)) => {
+                        if !has_content_type {
+                            header_map
+                                .insert("Content-Type".to_string(), "application/json".to_string());
+                        }
+                        serde_json::to_string(&v).unwrap_or_default()
+                    }
+                };
+                FaultDecision::Error {
+                    status,
+                    body: body_str,
+                    rule_id: rule_id.to_string(),
+                    headers: header_map,
+                }
+            }
+        }
+    }
+}
+
+/// Names of the v2 named entrypoints (issue #357 Items 2/4). Placement determines which name a
+/// hook looks for (e.g. the `respond` hook calls a function named `respond`, if one is declared).
+pub mod entrypoints {
+    pub const RESPOND: &str = "respond";
+    pub const MATCHES: &str = "matches";
+    pub const TRANSFORM: &str = "transform";
+    pub const DELAY: &str = "delay";
+}
+
+/// Unified script engine that supports Rhai and JavaScript
 #[derive(Clone)]
 
 pub enum ScriptEngine {
     Rhai(RhaiEngine),
-    #[cfg(feature = "lua")]
-    Lua(LuaEngine),
     #[cfg(feature = "javascript")]
     JavaScript(JsEngine),
 }
@@ -102,11 +306,8 @@ impl ScriptEngine {
     pub fn new(engine_type: &str, script: &str, rule_id: &str) -> Result<Self> {
         match engine_type {
             "rhai" => Ok(ScriptEngine::Rhai(RhaiEngine::new(script, rule_id)?)),
-            #[cfg(feature = "lua")]
-            "lua" => Ok(ScriptEngine::Lua(LuaEngine::new(script, rule_id)?)),
-            #[cfg(not(feature = "lua"))]
             "lua" => Err(anyhow!(
-                "Lua engine is not enabled. Enable the 'lua' feature flag"
+                "the Lua scripting engine was removed (issue #450); use engine \"rhai\" or \"javascript\""
             )),
             #[cfg(feature = "javascript")]
             "javascript" | "js" => Ok(ScriptEngine::JavaScript(JsEngine::new(script, rule_id)?)),
@@ -118,18 +319,35 @@ impl ScriptEngine {
         }
     }
 
-    /// Execute the script and determine if a fault should be injected
+    /// Execute the `respond(ctx)` entrypoint (or bare-expression script) and determine if a fault
+    /// should be injected. `ctx` gets best-effort defaults ([`ScriptCtxExtras::default`]) —
+    /// callers with real flow-id/stub context should use [`Self::should_inject_fault_with_ctx`]
+    /// instead.
     pub fn should_inject_fault(
         &self,
         request: &ScriptRequest,
         flow_store: Arc<dyn FlowStore>,
     ) -> Result<FaultDecision> {
+        self.should_inject_fault_with_ctx(request, flow_store, &ScriptCtxExtras::default())
+    }
+
+    /// As [`Self::should_inject_fault`], but with real `ctx.flowId`/`ctx.stub` context (issue
+    /// #357 Item 1) — used by the imposter `_rift.script` hook, which knows the resolved flow id
+    /// and matched stub.
+    pub fn should_inject_fault_with_ctx(
+        &self,
+        request: &ScriptRequest,
+        flow_store: Arc<dyn FlowStore>,
+        extra: &ScriptCtxExtras,
+    ) -> Result<FaultDecision> {
         match self {
-            ScriptEngine::Rhai(engine) => engine.should_inject_fault(request, flow_store),
-            #[cfg(feature = "lua")]
-            ScriptEngine::Lua(engine) => engine.should_inject(request, flow_store),
+            ScriptEngine::Rhai(engine) => {
+                engine.should_inject_fault_with_ctx(request, flow_store, extra)
+            }
             #[cfg(feature = "javascript")]
-            ScriptEngine::JavaScript(engine) => engine.should_inject(request, flow_store),
+            ScriptEngine::JavaScript(engine) => {
+                engine.should_inject_with_ctx(request, flow_store, extra)
+            }
         }
     }
 }
@@ -146,23 +364,31 @@ pub struct ScriptRequest {
     pub query: HashMap<String, String>,
     /// Path parameters extracted from route patterns (e.g., /users/:id)
     pub path_params: HashMap<String, String>,
+    /// The raw request body text, exactly as received (issue #357 Item 1: `ctx.request.body` is
+    /// always the raw string, unifying the old split where the Mountebank path kept a raw string
+    /// and the `_rift.script` path kept parsed JSON). `None` when the caller only has/derives a
+    /// parsed `body`; ctx-building then falls back to re-serializing `body` (loses exact
+    /// whitespace but not shape) so callers migrated ad hoc from `body` alone still work.
+    pub raw_body: Option<String>,
 }
 
-/// Wrapper for FlowStore that can be used in scripts (both Rhai and Lua)
+/// Wrapper for FlowStore that can be used in scripts (Rhai and JavaScript)
 /// Uses direct synchronous calls since FlowStore is no longer async
+///
+/// Every op is unconditionally fail-loud (issues #322/#358): a backend failure always raises a
+/// script error, so a store outage is never conflated with "absent"/"false"/"0".
 #[derive(Clone)]
-
 pub struct ScriptFlowStore {
     store: Arc<dyn FlowStore>,
 }
 
 impl ScriptFlowStore {
+    /// The `ctx.state` handle.
     pub fn new(store: Arc<dyn FlowStore>) -> Self {
         Self { store }
     }
 
-    /// Get a value from flow state. In strict mode (issue #376) a backend failure raises; otherwise
-    /// it returns unit (the lenient #322 fallback) and records the error for `last_error()`.
+    /// Get a value from flow state. Raises on a backend failure.
     pub fn get(
         &mut self,
         flow_id: String,
@@ -171,12 +397,11 @@ impl ScriptFlowStore {
         match flow_result("get", self.store.get(&flow_id, &key)) {
             Ok(Some(val)) => Ok(rhai_engine::json_to_dynamic(val)),
             Ok(None) => Ok(Dynamic::UNIT),
-            Err(msg) if strict_flow_store() => Err(msg.into()),
-            Err(_) => Ok(Dynamic::UNIT),
+            Err(msg) => Err(msg.into()),
         }
     }
 
-    /// Set a value in flow state. Strict mode raises on failure; else returns false (lenient #322).
+    /// Set a value in flow state. Raises on a backend failure.
     pub fn set(
         &mut self,
         flow_id: String,
@@ -189,12 +414,11 @@ impl ScriptFlowStore {
             self.store.set(&flow_id, &key, json_val).map(|()| true),
         ) {
             Ok(v) => Ok(v),
-            Err(msg) if strict_flow_store() => Err(msg.into()),
-            Err(_) => Ok(false),
+            Err(msg) => Err(msg.into()),
         }
     }
 
-    /// Check if a key exists. Strict mode raises on failure; else returns false (lenient #322).
+    /// Check if a key exists. Raises on a backend failure.
     pub fn exists(
         &mut self,
         flow_id: String,
@@ -202,12 +426,11 @@ impl ScriptFlowStore {
     ) -> std::result::Result<bool, Box<rhai::EvalAltResult>> {
         match flow_result("exists", self.store.exists(&flow_id, &key)) {
             Ok(v) => Ok(v),
-            Err(msg) if strict_flow_store() => Err(msg.into()),
-            Err(_) => Ok(false),
+            Err(msg) => Err(msg.into()),
         }
     }
 
-    /// Delete a key. Strict mode raises on failure; else returns false (lenient #322).
+    /// Delete a key. Raises on a backend failure.
     pub fn delete(
         &mut self,
         flow_id: String,
@@ -215,12 +438,11 @@ impl ScriptFlowStore {
     ) -> std::result::Result<bool, Box<rhai::EvalAltResult>> {
         match flow_result("delete", self.store.delete(&flow_id, &key).map(|()| true)) {
             Ok(v) => Ok(v),
-            Err(msg) if strict_flow_store() => Err(msg.into()),
-            Err(_) => Ok(false),
+            Err(msg) => Err(msg.into()),
         }
     }
 
-    /// Increment a counter. Strict mode raises on failure; else returns 0 (lenient #322).
+    /// Increment a counter. Raises on a backend failure.
     pub fn increment(
         &mut self,
         flow_id: String,
@@ -228,12 +450,11 @@ impl ScriptFlowStore {
     ) -> std::result::Result<i64, Box<rhai::EvalAltResult>> {
         match flow_result("increment", self.store.increment(&flow_id, &key)) {
             Ok(v) => Ok(v),
-            Err(msg) if strict_flow_store() => Err(msg.into()),
-            Err(_) => Ok(0),
+            Err(msg) => Err(msg.into()),
         }
     }
 
-    /// Set TTL for a flow. Strict mode raises on failure; else returns false (lenient #322).
+    /// Set TTL for a flow. Raises on a backend failure.
     pub fn set_ttl(
         &mut self,
         flow_id: String,
@@ -244,8 +465,7 @@ impl ScriptFlowStore {
             self.store.set_ttl(&flow_id, ttl_seconds).map(|()| true),
         ) {
             Ok(v) => Ok(v),
-            Err(msg) if strict_flow_store() => Err(msg.into()),
-            Err(_) => Ok(false),
+            Err(msg) => Err(msg.into()),
         }
     }
 
@@ -257,12 +477,80 @@ impl ScriptFlowStore {
             None => Dynamic::UNIT,
         }
     }
+
+    // ============================================================
+    // Atomic ops + ergonomic getters. Like the ops above, these ALWAYS raise a script error on a
+    // backend failure — a store outage must never be conflated with "key absent"/"conflict".
+    // ============================================================
+
+    /// Get a value, or `default` if the key is absent. A store failure always raises.
+    pub fn get_or(
+        &mut self,
+        flow_id: String,
+        key: String,
+        default: Dynamic,
+    ) -> std::result::Result<Dynamic, Box<rhai::EvalAltResult>> {
+        match flow_result("getOr", self.store.get(&flow_id, &key)) {
+            Ok(Some(val)) => Ok(rhai_engine::json_to_dynamic(val)),
+            Ok(None) => Ok(default),
+            Err(msg) => Err(msg.into()),
+        }
+    }
+
+    /// Atomically increment by `by`, starting at 0 when absent. Always fail-loud.
+    pub fn increment_by(
+        &mut self,
+        flow_id: String,
+        key: String,
+        by: i64,
+    ) -> std::result::Result<i64, Box<rhai::EvalAltResult>> {
+        flow_result("incrementBy", self.store.increment_by(&flow_id, &key, by)).map_err(Into::into)
+    }
+
+    /// Atomic compare-and-set (issues #358, #311): `key` is set to `new` iff its current value
+    /// equals `expected` (unit means "not present"). Returns the raw [`CasOutcome`]; the caller
+    /// (the Rhai-specific `RhaiStateHandle`) converts it to the engine's object-map return shape.
+    /// Always fail-loud.
+    pub fn cas(
+        &mut self,
+        flow_id: String,
+        key: String,
+        expected: Dynamic,
+        new: Dynamic,
+    ) -> std::result::Result<CasOutcome, Box<rhai::EvalAltResult>> {
+        let expected_json = if expected.is_unit() {
+            None
+        } else {
+            Some(rhai_engine::dynamic_to_json(expected))
+        };
+        let new_json = rhai_engine::dynamic_to_json(new);
+        flow_result(
+            "cas",
+            self.store
+                .compare_and_set(&flow_id, &key, expected_json.as_ref(), new_json),
+        )
+        .map_err(Into::into)
+    }
+
+    /// Set a per-flow TTL override. Always fail-loud.
+    pub fn ttl(
+        &mut self,
+        flow_id: String,
+        ttl_seconds: i64,
+    ) -> std::result::Result<bool, Box<rhai::EvalAltResult>> {
+        flow_result(
+            "ttl",
+            self.store.set_ttl(&flow_id, ttl_seconds).map(|()| true),
+        )
+        .map_err(Into::into)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::extensions::flow_state::NoOpFlowStore;
+    use serde_json::json;
     use std::collections::HashMap;
 
     /// A flow store whose every op fails — for exercising the error branches of the wrappers.
@@ -288,23 +576,18 @@ mod tests {
         }
     }
 
-    // Issue #376 lenient contract (default, strict OFF): every Rhai ScriptFlowStore op, on a backend
-    // failure, returns its documented fallback (never raises) AND records the error for
-    // `last_error()` (issue #322). Covers all six ops — the strict/lenient branch is hand-written
-    // per op, so a wrong fallback in any one would be caught here. (The strict raise is covered
-    // end-to-end per engine in issue_376_strict_flow_store.rs; it can't be unit-tested reliably
-    // because `strict_flow_store()` caches the env read per process.)
+    // Every ScriptFlowStore op, on a backend failure, raises a script error AND records the
+    // error for `last_error()` (issue #322). Covers all six ops — a wrong result in any one
+    // would be caught here.
     #[test]
-    fn rhai_flow_store_lenient_ops_return_fallback_and_record_error() {
+    fn rhai_flow_store_ops_fail_loud_and_record_error() {
         use crate::extensions::flow_state::take_last_flow_error;
         let mut s = ScriptFlowStore::new(Arc::new(FailingStore));
 
         let _ = take_last_flow_error();
         assert!(
-            s.get("f".into(), "k".into())
-                .expect("lenient get must not raise")
-                .is_unit(),
-            "get falls back to unit"
+            s.get("f".into(), "k".into()).is_err(),
+            "get must raise on a backend failure"
         );
         assert!(
             take_last_flow_error().is_some_and(|e| e.contains("get")),
@@ -312,38 +595,32 @@ mod tests {
         );
 
         assert!(
-            !s.set("f".into(), "k".into(), Dynamic::from(1))
-                .expect("lenient set must not raise"),
-            "set falls back to false"
+            s.set("f".into(), "k".into(), Dynamic::from(1)).is_err(),
+            "set must raise on a backend failure"
         );
         assert!(take_last_flow_error().is_some_and(|e| e.contains("set")));
 
         assert!(
-            !s.exists("f".into(), "k".into())
-                .expect("lenient exists must not raise"),
-            "exists falls back to false"
+            s.exists("f".into(), "k".into()).is_err(),
+            "exists must raise on a backend failure"
         );
         assert!(take_last_flow_error().is_some_and(|e| e.contains("exists")));
 
         assert!(
-            !s.delete("f".into(), "k".into())
-                .expect("lenient delete must not raise"),
-            "delete falls back to false"
+            s.delete("f".into(), "k".into()).is_err(),
+            "delete must raise on a backend failure"
         );
         assert!(take_last_flow_error().is_some_and(|e| e.contains("delete")));
 
-        assert_eq!(
-            s.increment("f".into(), "k".into())
-                .expect("lenient increment must not raise"),
-            0,
-            "increment falls back to 0"
+        assert!(
+            s.increment("f".into(), "k".into()).is_err(),
+            "increment must raise on a backend failure"
         );
         assert!(take_last_flow_error().is_some_and(|e| e.contains("increment")));
 
         assert!(
-            !s.set_ttl("f".into(), 60)
-                .expect("lenient set_ttl must not raise"),
-            "set_ttl falls back to false"
+            s.set_ttl("f".into(), 60).is_err(),
+            "set_ttl must raise on a backend failure"
         );
         assert!(take_last_flow_error().is_some_and(|e| e.contains("setTtl")));
     }
@@ -456,6 +733,84 @@ mod tests {
         assert!(debug_str.contains("None"));
     }
 
+    // Issue #357 Item 3: `reset()` maps to FaultDecision::Reset.
+    #[test]
+    fn test_fault_decision_reset() {
+        let decision = FaultDecision::Reset {
+            rule_id: "reset-rule".to_string(),
+        };
+        match decision {
+            FaultDecision::Reset { rule_id } => assert_eq!(rule_id, "reset-rule"),
+            _ => panic!("Expected FaultDecision::Reset"),
+        }
+    }
+
+    // Issue #357 Item 3: the ScriptResult -> FaultDecision conversions used by every engine.
+    #[test]
+    fn test_script_result_into_fault_decision() {
+        assert!(matches!(
+            ScriptResult::Pass.into_fault_decision("r"),
+            FaultDecision::None
+        ));
+        assert!(matches!(
+            ScriptResult::Delay(42).into_fault_decision("r"),
+            FaultDecision::Latency {
+                duration_ms: 42,
+                ..
+            }
+        ));
+        assert!(matches!(
+            ScriptResult::Reset.into_fault_decision("r"),
+            FaultDecision::Reset { .. }
+        ));
+
+        let mut json_result =
+            ScriptResult::http(503, Some(ScriptResultBody::Json(json!({"e": 1}))));
+        json_result.add_header("Retry-After".to_string(), "1".to_string());
+        match json_result.into_fault_decision("r") {
+            FaultDecision::Error {
+                status,
+                body,
+                headers,
+                ..
+            } => {
+                assert_eq!(status, 503);
+                assert_eq!(body, r#"{"e":1}"#);
+                assert_eq!(headers.get("Retry-After").map(String::as_str), Some("1"));
+                assert_eq!(
+                    headers.get("Content-Type").map(String::as_str),
+                    Some("application/json")
+                );
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+
+        // An explicit content-type header always wins over the JSON-body default.
+        let mut custom_ct = ScriptResult::http(200, Some(ScriptResultBody::Json(json!({}))));
+        custom_ct.add_header("content-type".to_string(), "application/custom".to_string());
+        match custom_ct.into_fault_decision("r") {
+            FaultDecision::Error { headers, .. } => {
+                assert_eq!(
+                    headers.get("content-type").map(String::as_str),
+                    Some("application/custom")
+                );
+                assert!(!headers.contains_key("Content-Type"));
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+
+        // A string body passes through verbatim with no Content-Type added.
+        match ScriptResult::http(200, Some(ScriptResultBody::Str("hi".to_string())))
+            .into_fault_decision("r")
+        {
+            FaultDecision::Error { body, headers, .. } => {
+                assert_eq!(body, "hi");
+                assert!(!headers.contains_key("Content-Type"));
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
     // ============================================
     // Tests for ScriptRequest
     // ============================================
@@ -463,6 +818,7 @@ mod tests {
     #[test]
     fn test_script_request_creation() {
         let request = ScriptRequest {
+            raw_body: None,
             method: "POST".to_string(),
             path: "/api/users".to_string(),
             headers: HashMap::new(),
@@ -481,6 +837,7 @@ mod tests {
         headers.insert("Authorization".to_string(), "Bearer token".to_string());
 
         let request = ScriptRequest {
+            raw_body: None,
             method: "GET".to_string(),
             path: "/api/data".to_string(),
             headers,
@@ -502,6 +859,7 @@ mod tests {
         query.insert("limit".to_string(), "10".to_string());
 
         let request = ScriptRequest {
+            raw_body: None,
             method: "GET".to_string(),
             path: "/api/items".to_string(),
             headers: HashMap::new(),
@@ -520,6 +878,7 @@ mod tests {
         path_params.insert("action".to_string(), "edit".to_string());
 
         let request = ScriptRequest {
+            raw_body: None,
             method: "PUT".to_string(),
             path: "/api/users/123/edit".to_string(),
             headers: HashMap::new(),
@@ -533,6 +892,7 @@ mod tests {
     #[test]
     fn test_script_request_clone() {
         let request = ScriptRequest {
+            raw_body: None,
             method: "DELETE".to_string(),
             path: "/api/items/456".to_string(),
             headers: HashMap::new(),
@@ -548,6 +908,7 @@ mod tests {
     #[test]
     fn test_script_request_debug() {
         let request = ScriptRequest {
+            raw_body: None,
             method: "GET".to_string(),
             path: "/test".to_string(),
             headers: HashMap::new(),
@@ -653,8 +1014,8 @@ mod tests {
     #[test]
     fn test_script_engine_new_rhai() {
         let script = r#"
-            fn should_inject(request, flow_store) {
-                #{ inject: false }
+            fn respond(ctx) {
+                pass()
             }
         "#;
         let engine = ScriptEngine::new("rhai", script, "test-rule");
@@ -673,13 +1034,14 @@ mod tests {
     #[test]
     fn test_script_engine_rhai_execution() {
         let script = r#"
-            fn should_inject(request, flow_store) {
-                #{ inject: false }
+            fn respond(ctx) {
+                pass()
             }
         "#;
         let engine = ScriptEngine::new("rhai", script, "test-rule").unwrap();
 
         let request = ScriptRequest {
+            raw_body: None,
             method: "GET".to_string(),
             path: "/test".to_string(),
             headers: HashMap::new(),
@@ -700,8 +1062,8 @@ mod tests {
     #[test]
     fn test_rhai_engine_creation_valid_script() {
         let script = r#"
-            fn should_inject(request, flow_store) {
-                #{ inject: false }
+            fn respond(ctx) {
+                pass()
             }
         "#;
         let engine = RhaiEngine::new(script, "valid-rule");
@@ -711,7 +1073,7 @@ mod tests {
     #[test]
     fn test_rhai_engine_creation_syntax_error() {
         let script = r#"
-            fn should_inject(request {  // Missing closing paren
+            fn respond(ctx {  // Missing closing paren
                 return false;
             }
         "#;
@@ -722,8 +1084,8 @@ mod tests {
     #[test]
     fn test_rhai_engine_ast_access() {
         let script = r#"
-            fn should_inject(request, flow_store) {
-                #{ inject: false }
+            fn respond(ctx) {
+                pass()
             }
         "#;
         let engine = RhaiEngine::new(script, "test-rule").unwrap();
@@ -735,35 +1097,16 @@ mod tests {
     // Feature-gated tests
     // ============================================
 
-    #[cfg(feature = "lua")]
-    mod lua_tests {
-        use super::*;
-
-        #[test]
-        fn test_script_engine_new_lua() {
-            let script = r#"
-                function should_inject(request, flow_store)
-                    return { inject = false }
-                end
-            "#;
-            let engine = ScriptEngine::new("lua", script, "lua-rule");
-            assert!(
-                engine.is_ok(),
-                "Lua engine creation failed: {:?}",
-                engine.err()
-            );
-        }
-
-        #[test]
-        fn test_compile_to_bytecode() {
-            let script = r#"
-                function should_inject(request, flow_store)
-                    return { inject = false }
-                end
-            "#;
-            let bytecode = super::super::compile_to_bytecode(script);
-            assert!(bytecode.is_ok());
-        }
+    // Issue #450: Lua was removed; "lua" now always fails with an actionable error pointing at
+    // the two remaining engines, rather than a feature-flag message.
+    #[test]
+    fn test_script_engine_new_lua_removed() {
+        let engine = ScriptEngine::new("lua", "return false", "test-rule");
+        assert!(engine.is_err());
+        let err_msg = engine.err().unwrap().to_string();
+        assert!(err_msg.contains("removed"), "unexpected message: {err_msg}");
+        assert!(err_msg.contains("rhai"));
+        assert!(err_msg.contains("javascript"));
     }
 
     #[cfg(feature = "javascript")]
@@ -773,8 +1116,8 @@ mod tests {
         #[test]
         fn test_script_engine_new_javascript() {
             let script = r#"
-                function should_inject(request, flow_store) {
-                    return { inject: false };
+                function respond(ctx) {
+                    return pass();
                 }
             "#;
             let engine = ScriptEngine::new("javascript", script, "js-rule");
@@ -788,8 +1131,8 @@ mod tests {
         #[test]
         fn test_script_engine_new_js_alias() {
             let script = r#"
-                function should_inject(request, flow_store) {
-                    return { inject: false };
+                function respond(ctx) {
+                    return pass();
                 }
             "#;
             let engine = ScriptEngine::new("js", script, "js-rule");
@@ -803,8 +1146,8 @@ mod tests {
         #[test]
         fn test_compile_js_to_bytecode() {
             let script = r#"
-                function should_inject(request, flow_store) {
-                    return { inject: false };
+                function respond(ctx) {
+                    return pass();
                 }
             "#;
             let bytecode = super::super::compile_js_to_bytecode(script);
@@ -815,15 +1158,6 @@ mod tests {
     // ============================================
     // Tests for disabled features
     // ============================================
-
-    #[cfg(not(feature = "lua"))]
-    #[test]
-    fn test_lua_engine_disabled() {
-        let engine = ScriptEngine::new("lua", "return false", "test");
-        assert!(engine.is_err());
-        let err_msg = engine.err().unwrap().to_string();
-        assert!(err_msg.contains("not enabled") || err_msg.contains("feature"));
-    }
 
     #[cfg(not(feature = "javascript"))]
     #[test]

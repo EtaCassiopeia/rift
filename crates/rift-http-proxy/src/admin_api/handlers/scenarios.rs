@@ -4,14 +4,18 @@
 //! partitioned by `flow_id`. When a `flowId` is not supplied, the imposter's default
 //! flow (`resolve_flow_id` with no headers ⇒ the `imposter_port` flow) is used.
 
+use crate::admin_api::handlers::imposters::{
+    admin_script_base, imposter_script_registry, reject_stubs_if_injection_disallowed,
+};
 use crate::admin_api::types::{collect_body, error_response, json_response};
 use crate::extensions::decorate::backend_error_response;
-use crate::imposter::{Imposter, ImposterManager, Stub};
+use crate::imposter::{Imposter, ImposterManager, Stub, resolve_stub_scripts};
 use bytes::Bytes;
 use http_body_util::Full;
 use hyper::body::Incoming;
 use hyper::{Request, Response, StatusCode};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 fn default_flow_id(imposter: &Imposter) -> String {
@@ -212,6 +216,8 @@ pub async fn handle_add_space_stub(
     flow_id: &str,
     req: Request<Incoming>,
     manager: Arc<ImposterManager>,
+    allow_injection: bool,
+    scripts_dir: Option<Arc<PathBuf>>,
 ) -> Response<Full<Bytes>> {
     let payload = match parse_json_body(req).await {
         Ok(v) => v,
@@ -221,6 +227,24 @@ pub async fn handle_add_space_stub(
         Ok(s) => s,
         Err(e) => return error_response(StatusCode::BAD_REQUEST, &format!("Invalid stub: {e}")),
     };
+    // Gate any scripting surface behind --allowInjection before mutating state (B3, issue #355).
+    if let Some(rejection) =
+        reject_stubs_if_injection_disallowed(std::slice::from_ref(&stub), allow_injection)
+    {
+        return rejection;
+    }
+    // Resolve `_rift.script` `file:`/`ref:` sources before persisting (issue #356 B1): escape /
+    // unknown-ref / unconfigured `file:` → 400, nothing unresolved is ever stored.
+    {
+        let registry = imposter_script_registry(&manager, port);
+        let base = admin_script_base(&scripts_dir);
+        if let Err(e) = resolve_stub_scripts(std::slice::from_mut(&mut stub), &registry, &base) {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("Script resolution failed: {e}"),
+            );
+        }
+    }
     // The path `:flowId` is the source of truth for the scope; ignore any `space` in the body.
     stub.space = Some(flow_id.to_string());
     match manager.add_stub(port, stub, None).await {

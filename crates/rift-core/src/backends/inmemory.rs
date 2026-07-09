@@ -28,6 +28,19 @@ impl InMemoryFlowStore {
         format!("flow:{flow_id}:{key}")
     }
 
+    /// List every non-expired key currently stored under `flow_id`, for `rift script run`'s
+    /// post-execution state dump (issue #360 Item 2) — the [`FlowStore`] trait itself has no
+    /// enumeration method (a real backend like Redis may not make that cheap), but the CLI works
+    /// with a concrete `InMemoryFlowStore` fixture, so an inherent method here is enough.
+    pub fn keys_for_flow(&self, flow_id: &str) -> Vec<String> {
+        let prefix = format!("flow:{flow_id}:");
+        let data = self.data.read();
+        data.iter()
+            .filter(|(_, (_, expiry))| !self.is_expired(expiry))
+            .filter_map(|(key, _)| key.strip_prefix(&prefix).map(str::to_string))
+            .collect()
+    }
+
     fn is_expired(&self, expiry: &Option<SystemTime>) -> bool {
         if let Some(exp) = expiry {
             SystemTime::now() > *exp
@@ -96,6 +109,12 @@ impl FlowStore for InMemoryFlowStore {
     }
 
     fn increment(&self, flow_id: &str, key: &str) -> Result<i64> {
+        self.increment_by(flow_id, key, 1)
+    }
+
+    /// Atomic under the single write lock (issue #358), like `increment`: the read-modify-write
+    /// happens with the lock held, so no interleaving window with a concurrent increment/set.
+    fn increment_by(&self, flow_id: &str, key: &str, by: i64) -> Result<i64> {
         let key_str = self.make_key(flow_id, key);
         let expiry = SystemTime::now() + self.default_ttl;
         let mut data = self.data.write();
@@ -103,10 +122,15 @@ impl FlowStore for InMemoryFlowStore {
         // Opportunistically clean up this specific key if expired
         Self::cleanup_on_write(&mut data, &key_str, |exp| self.is_expired(exp));
 
-        let new_value = match data.get(&key_str) {
-            Some((Value::Number(n), _)) if n.is_i64() => n.as_i64().unwrap_or(0) + 1,
-            _ => 1,
+        let current = match data.get(&key_str) {
+            Some((Value::Number(n), _)) if n.is_i64() => n.as_i64().unwrap_or(0),
+            _ => 0,
         };
+        // `checked_add` so an overflow near i64::MAX errors (fail-loud) instead of panicking in
+        // debug / wrapping in release — matching Redis's INCRBY, which also errors on overflow.
+        let new_value = current.checked_add(by).ok_or_else(|| {
+            anyhow::anyhow!("increment_by overflow: {current} + {by} exceeds i64 range")
+        })?;
 
         data.insert(key_str, (Value::Number(new_value.into()), Some(expiry)));
         Ok(new_value)
@@ -155,6 +179,33 @@ impl FlowStore for InMemoryFlowStore {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    // Issue #360 Item 2: `rift script run` dumps the flow's keys after execution.
+    #[test]
+    fn keys_for_flow_lists_only_that_flows_non_expired_keys() {
+        let store = InMemoryFlowStore::new(300);
+        store.set("flow1", "attempts", json!(2)).unwrap();
+        store.set("flow1", "last_status", json!("ok")).unwrap();
+        store.set("other-flow", "unrelated", json!(true)).unwrap();
+
+        let mut keys = store.keys_for_flow("flow1");
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec!["attempts".to_string(), "last_status".to_string()]
+        );
+
+        assert!(store.keys_for_flow("no-such-flow").is_empty());
+    }
+
+    #[test]
+    fn keys_for_flow_excludes_expired_keys() {
+        let store = InMemoryFlowStore::new(1);
+        store.set("flow1", "key1", json!("value1")).unwrap();
+        assert_eq!(store.keys_for_flow("flow1"), vec!["key1".to_string()]);
+        std::thread::sleep(Duration::from_secs(2));
+        assert!(store.keys_for_flow("flow1").is_empty());
+    }
 
     #[test]
     fn test_inmemory_get_set() {
@@ -312,6 +363,42 @@ mod tests {
             Some(json!(expected)),
             "Concurrent increments lost updates: expected {expected}, got {final_value:?}"
         );
+    }
+
+    // ===== increment_by (issue #358) =====
+
+    #[test]
+    fn increment_by_starts_at_zero_and_accumulates() {
+        let store = InMemoryFlowStore::new(300);
+        assert_eq!(store.increment_by("f", "k", 5).unwrap(), 5);
+        assert_eq!(store.increment_by("f", "k", 5).unwrap(), 10);
+    }
+
+    #[test]
+    fn increment_by_negative_decrements() {
+        let store = InMemoryFlowStore::new(300);
+        store.increment_by("f", "k", 10).unwrap();
+        assert_eq!(store.increment_by("f", "k", -3).unwrap(), 7);
+    }
+
+    #[test]
+    fn increment_delegates_to_increment_by_one() {
+        let store = InMemoryFlowStore::new(300);
+        assert_eq!(store.increment("f", "k").unwrap(), 1);
+        assert_eq!(store.increment_by("f", "k", 1).unwrap(), 2);
+    }
+
+    #[test]
+    fn increment_by_overflow_errors_not_panics() {
+        let store = InMemoryFlowStore::new(300);
+        store.set("f", "k", json!(i64::MAX)).unwrap();
+        let result = store.increment_by("f", "k", 1);
+        assert!(
+            result.is_err(),
+            "increment_by past i64::MAX must error, not panic/wrap"
+        );
+        // The stored value must be untouched by the failed op.
+        assert_eq!(store.get("f", "k").unwrap(), Some(json!(i64::MAX)));
     }
 
     // ===== compare_and_set (issue #311) =====

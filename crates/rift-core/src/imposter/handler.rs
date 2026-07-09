@@ -18,7 +18,8 @@ use crate::extensions::decorate::{
 };
 use crate::extensions::template::{RequestData, has_template_variables, process_template};
 use crate::scripting::{
-    FaultDecision, ScriptRequest, resolve_script_timeout_ms, should_inject_bounded,
+    FaultDecision, ScriptCtxExtras, ScriptRequest, ScriptStubContext, resolve_script_timeout_ms,
+    should_inject_bounded_with_ctx, should_inject_bounded_with_ctx_traced,
 };
 #[cfg(feature = "javascript")]
 use crate::scripting::{MountebankRequest, execute_mountebank_inject};
@@ -45,6 +46,35 @@ const MAX_REQUEST_BODY_SIZE: usize = 10 * 1024 * 1024;
 fn csv_cache() -> &'static CsvCache {
     static CSV_CACHE: std::sync::OnceLock<CsvCache> = std::sync::OnceLock::new();
     CSV_CACHE.get_or_init(CsvCache::new)
+}
+
+/// Map a matcher error (`find_matching_stub_with_client`) to its response.
+///
+/// A predicate-`inject` failure (issue #440 — an object-build failure or the script itself
+/// throwing) is Mountebank-shaped error parity with the response-inject case just below: a 400
+/// with `{"errors":[{"code":"invalid predicate injection","message":"..."}]}`, not a bare 500 —
+/// the script failed to produce a valid match decision, a client (config) problem, not a server
+/// fault. Every other matcher error (e.g. a scenario-state backend failure, issue #318) keeps
+/// the existing [`backend_error_response`] 5xx mapping.
+fn matcher_error_response(e: &anyhow::Error) -> Response<Full<Bytes>> {
+    #[cfg(feature = "javascript")]
+    {
+        if let Some(pred_err) = e.downcast_ref::<crate::scripting::PredicateInjectionError>() {
+            let body = serde_json::json!({
+                "errors": [{
+                    "code": "invalid predicate injection",
+                    "message": pred_err.to_string(),
+                }]
+            })
+            .to_string();
+            return build_response_with_headers(
+                StatusCode::BAD_REQUEST,
+                [("x-rift-imposter", "true"), ("x-rift-inject-error", "true")],
+                body,
+            );
+        }
+    }
+    backend_error_response(e)
 }
 
 /// [`handle_imposter_request`] inside a per-request annotation scope, with the configured
@@ -105,6 +135,31 @@ fn inject_cors_headers(headers: &mut hyper::HeaderMap) {
             headers.insert(header_name, HeaderValue::from_static(value));
         }
     }
+}
+
+/// Make a `{{ }}`-templated header value safe to emit (issue #359 B3, header injection).
+///
+/// A templated header value can resolve to attacker-controlled request data (a header/query/json
+/// value) containing CR, LF, or other control characters — a classic HTTP header-injection vector.
+/// Strip every control character so the value can never terminate the header line early or smuggle
+/// a second header. If anything was removed (or the sanitized value still isn't a valid header
+/// value), emit a `tracing::warn!` so the rejection is visible rather than silent.
+fn sanitize_header_value(value: &str) -> String {
+    let sanitized: String = value.chars().filter(|c| !c.is_control()).collect();
+    if sanitized.len() != value.len() {
+        tracing::warn!(
+            target: "rift::template",
+            original = %value,
+            "stripped control characters from a templated header value (possible header-injection attempt)"
+        );
+    } else if hyper::header::HeaderValue::from_str(&sanitized).is_err() {
+        tracing::warn!(
+            target: "rift::template",
+            value = %value,
+            "templated header value is not a representable header value"
+        );
+    }
+    sanitized
 }
 
 async fn handle_request_inner(
@@ -255,9 +310,10 @@ async fn handle_request_inner(
         Some(&client_ip),
     ) {
         Ok(matched) => matched,
-        // A backend consulted during matching failed (issue #318): surface it, never
-        // fall through to "no match" (which would serve the wrong response).
-        Err(e) => return Ok(backend_error_response(&e)),
+        // A backend consulted during matching failed (issue #318), or a predicate-`inject`
+        // errored (issue #440): surface it, never fall through to "no match" (which would
+        // serve the wrong response).
+        Err(e) => return Ok(matcher_error_response(&e)),
     };
     if let Some((stub_state, stub_index)) = matched {
         // Scenario FSM: apply the matched stub's newScenarioState transition (no-op unless set).
@@ -349,6 +405,7 @@ async fn handle_request_inner(
                 &inject_fn,
                 &mb_request,
                 imposter.config.port.unwrap_or(0),
+                stub_state.stub.id.as_deref(),
             ) {
                 Ok(inject_response) => {
                     // Advance the cycler for this inject response
@@ -376,10 +433,21 @@ async fn handle_request_inner(
                 }
                 Err(e) => {
                     warn!("Inject function failed: {}", e);
+                    // Mountebank-shaped error parity (issue #355 Item 5): a failing inject is a
+                    // 400 with `{"errors":[{"code":"invalid injection","message":"..."}]}`, not a
+                    // bare 500 — the script failed to produce a valid response, which is a client
+                    // (config) problem, not a server fault.
+                    let body = serde_json::json!({
+                        "errors": [{
+                            "code": "invalid injection",
+                            "message": format!("{e}"),
+                        }]
+                    })
+                    .to_string();
                     return Ok(build_response_with_headers(
-                        StatusCode::INTERNAL_SERVER_ERROR,
+                        StatusCode::BAD_REQUEST,
                         [("x-rift-imposter", "true"), ("x-rift-inject-error", "true")],
-                        format!(r#"{{"error": "Inject error: {e}"}}"#),
+                        body,
                     ));
                 }
             }
@@ -391,15 +459,29 @@ async fn handle_request_inner(
             Err(e) => return Ok(backend_error_response(&e)),
         };
         if let Some(script_config) = script_config {
-            debug!(
-                "Handling Rift script response (engine: {})",
-                script_config.engine
-            );
+            // `code` is populated by the config-time resolve-scripts pass (issue #356), which
+            // runs before an imposter carrying `file:`/`ref:` scripts is ever created. A `None`
+            // here means that pass was skipped (e.g. a stub added through a sub-resource
+            // endpoint that doesn't resolve scripts) — surface it as a clear error instead of
+            // silently running an empty script.
+            let Some(code) = script_config.code.clone() else {
+                return Ok(build_response_with_headers(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    [("x-rift-imposter", "true"), ("x-rift-script-error", "true")],
+                    r#"{"error": "script not resolved: `file:`/`ref:` sources must be resolved before serving"}"#,
+                ));
+            };
+            let engine = script_config
+                .engine
+                .clone()
+                .unwrap_or_else(|| "rhai".to_string());
+            debug!("Handling Rift script response (engine: {})", engine);
 
             // Build script request. Expose headers with lowercase keys so scripts can read
             // them case-insensitively (e.g. `request.headers["x-flow-id"]`) regardless of the
             // wire casing; this matches the engine docs and HTTP header semantics.
             let script_request = ScriptRequest {
+                raw_body: Some(body_string.clone().unwrap_or_default()),
                 method: method.clone(),
                 path: path.clone(),
                 headers: headers_clone
@@ -425,16 +507,71 @@ async fn handle_request_inner(
             // (default 5s) instead of wedging the whole engine.
             let timeout_ms = resolve_script_timeout_ms(&imposter.config);
             let flow_store = imposter.flow_store.clone();
-            match should_inject_bounded(
-                script_config.engine.clone(),
-                script_config.code.clone(),
-                format!("rift_script_{stub_index}"),
-                script_request,
-                flow_store,
-                Duration::from_millis(timeout_ms),
-            )
-            .await
-            {
+
+            // ctx.stub (issue #357 Item 1): thread the matched stub's identity through, resolving
+            // its current scenario state (if it belongs to a scenario) the same way the FSM gate
+            // already does. A backend failure here must surface, not silently drop to `None`
+            // (this epic's "nothing fails silently" principle).
+            let scenario_state = match &stub_state.stub.scenario_name {
+                Some(name) => match imposter.scenario_state(&scenario_flow_id, name) {
+                    Ok(s) => Some(s),
+                    Err(e) => return Ok(backend_error_response(&e)),
+                },
+                None => None,
+            };
+            let ctx_extra = ScriptCtxExtras {
+                flow_id: Some(scenario_flow_id.clone()),
+                stub: ScriptStubContext {
+                    scenario_name: stub_state.stub.scenario_name.clone(),
+                    scenario_state,
+                    stub_id: stub_state.stub.id.clone(),
+                },
+                port: imposter.config.port.unwrap_or(0),
+            };
+
+            // Debug-mode script trace (issue #360 Item 3): which hook ran, its decision,
+            // duration, and ctx.logger lines, so "why didn't my script run the way I expected"
+            // is answerable from the response alone. Zero-cost when debug mode is off — the
+            // capturing-subscriber/Instant path in the `_traced` variant is only ever built when
+            // this flag is set, so the hot (non-debug) path calls the original, unchanged
+            // `should_inject_bounded_with_ctx`.
+            let (script_result, trace_header): (Result<FaultDecision, anyhow::Error>, _) =
+                if crate::util::rift_debug_env() {
+                    let (result, mut entry) = should_inject_bounded_with_ctx_traced(
+                        engine.clone(),
+                        code,
+                        format!("rift_script_{stub_index}"),
+                        script_request,
+                        flow_store,
+                        Duration::from_millis(timeout_ms),
+                        ctx_extra,
+                    )
+                    .await;
+                    // Cap a chatty script's logger output: the trace ships on a response header,
+                    // which must stay bounded (issue #360).
+                    entry.logs = crate::scripting::cap_trace_logs(entry.logs);
+                    // `ScriptTraceEntry` is plain strings/numbers, so this can't realistically
+                    // fail — but on the off chance it does, trace the failure instead of
+                    // silently dropping the header.
+                    let header = serde_json::to_string(&[entry])
+                        .inspect_err(|e| warn!("failed to serialize x-rift-script-trace: {}", e))
+                        .ok();
+                    (result, header)
+                } else {
+                    let result = should_inject_bounded_with_ctx(
+                        engine.clone(),
+                        code,
+                        format!("rift_script_{stub_index}"),
+                        script_request,
+                        flow_store,
+                        Duration::from_millis(timeout_ms),
+                        ctx_extra,
+                    )
+                    .await;
+                    (result, None)
+                };
+
+            match script_result {
                 Ok(FaultDecision::Error {
                     status,
                     body,
@@ -450,7 +587,10 @@ async fn handle_request_inner(
                         response = response.header(k, v);
                     }
                     response = response.header("x-rift-imposter", "true");
-                    response = response.header("x-rift-script", &script_config.engine);
+                    response = response.header("x-rift-script", &engine);
+                    if let Some(trace) = &trace_header {
+                        response = response.header("x-rift-script-trace", trace.as_str());
+                    }
 
                     return Ok(response
                         .body(Full::new(Bytes::from(body)))
@@ -468,13 +608,17 @@ async fn handle_request_inner(
                         return Ok(backend_error_response(&e));
                     }
 
+                    let mut headers = vec![
+                        ("x-rift-imposter".to_string(), "true".to_string()),
+                        ("x-rift-script".to_string(), engine.clone()),
+                        ("x-rift-latency-ms".to_string(), duration_ms.to_string()),
+                    ];
+                    if let Some(trace) = trace_header {
+                        headers.push(("x-rift-script-trace".to_string(), trace));
+                    }
                     return Ok(build_response_with_headers(
                         StatusCode::OK,
-                        [
-                            ("x-rift-imposter", "true"),
-                            ("x-rift-script", &script_config.engine),
-                            ("x-rift-latency-ms", &duration_ms.to_string()),
-                        ],
+                        headers,
                         Bytes::new(),
                     ));
                 }
@@ -484,20 +628,55 @@ async fn handle_request_inner(
                         return Ok(backend_error_response(&e));
                     }
 
+                    let mut headers = vec![
+                        ("x-rift-imposter".to_string(), "true".to_string()),
+                        ("x-rift-script".to_string(), engine.clone()),
+                    ];
+                    if let Some(trace) = trace_header {
+                        headers.push(("x-rift-script-trace".to_string(), trace));
+                    }
                     return Ok(build_response_with_headers(
                         StatusCode::OK,
-                        [
-                            ("x-rift-imposter", "true"),
-                            ("x-rift-script", script_config.engine.as_str()),
-                        ],
+                        headers,
                         Bytes::new(),
                     ));
                 }
+                Ok(FaultDecision::Reset { .. }) => {
+                    // v2 `reset()` result constructor (issue #357 Item 3): a connection reset,
+                    // applied the same real way as `_rift.fault.tcp` / a top-level `fault` (see
+                    // `handle_fault_response`) — attach the parsed TcpFaultKind as a response
+                    // extension; the serve loop's FaultIo aborts the connection before this
+                    // carrier response is ever sent, so its status/body are never observed.
+                    if let Err(e) = imposter.advance_cycler_for_rift_script(&stub_state) {
+                        return Ok(backend_error_response(&e));
+                    }
+
+                    let mut headers = vec![
+                        ("x-rift-imposter".to_string(), "true".to_string()),
+                        ("x-rift-script".to_string(), engine.clone()),
+                    ];
+                    if let Some(trace) = trace_header {
+                        headers.push(("x-rift-script-trace".to_string(), trace));
+                    }
+                    let mut response =
+                        build_response_with_headers(StatusCode::BAD_GATEWAY, headers, Bytes::new());
+                    response
+                        .extensions_mut()
+                        .insert(super::fault_io::TcpFaultKind::Reset);
+                    return Ok(response);
+                }
                 Err(e) => {
                     warn!("Rift script execution failed: {}", e);
+                    let mut headers = vec![
+                        ("x-rift-imposter".to_string(), "true".to_string()),
+                        ("x-rift-script-error".to_string(), "true".to_string()),
+                    ];
+                    if let Some(trace) = trace_header {
+                        headers.push(("x-rift-script-trace".to_string(), trace));
+                    }
                     return Ok(build_response_with_headers(
                         StatusCode::INTERNAL_SERVER_ERROR,
-                        [("x-rift-imposter", "true"), ("x-rift-script-error", "true")],
+                        headers,
                         format!(r#"{{"error": "Script error: {e}"}}"#),
                     ));
                 }
@@ -536,11 +715,84 @@ async fn handle_request_inner(
             let strict_behaviors =
                 imposter.config.strict_behaviors || crate::util::strict_behaviors_env();
 
+            // Declarative response templating (issue #359): opt-in via `_rift.templated`. This
+            // `{{ }}` render runs FIRST — on the *config-authored* body/headers — and BEFORE the
+            // `${request.*}` reflection substitution below (issue #359 B1, security). Ordering is
+            // load-bearing: because `${request.*}` injects reflected request data only *after* this
+            // pass, any `{{ }}` that arrives inside reflected request data is never scanned or
+            // evaluated here — it is served verbatim. Evaluating reflected `{{ }}` would be a
+            // template-injection hole (an unauthenticated caller could reach `state.*`/force errors)
+            // and would also break the module's "a literal `{{` is served verbatim" promise for
+            // reflected text. Off by default so recorded fixtures with a literal `{{` are untouched.
+            if rift_ext.as_ref().is_some_and(|r| r.templated) {
+                let request_data = RequestData::new(
+                    method_str,
+                    path_str,
+                    query_opt,
+                    &headers_for_context,
+                    body_string.as_deref(),
+                )
+                .with_route_pattern(stub_state.stub.route_pattern.as_deref());
+                // In debug mode (`RIFT_DEBUG`), a malformed/unknown/failed `{{ }}` token fails the
+                // request loudly instead of silently degrading to an empty string (issue #359 AC3).
+                let template_debug = crate::util::rift_debug_env();
+                let template_ctx = crate::extensions::template_fn::TemplateContext {
+                    request: &request_data,
+                    flow_id: &scenario_flow_id,
+                    flow_store: imposter.flow_store.as_ref(),
+                };
+
+                let template_error = match crate::extensions::template_fn::render_templated(
+                    &body,
+                    &template_ctx,
+                    template_debug,
+                ) {
+                    Ok(rendered) => {
+                        body = rendered;
+                        None
+                    }
+                    Err(e) => Some(e),
+                };
+                let template_error = template_error.or_else(|| {
+                    for values in headers.values_mut() {
+                        for v in values.iter_mut() {
+                            match crate::extensions::template_fn::render_templated(
+                                v,
+                                &template_ctx,
+                                template_debug,
+                            ) {
+                                // Issue #359 B3 (header injection): a templated value can resolve to
+                                // attacker-controlled request data containing CR/LF/control chars.
+                                // Strip control characters before the value ever reaches the header
+                                // map so it cannot inject an extra header line; warn (never silently)
+                                // if anything had to be removed.
+                                Ok(rendered) => *v = sanitize_header_value(&rendered),
+                                Err(e) => return Some(e),
+                            }
+                        }
+                    }
+                    None
+                });
+                if let Some(e) = template_error {
+                    warn!("Response template rendering failed: {e}");
+                    return Ok(build_response_with_headers(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        [
+                            ("x-rift-imposter", "true"),
+                            ("x-rift-template-error", "true"),
+                        ],
+                        format!(r#"{{"error": "template rendering failed: {e}"}}"#),
+                    ));
+                }
+            }
+
             // Expand `${request.*}` request templates (issue #269) BEFORE behaviors — matching the
             // proxy path's ordering so `shellTransform`/`decorate` operate on the expanded body.
             // Header values are templated too (the static path's AC1 requirement; the proxy path
             // templates only the body). Serve-time date templates ({{NOW}}/{{DAYS+N}}) are expanded
-            // later, at body finalization.
+            // later, at body finalization. Runs AFTER the `{{ }}` pass above (issue #359 B1): this
+            // pass only substitutes `${...}` and never re-scans for `{{ }}`, so reflected request
+            // data injected here is never templated.
             {
                 let need_body = has_template_variables(&body);
                 let need_headers = headers
@@ -641,6 +893,8 @@ async fn handle_request_inner(
                             &body,
                             status,
                             &mut single,
+                            imposter.config.port.unwrap_or(0),
+                            stub_state.stub.id.as_deref(),
                         ) {
                             Ok((new_body, new_status)) => {
                                 body = new_body;
@@ -919,7 +1173,7 @@ fn handle_debug_request(
         Some(&client_ip),
     ) {
         Ok(matched) => matched,
-        Err(e) => return Ok(backend_error_response(&e)),
+        Err(e) => return Ok(matcher_error_response(&e)),
     };
     let match_result = if let Some((stub_state, stub_index)) = matched {
         // Match found

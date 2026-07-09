@@ -225,9 +225,7 @@ failure via an `x-rift-<behavior>-error` header. With `strictBehaviors` on, the 
 
 Strict mode can also be forced process-wide with the `RIFT_STRICT_BEHAVIORS` environment variable
 (see [CLI Reference]({{ site.baseurl }}/configuration/cli/)) — the per-imposter flag **or** the env
-var enables it. This is orthogonal to `RIFT_STRICT_FLOW_STORE` ([Scripting]({{ site.baseurl
-}}/features/scripting/)): neither implies the other, since one governs response behaviors and the
-other governs flow-store script errors.
+var enables it.
 
 See [Mountebank Behaviors → Error Semantics]({{ site.baseurl }}/mountebank/behaviors/#error-semantics)
 for the full walkthrough of `decorate`/`shellTransform`/binary failures under strict mode.
@@ -351,10 +349,11 @@ top-level `fault` response form, and scripted faults.
 
 ## Scripting
 
-`_rift.script` runs a script (engine `rhai`, `lua`, or `javascript`) that decides whether to inject a
-response. The script defines `should_inject(request, flow_store)` and returns a map with an `inject`
-flag; when `inject` is true it also carries `fault`/`status`/`body`/`headers`. The `flow_store` handle
-is keyed by `(flow_id, key)`.
+`_rift.script` runs a script (engine `rhai` or `javascript`) that decides whether to inject a
+response. The script defines `respond(ctx)` and returns a result constructor — `http(status, body)`,
+`delay(ms)`, `reset()`, or `pass()`/nothing for no injection. `ctx.state` is a key/value handle
+already scoped to the request's resolved flow id — no explicit flow id argument needed. See
+[Scripting]({{ site.baseurl }}/features/scripting/#ctx-api) for the full `ctx` reference.
 
 ```json
 {
@@ -362,14 +361,14 @@ is keyed by `(flow_id, key)`.
     "flowState": { "backend": "inmemory", "ttlSeconds": 300 },
     "script": {
       "engine": "rhai",
-      "code": "fn should_inject(request, flow_store) { let n = flow_store.increment(\"demo\", \"count\"); #{ inject: true, fault: \"error\", status: 200, body: `count ${n}` } }"
+      "code": "fn respond(ctx) { let n = ctx.state.incr(\"count\"); http(200, `count ${n}`) }"
     }
   }
 }
 ```
 
-- `rhai` is built in; `lua` requires the `lua` feature; `javascript` requires the `javascript`
-  feature. JavaScript can also use the Mountebank `inject` response format directly.
+- `rhai` is built in; `javascript` requires the `javascript` feature. JavaScript can also use the
+  Mountebank `inject` response format directly.
 - Scripts require `--allow-injection` and are bounded by a wall-clock timeout
   (`_rift.scriptEngine.timeoutMs`, default 5000 ms).
 

@@ -1,19 +1,44 @@
 //! Stub management handlers.
 
 use crate::admin_api::handlers::imposters::handle_get as handle_get_imposter;
+use crate::admin_api::handlers::imposters::{
+    admin_script_base, imposter_script_registry, reject_stubs_if_injection_disallowed,
+};
 use crate::admin_api::types::{
     AddStubRequest, ReplaceStubsRequest, StubWithLinks, collect_body, error_response,
     json_response, make_stub_links,
 };
 use crate::extensions::stub_analysis::{analyze_new_stub, analyze_stubs};
-use crate::imposter::{ImposterManager, Stub};
+use crate::imposter::{ImposterManager, Stub, resolve_stub_scripts};
 use crate::scripting::{validate_stub, validate_stubs};
 use bytes::Bytes;
 use http_body_util::Full;
 use hyper::body::Incoming;
 use hyper::{Request, Response, StatusCode};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::warn;
+
+/// Resolve `_rift.script` `file:`/`ref:` sources in admin-API-supplied stubs at WRITE time (issue
+/// #356 B1), under the same `--scripts-dir` root as whole-imposter create, before the stubs are
+/// persisted. Returns a `400` on any escape / unknown-ref / unconfigured-`file:` error so nothing
+/// unresolved (`file`/`ref` still set) is ever written to the datadir. `None` on success.
+fn resolve_admin_stubs(
+    stubs: &mut [Stub],
+    manager: &ImposterManager,
+    port: u16,
+    scripts_dir: &Option<Arc<PathBuf>>,
+) -> Option<Response<Full<Bytes>>> {
+    let registry = imposter_script_registry(manager, port);
+    let base = admin_script_base(scripts_dir);
+    match resolve_stub_scripts(stubs, &registry, &base) {
+        Ok(()) => None,
+        Err(e) => Some(error_response(
+            StatusCode::BAD_REQUEST,
+            &format!("Script resolution failed: {e}"),
+        )),
+    }
+}
 
 /// POST /imposters/:port/stubs - Add a stub
 pub async fn handle_add(
@@ -21,6 +46,8 @@ pub async fn handle_add(
     req: Request<Incoming>,
     base_url: &str,
     manager: Arc<ImposterManager>,
+    allow_injection: bool,
+    scripts_dir: Option<Arc<PathBuf>>,
 ) -> Response<Full<Bytes>> {
     let body = match collect_body(req).await {
         Ok(b) => b,
@@ -33,6 +60,24 @@ pub async fn handle_add(
             return error_response(StatusCode::BAD_REQUEST, &format!("Invalid stub JSON: {e}"));
         }
     };
+
+    // Gate any scripting surface behind --allowInjection before mutating state (B3, issue #355).
+    if let Some(rejection) =
+        reject_stubs_if_injection_disallowed(std::slice::from_ref(&add_req.stub), allow_injection)
+    {
+        return rejection;
+    }
+
+    // Resolve `_rift.script` `file:`/`ref:` sources before persisting (issue #356 B1): an escape /
+    // unknown-ref / unconfigured `file:` is a 400, and nothing unresolved is ever stored.
+    if let Some(rejection) = resolve_admin_stubs(
+        std::slice::from_mut(&mut add_req.stub),
+        &manager,
+        port,
+        &scripts_dir,
+    ) {
+        return rejection;
+    }
 
     // Issue #202: honor a caller-supplied `id`, but generate a stable one if absent so every
     // stub is addressable via the by-id endpoints.
@@ -94,18 +139,34 @@ pub async fn handle_replace_all(
     req: Request<Incoming>,
     base_url: &str,
     manager: Arc<ImposterManager>,
+    allow_injection: bool,
+    scripts_dir: Option<Arc<PathBuf>>,
 ) -> Response<Full<Bytes>> {
     let body = match collect_body(req).await {
         Ok(b) => b,
         Err(e) => return error_response(StatusCode::BAD_REQUEST, &e.to_string()),
     };
 
-    let replace_req: ReplaceStubsRequest = match serde_json::from_slice(&body) {
+    let mut replace_req: ReplaceStubsRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
         Err(e) => {
             return error_response(StatusCode::BAD_REQUEST, &format!("Invalid stubs JSON: {e}"));
         }
     };
+
+    // Gate any scripting surface behind --allowInjection before mutating state (B3, issue #355).
+    if let Some(rejection) =
+        reject_stubs_if_injection_disallowed(&replace_req.stubs, allow_injection)
+    {
+        return rejection;
+    }
+
+    // Resolve `_rift.script` `file:`/`ref:` sources before persisting (issue #356 B1).
+    if let Some(rejection) =
+        resolve_admin_stubs(&mut replace_req.stubs, &manager, port, &scripts_dir)
+    {
+        return rejection;
+    }
 
     // Validate all scripts in stubs before replacing
     let validation_result = validate_stubs(&replace_req.stubs);
@@ -189,18 +250,37 @@ pub async fn handle_replace(
     req: Request<Incoming>,
     base_url: &str,
     manager: Arc<ImposterManager>,
+    allow_injection: bool,
+    scripts_dir: Option<Arc<PathBuf>>,
 ) -> Response<Full<Bytes>> {
     let body = match collect_body(req).await {
         Ok(b) => b,
         Err(e) => return error_response(StatusCode::BAD_REQUEST, &e.to_string()),
     };
 
-    let stub: Stub = match serde_json::from_slice(&body) {
+    let mut stub: Stub = match serde_json::from_slice(&body) {
         Ok(s) => s,
         Err(e) => {
             return error_response(StatusCode::BAD_REQUEST, &format!("Invalid stub JSON: {e}"));
         }
     };
+
+    // Gate any scripting surface behind --allowInjection before mutating state (B3, issue #355).
+    if let Some(rejection) =
+        reject_stubs_if_injection_disallowed(std::slice::from_ref(&stub), allow_injection)
+    {
+        return rejection;
+    }
+
+    // Resolve `_rift.script` `file:`/`ref:` sources before persisting (issue #356 B1).
+    if let Some(rejection) = resolve_admin_stubs(
+        std::slice::from_mut(&mut stub),
+        &manager,
+        port,
+        &scripts_dir,
+    ) {
+        return rejection;
+    }
 
     // Validate scripts in the stub before replacing
     let validation_result = validate_stub(&stub, index);
@@ -254,17 +334,34 @@ pub async fn handle_replace_by_id(
     req: Request<Incoming>,
     base_url: &str,
     manager: Arc<ImposterManager>,
+    allow_injection: bool,
+    scripts_dir: Option<Arc<PathBuf>>,
 ) -> Response<Full<Bytes>> {
     let body = match collect_body(req).await {
         Ok(b) => b,
         Err(e) => return error_response(StatusCode::BAD_REQUEST, &e.to_string()),
     };
-    let stub: Stub = match serde_json::from_slice(&body) {
+    let mut stub: Stub = match serde_json::from_slice(&body) {
         Ok(s) => s,
         Err(e) => {
             return error_response(StatusCode::BAD_REQUEST, &format!("Invalid stub JSON: {e}"));
         }
     };
+    // Gate any scripting surface behind --allowInjection before mutating state (B3, issue #355).
+    if let Some(rejection) =
+        reject_stubs_if_injection_disallowed(std::slice::from_ref(&stub), allow_injection)
+    {
+        return rejection;
+    }
+    // Resolve `_rift.script` `file:`/`ref:` sources before persisting (issue #356 B1).
+    if let Some(rejection) = resolve_admin_stubs(
+        std::slice::from_mut(&mut stub),
+        &manager,
+        port,
+        &scripts_dir,
+    ) {
+        return rejection;
+    }
     let validation_result = validate_stub(&stub, 0);
     if !validation_result.is_valid() {
         return error_response(

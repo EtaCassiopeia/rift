@@ -11,6 +11,7 @@ use bytes::Bytes;
 use http_body_util::Full;
 use hyper::body::Incoming;
 use hyper::{Method, Request, Response, StatusCode};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::debug;
 
@@ -74,6 +75,7 @@ pub async fn route_request(
     config_source: Option<Arc<ConfigSource>>,
     allow_injection: bool,
     intercept: Option<Arc<InterceptState>>,
+    scripts_dir: Option<Arc<PathBuf>>,
 ) -> Result<Response<Full<Bytes>>, hyper::Error> {
     let method = req.method().clone();
     let path = req.uri().path().to_string();
@@ -105,6 +107,7 @@ pub async fn route_request(
         manager,
         config_source,
         allow_injection,
+        scripts_dir,
     )
     .await;
     Ok(response)
@@ -164,6 +167,7 @@ async fn route_by_path(
     manager: Arc<ImposterManager>,
     config_source: Option<Arc<ConfigSource>>,
     allow_injection: bool,
+    scripts_dir: Option<Arc<PathBuf>>,
 ) -> Response<Full<Bytes>> {
     // Single-port gateway (issue #212): `/__rift/:port/<path>` dispatches to that imposter,
     // so a containerized Rift only needs the one admin port published.
@@ -188,8 +192,13 @@ async fn route_by_path(
     if path == "/imposters" {
         return match *method {
             Method::GET => imposters::handle_list(manager, query, base_url).await,
-            Method::POST => imposters::handle_create(req, base_url, manager).await,
-            Method::PUT => imposters::handle_replace_all(req, base_url, manager).await,
+            Method::POST => {
+                imposters::handle_create(req, base_url, manager, allow_injection, scripts_dir).await
+            }
+            Method::PUT => {
+                imposters::handle_replace_all(req, base_url, manager, allow_injection, scripts_dir)
+                    .await
+            }
             Method::DELETE => imposters::handle_delete_all(manager, base_url).await,
             _ => not_found(),
         };
@@ -202,7 +211,17 @@ async fn route_by_path(
 
     // Individual imposter routes
     if let Some(rest) = path.strip_prefix("/imposters/") {
-        return route_imposter(method, rest, query, req, base_url, manager).await;
+        return route_imposter(
+            method,
+            rest,
+            query,
+            req,
+            base_url,
+            manager,
+            allow_injection,
+            scripts_dir,
+        )
+        .await;
     }
 
     not_found()
@@ -237,6 +256,7 @@ async fn route_admin_flow_state(
 }
 
 /// Route imposter-specific requests
+#[allow(clippy::too_many_arguments)]
 async fn route_imposter(
     method: &Method,
     path: &str,
@@ -244,6 +264,8 @@ async fn route_imposter(
     req: Request<Incoming>,
     base_url: &str,
     manager: Arc<ImposterManager>,
+    allow_injection: bool,
+    scripts_dir: Option<Arc<PathBuf>>,
 ) -> Response<Full<Bytes>> {
     // Parse: port/remaining/path
     let segments: Vec<&str> = path.split('/').collect();
@@ -278,10 +300,11 @@ async fn route_imposter(
             stubs::handle_get_all(port, base_url, manager).await
         }
         (&Method::POST, ImposterRoute::Stubs) => {
-            stubs::handle_add(port, req, base_url, manager).await
+            stubs::handle_add(port, req, base_url, manager, allow_injection, scripts_dir).await
         }
         (&Method::PUT, ImposterRoute::Stubs) => {
-            stubs::handle_replace_all(port, req, base_url, manager).await
+            stubs::handle_replace_all(port, req, base_url, manager, allow_injection, scripts_dir)
+                .await
         }
 
         // /imposters/:port/stubs/:index
@@ -289,7 +312,16 @@ async fn route_imposter(
             stubs::handle_get(port, index, base_url, manager).await
         }
         (&Method::PUT, ImposterRoute::StubByIndex(index)) => {
-            stubs::handle_replace(port, index, req, base_url, manager).await
+            stubs::handle_replace(
+                port,
+                index,
+                req,
+                base_url,
+                manager,
+                allow_injection,
+                scripts_dir,
+            )
+            .await
         }
         (&Method::DELETE, ImposterRoute::StubByIndex(index)) => {
             stubs::handle_delete(port, index, base_url, manager).await
@@ -300,7 +332,16 @@ async fn route_imposter(
             stubs::handle_get_by_id(port, &id, manager).await
         }
         (&Method::PUT, ImposterRoute::StubById(id)) => {
-            stubs::handle_replace_by_id(port, &id, req, base_url, manager).await
+            stubs::handle_replace_by_id(
+                port,
+                &id,
+                req,
+                base_url,
+                manager,
+                allow_injection,
+                scripts_dir,
+            )
+            .await
         }
         (&Method::DELETE, ImposterRoute::StubById(id)) => {
             stubs::handle_delete_by_id(port, &id, base_url, manager).await
@@ -336,7 +377,15 @@ async fn route_imposter(
 
         // /imposters/:port/spaces/:flowId — Correlated isolation (issue #223)
         (&Method::POST, ImposterRoute::SpaceStubs(flow_id)) => {
-            scenarios::handle_add_space_stub(port, &flow_id, req, manager).await
+            scenarios::handle_add_space_stub(
+                port,
+                &flow_id,
+                req,
+                manager,
+                allow_injection,
+                scripts_dir,
+            )
+            .await
         }
         (&Method::GET, ImposterRoute::SpaceStubs(flow_id)) => {
             scenarios::handle_list_space_stubs(port, &flow_id, manager).await

@@ -1,18 +1,21 @@
-//! Bounded execution for the inline `_rift.script` (should_inject) path (issue #308).
+//! Bounded execution for the inline `_rift.script` (`respond(ctx)`) path (issue #308).
 //!
 //! The imposter `_rift.script` path has no script pool, so a runaway script (e.g. an
 //! infinite Rhai `loop {}`) ran unbounded on the async worker and wedged the whole engine.
 //! This module runs the script off the async worker via `spawn_blocking` and interrupts it
 //! at a wall-clock deadline using the same abort-flag mechanism as the pooled path (#172):
-//! Rhai's `on_progress` callback, and a Lua instruction hook.
+//! Rhai's `on_progress` callback.
 
-use super::{FaultDecision, ScriptEngine, ScriptRequest};
+use super::{
+    FaultDecision, ScriptCtxExtras, ScriptEngine, ScriptRequest, ScriptTraceEntry,
+    capture_script_logs, render_decision,
+};
 use crate::extensions::flow_state::FlowStore;
 use crate::imposter::ImposterConfig;
 use anyhow::Result;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing::warn;
 
 /// Default script timeout when `_rift.scriptEngine.timeoutMs` is not configured.
@@ -29,14 +32,14 @@ pub fn resolve_script_timeout_ms(config: &ImposterConfig) -> u64 {
         .unwrap_or(DEFAULT_SCRIPT_TIMEOUT_MS)
 }
 
-/// Run a `_rift.script` `should_inject` off the async worker with a wall-clock deadline
+/// Run a `_rift.script` `respond(ctx)` off the async worker with a wall-clock deadline
 /// (issue #308). Execution happens in `spawn_blocking` so a non-yielding script cannot
 /// starve the Tokio runtime, and at `timeout` the abort flag is set so the script self-
-/// interrupts. Rhai (`on_progress`) and Lua (instruction hook) are truly interrupted and
-/// free their thread promptly. JavaScript can't observe the deadline flag mid-run (Boa has no
-/// per-instruction interrupt), but its context caps loop iterations (issue #327), so a runaway
-/// loop terminates by throwing instead of leaking its blocking thread forever. Returns `Err` on
-/// timeout, a compile/exec error, or a panic.
+/// interrupts. Rhai (`on_progress`) is truly interrupted and frees its thread promptly.
+/// JavaScript can't observe the deadline flag mid-run (Boa has no per-instruction interrupt),
+/// but its context caps loop iterations (issue #327), so a runaway loop terminates by throwing
+/// instead of leaking its blocking thread forever. Returns `Err` on timeout, a compile/exec
+/// error, or a panic.
 pub async fn should_inject_bounded(
     engine_type: String,
     code: String,
@@ -44,6 +47,30 @@ pub async fn should_inject_bounded(
     request: ScriptRequest,
     flow_store: Arc<dyn FlowStore>,
     timeout: Duration,
+) -> Result<FaultDecision> {
+    should_inject_bounded_with_ctx(
+        engine_type,
+        code,
+        rule_id,
+        request,
+        flow_store,
+        timeout,
+        ScriptCtxExtras::default(),
+    )
+    .await
+}
+
+/// As [`should_inject_bounded`], but threading real `ctx.flowId`/`ctx.stub` context (issue #357
+/// Item 1) through to the v2 `ctx` object — used by the imposter `_rift.script` hook, which knows
+/// the resolved flow id and matched stub.
+pub async fn should_inject_bounded_with_ctx(
+    engine_type: String,
+    code: String,
+    rule_id: String,
+    request: ScriptRequest,
+    flow_store: Arc<dyn FlowStore>,
+    timeout: Duration,
+    ctx_extra: ScriptCtxExtras,
 ) -> Result<FaultDecision> {
     let abort = Arc::new(AtomicBool::new(false));
     let run_abort = Arc::clone(&abort);
@@ -55,6 +82,7 @@ pub async fn should_inject_bounded(
             &request,
             flow_store,
             &run_abort,
+            &ctx_extra,
         )
     });
 
@@ -62,8 +90,8 @@ pub async fn should_inject_bounded(
         Ok(Ok(result)) => result,
         Ok(Err(join_err)) => Err(anyhow::anyhow!("script task panicked: {join_err}")),
         Err(_elapsed) => {
-            // Signal the deadline: Rhai/Lua self-interrupt and free their thread promptly;
-            // for other engines this is a best-effort flag they never observe.
+            // Signal the deadline: Rhai self-interrupts and frees its thread promptly; for
+            // other engines this is a best-effort flag they never observe.
             abort.store(true, Ordering::Relaxed);
             warn!(
                 "_rift.script execution timed out after {}ms",
@@ -77,8 +105,78 @@ pub async fn should_inject_bounded(
     }
 }
 
-/// Execute `should_inject` synchronously with the abort flag wired into the interpreter, so
-/// setting `abort` interrupts a runaway script. Rhai and Lua get a real interpreter interrupt
+/// As [`should_inject_bounded_with_ctx`], but also builds a debug-mode script trace (issue #360
+/// Item 3): the rendered decision, wall-clock duration, and any `ctx.logger` lines this run
+/// emitted. Only called when debug mode is on — [`should_inject_bounded_with_ctx`] above is
+/// unchanged and stays the zero-cost default the rest of the time (no capturing subscriber, no
+/// extra `Instant`/allocation).
+pub async fn should_inject_bounded_with_ctx_traced(
+    engine_type: String,
+    code: String,
+    rule_id: String,
+    request: ScriptRequest,
+    flow_store: Arc<dyn FlowStore>,
+    timeout: Duration,
+    ctx_extra: ScriptCtxExtras,
+) -> (Result<FaultDecision>, ScriptTraceEntry) {
+    let abort = Arc::new(AtomicBool::new(false));
+    let run_abort = Arc::clone(&abort);
+    let start = Instant::now();
+    let handle = tokio::task::spawn_blocking(move || {
+        capture_script_logs(|| {
+            run_should_inject_with_abort(
+                &engine_type,
+                &code,
+                &rule_id,
+                &request,
+                flow_store,
+                &run_abort,
+                &ctx_extra,
+            )
+        })
+    });
+
+    let (result, logs) = match tokio::time::timeout(timeout, handle).await {
+        Ok(Ok((result, logs))) => (result, logs),
+        Ok(Err(join_err)) => (
+            Err(anyhow::anyhow!("script task panicked: {join_err}")),
+            Vec::new(),
+        ),
+        Err(_elapsed) => {
+            abort.store(true, Ordering::Relaxed);
+            warn!(
+                "_rift.script execution timed out after {}ms",
+                timeout.as_millis()
+            );
+            (
+                Err(anyhow::anyhow!(
+                    "script execution timed out after {}ms",
+                    timeout.as_millis()
+                )),
+                Vec::new(),
+            )
+        }
+    };
+    let duration_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let decision = match &result {
+        Ok(d) => render_decision(d),
+        Err(e) => format!("error: {e}"),
+    };
+    // Raw (uncapped) logs here: `rift script run` prints them all to the terminal. The
+    // header-bound debug trace caps them at its own serialization site (issue #360) — a
+    // response header, unlike a terminal dump, must stay bounded.
+    let entry = ScriptTraceEntry {
+        hook: "respond".to_string(),
+        decision,
+        duration_ms,
+        logs,
+        cache: None,
+    };
+    (result, entry)
+}
+
+/// Execute `respond(ctx)` synchronously with the abort flag wired into the interpreter, so
+/// setting `abort` interrupts a runaway script. Rhai gets a real interpreter interrupt
 /// (#308/#172); other engines run without an interpreter interrupt but still off the async
 /// worker and under the request-level timeout.
 fn run_should_inject_with_abort(
@@ -88,21 +186,18 @@ fn run_should_inject_with_abort(
     request: &ScriptRequest,
     flow_store: Arc<dyn FlowStore>,
     abort: &Arc<AtomicBool>,
+    ctx_extra: &ScriptCtxExtras,
 ) -> Result<FaultDecision> {
     // Start each execution with a clean last-flow-error slot so `flow_store.last_error()` can't
     // observe a stale error left by a previous script on this reused worker thread (issue #322).
     crate::extensions::flow_state::clear_last_flow_error();
     match engine_type {
         "rhai" => super::rhai_engine::run_should_inject_with_abort_rhai(
-            code, rule_id, request, flow_store, abort,
-        ),
-        #[cfg(feature = "lua")]
-        "lua" => super::lua_engine::run_should_inject_with_abort_lua(
-            code, rule_id, request, flow_store, abort,
+            code, rule_id, request, flow_store, abort, ctx_extra,
         ),
         other => {
             let engine = ScriptEngine::new(other, code, rule_id)?;
-            engine.should_inject_fault(request, flow_store)
+            engine.should_inject_fault_with_ctx(request, flow_store, ctx_extra)
         }
     }
 }
@@ -115,6 +210,7 @@ mod tests {
 
     fn req() -> ScriptRequest {
         ScriptRequest {
+            raw_body: None,
             method: "GET".into(),
             path: "/hang".into(),
             headers: Default::default(),
@@ -145,9 +241,10 @@ mod tests {
         )
     }
 
-    const RUNAWAY_RHAI: &str =
-        "fn should_inject(request, flow_store){ let i = 0; loop { i += 1; } }";
-    const RUNAWAY_LUA: &str = "function should_inject(request, flow_store) while true do end end";
+    // A bare-expression script (issue #357 Item 2, no `respond` wrapper needed): the whole body
+    // runs as the entrypoint, so this loop actually executes (unlike a function that's merely
+    // declared but never called), exercising the real interrupt path.
+    const RUNAWAY_RHAI: &str = "let i = 0; loop { i += 1; }";
 
     /// Run the sync interrupt path on a child thread, flip the abort flag after 200ms, and
     /// require the interpreter to unwind within 5s. Running off the test thread with a
@@ -162,7 +259,15 @@ mod tests {
         });
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let res = run_should_inject_with_abort(engine, code, "t", &req(), store(), &abort);
+            let res = run_should_inject_with_abort(
+                engine,
+                code,
+                "t",
+                &req(),
+                store(),
+                &abort,
+                &ScriptCtxExtras::default(),
+            );
             let _ = tx.send(res.is_err());
         });
         match rx.recv_timeout(Duration::from_secs(5)) {
@@ -178,14 +283,7 @@ mod tests {
         assert_interrupts("rhai", RUNAWAY_RHAI);
     }
 
-    // AC5: same for Lua.
-    #[cfg(feature = "lua")]
-    #[test]
-    fn runaway_lua_interrupted_by_abort() {
-        assert_interrupts("lua", RUNAWAY_LUA);
-    }
-
-    // The non-rhai/non-lua dispatch branch: an unknown engine returns an error promptly.
+    // The non-rhai dispatch branch: an unknown engine returns an error promptly.
     #[tokio::test]
     async fn unknown_engine_returns_error() {
         let res = bounded("no-such-engine", "whatever", 500).await;
@@ -198,22 +296,14 @@ mod tests {
     // AC4: the None and Latency decisions pass through the bounded path unchanged.
     #[tokio::test]
     async fn normal_rhai_returns_none_and_latency() {
-        let none = bounded(
-            "rhai",
-            "fn should_inject(request, flow_store){ #{ inject: false } }",
-            2000,
-        )
-        .await
-        .expect("fast script");
+        let none = bounded("rhai", "fn respond(ctx) { pass() }", 2000)
+            .await
+            .expect("fast script");
         assert!(matches!(none, FaultDecision::None), "got {none:?}");
 
-        let latency = bounded(
-            "rhai",
-            "fn should_inject(request, flow_store){ #{ inject: true, fault: `latency`, duration_ms: 7 } }",
-            2000,
-        )
-        .await
-        .expect("fast script");
+        let latency = bounded("rhai", "fn respond(ctx) { delay(7) }", 2000)
+            .await
+            .expect("fast script");
         match latency {
             FaultDecision::Latency { duration_ms, .. } => assert_eq!(duration_ms, 7),
             other => panic!("expected Latency, got {other:?}"),
@@ -303,10 +393,10 @@ mod tests {
         let _ = script.await;
     }
 
-    // AC4: a normal (fast) Rhai should_inject still returns the correct decision, unchanged.
+    // AC4: a normal (fast) Rhai respond(ctx) still returns the correct decision, unchanged.
     #[tokio::test]
     async fn normal_rhai_returns_error_decision() {
-        let code = "fn should_inject(request, flow_store){ #{ inject: true, fault: `error`, status: 503, body: `boom` } }";
+        let code = r#"fn respond(ctx) { http(503, "boom") }"#;
         let res = bounded("rhai", code, 2000)
             .await
             .expect("fast script succeeds");
@@ -319,16 +409,55 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "lua")]
+    // Issue #360 Item 3: the traced variant captures the decision, duration, and ctx.logger
+    // lines from a single run, without changing the decision itself.
     #[tokio::test]
-    async fn normal_lua_returns_decision() {
-        let code = "function should_inject(request, flow_store) return { inject = true, fault = 'error', status = 503, body = 'boom' } end";
-        let res = bounded("lua", code, 2000)
-            .await
-            .expect("fast lua script succeeds");
-        match res {
-            FaultDecision::Error { status, .. } => assert_eq!(status, 503),
+    async fn traced_variant_captures_decision_duration_and_logs() {
+        let code = r#"
+            fn respond(ctx) {
+                ctx.logger.info("about to respond");
+                http(503, "boom")
+            }
+        "#;
+        let (result, entry) = should_inject_bounded_with_ctx_traced(
+            "rhai".into(),
+            code.into(),
+            "t".into(),
+            req(),
+            store(),
+            Duration::from_millis(2000),
+            ScriptCtxExtras::default(),
+        )
+        .await;
+        match result {
+            Ok(FaultDecision::Error { status, .. }) => assert_eq!(status, 503),
             other => panic!("expected Error decision, got {other:?}"),
         }
+        assert_eq!(entry.hook, "respond");
+        assert_eq!(entry.decision, "http(503) body=\"boom\"");
+        assert_eq!(entry.logs, vec!["about to respond".to_string()]);
+        assert!(entry.cache.is_none());
+    }
+
+    // A timeout still produces a trace entry (best-effort: no logs, an error decision string),
+    // instead of panicking or losing the timeout error.
+    #[tokio::test]
+    async fn traced_variant_reports_timeout() {
+        let (result, entry) = should_inject_bounded_with_ctx_traced(
+            "rhai".into(),
+            RUNAWAY_RHAI.into(),
+            "t".into(),
+            req(),
+            store(),
+            Duration::from_millis(150),
+            ScriptCtxExtras::default(),
+        )
+        .await;
+        assert!(result.is_err(), "runaway must time out, not hang");
+        assert!(
+            entry.decision.starts_with("error:"),
+            "got {}",
+            entry.decision
+        );
     }
 }

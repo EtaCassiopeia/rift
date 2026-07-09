@@ -41,7 +41,6 @@ rift-types = { path = "../rift-types" }
 
 # Scripting engines
 rhai.workspace = true
-mlua = { version = "0.10", features = ["luajit", "serialize"], optional = true }
 boa_engine = { version = "0.20", optional = true }
 
 # State storage
@@ -74,6 +73,8 @@ libc = "0.2"
 parking_lot = "0.12"
 arc-swap = "1.7"
 crossbeam = "0.8"
+# Response templating `{{uuid}}` (issue #359); already a workspace dep (previously dev-only here).
+uuid.workspace = true
 
 # XML/XPath support
 sxd-document = "0.3"
@@ -89,7 +90,6 @@ ring = "0.17"
 tempfile = "3.8"
 reqwest.workspace = true
 tokio-test = "0.4"
-uuid.workspace = true
 serial_test = "3.0"
 criterion = { version = "0.5", features = ["html_reports"] }
 
@@ -98,9 +98,8 @@ name = "imposter_matcher_bench"
 harness = false
 
 [features]
-default = ["redis-backend", "lua", "javascript"]
+default = ["redis-backend", "javascript"]
 redis-backend = ["redis", "r2d2"]
-lua = ["mlua"]
 javascript = ["boa_engine"]
 # Deliberately failing flow-store backend for backend-outage tests (issue #318)
 test-backend = []

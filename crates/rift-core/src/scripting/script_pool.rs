@@ -10,9 +10,6 @@ use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
 use tracing::{debug, error, info, warn};
 
-#[cfg(feature = "lua")]
-use mlua::Lua;
-
 /// Configuration for the script thread pool
 #[derive(Clone, Debug)]
 
@@ -43,11 +40,6 @@ impl Default for ScriptPoolConfig {
 pub enum CompiledScript {
     Rhai {
         ast: Arc<AST>,
-        rule_id: String,
-    },
-    #[cfg(feature = "lua")]
-    Lua {
-        bytecode: Arc<Vec<u8>>,
         rule_id: String,
     },
     #[cfg(feature = "javascript")]
@@ -100,9 +92,6 @@ impl ScriptWorker {
                     }
                 });
 
-                #[cfg(feature = "lua")]
-                let lua = Lua::new();
-
                 loop {
                     // Check for shutdown signal (non-blocking)
                     if shutdown_rx.try_recv().is_ok() {
@@ -148,14 +137,6 @@ impl ScriptWorker {
                                 CompiledScript::Rhai { ast, rule_id } => Self::execute_rhai(
                                     &rhai_engine,
                                     ast,
-                                    &task.request,
-                                    task.flow_store.clone(),
-                                    rule_id,
-                                ),
-                                #[cfg(feature = "lua")]
-                                CompiledScript::Lua { bytecode, rule_id } => Self::execute_lua(
-                                    &lua,
-                                    bytecode,
                                     &task.request,
                                     task.flow_store.clone(),
                                     rule_id,
@@ -228,20 +209,6 @@ impl ScriptWorker {
         use crate::scripting::rhai_engine::execute_rhai_with_engine;
 
         execute_rhai_with_engine(engine, ast, request, flow_store, rule_id)
-    }
-
-    #[cfg(feature = "lua")]
-    fn execute_lua(
-        lua: &Lua,
-        bytecode: &Arc<Vec<u8>>,
-        request: &ScriptRequest,
-        flow_store: Arc<dyn FlowStore>,
-        rule_id: &str,
-    ) -> Result<FaultDecision> {
-        // Import necessary types from lua_engine module
-        use crate::scripting::lua_engine::execute_lua_bytecode;
-
-        execute_lua_bytecode(lua, bytecode.as_slice(), request, flow_store, rule_id)
     }
 
     #[cfg(feature = "javascript")]
@@ -605,23 +572,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "lua")]
-    #[test]
-    fn test_compiled_script_lua_creation() {
-        let compiled = CompiledScript::Lua {
-            bytecode: Arc::new(vec![1, 2, 3, 4]),
-            rule_id: "lua-rule".to_string(),
-        };
-
-        match compiled {
-            CompiledScript::Lua { rule_id, bytecode } => {
-                assert_eq!(rule_id, "lua-rule");
-                assert_eq!(bytecode.len(), 4);
-            }
-            _ => panic!("Expected Lua variant"),
-        }
-    }
-
     #[cfg(feature = "javascript")]
     #[test]
     fn test_compiled_script_javascript_creation() {
@@ -688,6 +638,7 @@ mod tests {
         let pool = ScriptPool::new(config).unwrap();
 
         let make_request = || ScriptRequest {
+            raw_body: None,
             method: "GET".to_string(),
             path: "/test".to_string(),
             headers: HashMap::new(),
@@ -700,16 +651,14 @@ mod tests {
 
         // Compile an infinite loop script using a Rhai engine without custom functions
         // (on_progress hooks are installed on the *worker* engine; the compile engine
-        //  only needs to produce a valid AST).
+        //  only needs to produce a valid AST). A bare expression (issue #357 Item 2, no
+        // `respond` wrapper needed) so the loop actually executes as the entrypoint.
         let compile_engine = rhai::Engine::new();
         let ast = compile_engine
             .compile(
                 r#"
-                fn should_inject(request, flow) {
-                    let i = 0;
-                    loop { i += 1; }
-                    #{ inject: false }
-                }
+                let i = 0;
+                loop { i += 1; }
             "#,
             )
             .expect("infinite loop script should compile");
@@ -737,8 +686,8 @@ mod tests {
         let ast2 = compile_engine2
             .compile(
                 r#"
-                fn should_inject(request, flow) {
-                    #{ inject: false }
+                fn respond(ctx) {
+                    pass()
                 }
             "#,
             )
@@ -783,8 +732,8 @@ mod tests {
         let ast = engine
             .compile(
                 r#"
-            fn should_inject(request, flow_store) {
-                #{ inject: false }
+            fn respond(ctx) {
+                pass()
             }
         "#,
             )
@@ -796,6 +745,7 @@ mod tests {
         };
 
         let request = ScriptRequest {
+            raw_body: None,
             method: "GET".to_string(),
             path: "/test".to_string(),
             headers: HashMap::new(),

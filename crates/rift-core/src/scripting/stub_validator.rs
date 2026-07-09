@@ -5,7 +5,7 @@
 //! rather than at request time.
 
 use super::validator::ScriptValidator;
-use crate::imposter::{Stub, StubResponse};
+use crate::imposter::{RiftScriptConfig, Stub, StubResponse};
 use std::fmt;
 
 /// Error type for stub script validation
@@ -105,40 +105,45 @@ fn validate_response(
 ) -> Option<StubValidationError> {
     match response {
         // Rift script responses (_rift.script)
-        StubResponse::RiftScript { rift } => {
-            if let Some(ref script_config) = rift.script {
-                validate_rift_script(
-                    &script_config.engine,
-                    &script_config.code,
-                    stub_id,
-                    response_index,
-                )
-            } else {
-                None
-            }
-        }
+        StubResponse::RiftScript { rift } => rift.script.as_ref().and_then(|script_config| {
+            validate_rift_script_config(script_config, stub_id, response_index)
+        }),
         // Is responses with optional _rift extension
-        StubResponse::Is { rift, .. } => {
-            if let Some(rift_ext) = rift {
-                if let Some(ref script_config) = rift_ext.script {
-                    validate_rift_script(
-                        &script_config.engine,
-                        &script_config.code,
-                        stub_id,
-                        response_index,
-                    )
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        }
+        StubResponse::Is { rift, .. } => rift.as_ref().and_then(|rift_ext| {
+            rift_ext.script.as_ref().and_then(|script_config| {
+                validate_rift_script_config(script_config, stub_id, response_index)
+            })
+        }),
         // JavaScript inject responses
         StubResponse::Inject { inject } => validate_inject_script(inject, stub_id, response_index),
         // Proxy and Fault responses don't have inline scripts to validate
         StubResponse::Proxy { .. } | StubResponse::Fault { .. } => None,
     }
+}
+
+/// Validates a single `_rift.script` config. `code`/`file`/`ref` exactly-one is checked
+/// unconditionally; the syntax check only runs against `code` — a `file`/`ref` source is
+/// unresolved here (that happens in the config-time resolve-scripts pass, issue #356) so an
+/// unresolved script is structurally checked but not syntax-checked by this call site.
+fn validate_rift_script_config(
+    script_config: &RiftScriptConfig,
+    stub_id: &str,
+    response_index: usize,
+) -> Option<StubValidationError> {
+    if !script_config.has_valid_source() {
+        return Some(StubValidationError {
+            stub_id: stub_id.to_string(),
+            response_index,
+            engine: script_config.engine.clone().unwrap_or_default(),
+            message: format!(
+                "script must specify exactly one of `code`, `file`, or `ref` (found {})",
+                script_config.source_count()
+            ),
+        });
+    }
+    let code = script_config.code.as_deref()?;
+    let engine = script_config.engine.as_deref().unwrap_or("rhai");
+    validate_rift_script(engine, code, stub_id, response_index)
 }
 
 /// Validates a Rift script (_rift.script) using the appropriate validator
@@ -156,20 +161,11 @@ fn validate_rift_script(
             stub_id,
             response_index,
         ),
-        #[cfg(feature = "lua")]
-        "lua" => validate_with_validator(
-            &super::LuaValidator::new(),
-            code,
-            "lua",
-            stub_id,
-            response_index,
-        ),
-        #[cfg(not(feature = "lua"))]
         "lua" => Some(StubValidationError {
             stub_id: stub_id.to_string(),
             response_index,
             engine: "lua".to_string(),
-            message: "Lua engine is not enabled (requires 'lua' feature)".to_string(),
+            message: "the Lua scripting engine was removed (issue #450); use engine \"rhai\" or \"javascript\"".to_string(),
         }),
         #[cfg(feature = "javascript")]
         "javascript" | "js" => validate_with_validator(
@@ -266,9 +262,12 @@ mod tests {
                 rift: RiftResponseExtension {
                     fault: None,
                     script: Some(RiftScriptConfig {
-                        engine: engine.to_string(),
-                        code: code.to_string(),
+                        engine: Some(engine.to_string()),
+                        code: Some(code.to_string()),
+                        file: None,
+                        ref_name: None,
                     }),
+                    templated: false,
                 },
             }],
             scenario_name: None,
@@ -299,10 +298,7 @@ mod tests {
 
     #[test]
     fn test_valid_rhai_script() {
-        let stub = make_rift_script_stub(
-            "rhai",
-            r#"fn should_inject(request, flow_store) { #{ inject: false } }"#,
-        );
+        let stub = make_rift_script_stub("rhai", r#"fn respond(ctx) { pass() }"#);
         let result = validate_stub(&stub, 0);
         assert!(
             result.is_valid(),
@@ -315,7 +311,7 @@ mod tests {
     fn test_invalid_rhai_syntax() {
         let stub = make_rift_script_stub(
             "rhai",
-            r#"fn should_inject(request, flow_store) { #{ inject: "#, // Missing closing
+            r#"fn respond(ctx) { http(200, "#, // Missing closing
         );
         let result = validate_stub(&stub, 0);
         assert!(!result.is_valid(), "Invalid syntax should fail");
@@ -323,11 +319,17 @@ mod tests {
     }
 
     #[test]
-    fn test_missing_should_inject_function() {
+    fn test_v2_script_without_should_inject_is_valid() {
+        // Issue #453: validation is syntax-only now — a script that never defines
+        // `should_inject` (the removed v1 wrapper) validates fine. Entrypoint-matching
+        // happens at request time / via `rift script check`, not here.
         let stub = make_rift_script_stub("rhai", r#"fn other_function(x) { x + 1 }"#);
         let result = validate_stub(&stub, 0);
-        assert!(!result.is_valid(), "Missing should_inject should fail");
-        assert!(result.errors[0].message.contains("should_inject"));
+        assert!(
+            result.is_valid(),
+            "Script without should_inject should validate: {:?}",
+            result.errors
+        );
     }
 
     #[test]
@@ -372,10 +374,12 @@ mod tests {
                     rift: RiftResponseExtension {
                         fault: None,
                         script: Some(RiftScriptConfig {
-                            engine: "rhai".to_string(),
-                            code: r#"fn should_inject(request, flow_store) { #{ inject: false } }"#
-                                .to_string(),
+                            engine: Some("rhai".to_string()),
+                            code: Some(r#"fn respond(ctx) { pass() }"#.to_string()),
+                            file: None,
+                            ref_name: None,
                         }),
+                        templated: false,
                     },
                 }],
                 scenario_name: None,
@@ -393,10 +397,14 @@ mod tests {
                     rift: RiftResponseExtension {
                         fault: None,
                         script: Some(RiftScriptConfig {
-                            engine: "rhai".to_string(),
-                            code: r#"fn should_inject(request, flow_store) { #{ inject: "#
-                                .to_string(), // Invalid
+                            engine: Some("rhai".to_string()),
+                            code: Some(
+                                r#"fn respond(ctx) { http(200, "#.to_string(), // Invalid
+                            ),
+                            file: None,
+                            ref_name: None,
                         }),
+                        templated: false,
                     },
                 }],
                 scenario_name: None,
@@ -417,29 +425,18 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "lua")]
+    // Issue #450: Lua was removed; a `_rift.script` engine of "lua" always fails validation
+    // with an actionable message pointing at the two remaining engines.
     #[test]
-    fn test_valid_lua_script() {
+    fn test_lua_engine_removed() {
         let stub = make_rift_script_stub(
             "lua",
             r#"function should_inject(request, flow_store) return { inject = false } end"#,
         );
         let result = validate_stub(&stub, 0);
-        assert!(
-            result.is_valid(),
-            "Valid Lua script should pass: {:?}",
-            result.errors
-        );
-    }
-
-    #[cfg(feature = "lua")]
-    #[test]
-    fn test_invalid_lua_syntax() {
-        let stub = make_rift_script_stub(
-            "lua",
-            r#"function should_inject(request, flow_store) return { inject = "#, // Missing closing
-        );
-        let result = validate_stub(&stub, 0);
-        assert!(!result.is_valid(), "Invalid Lua syntax should fail");
+        assert!(!result.is_valid(), "lua engine must fail validation");
+        assert!(result.errors[0].message.contains("removed"));
+        assert!(result.errors[0].message.contains("rhai"));
+        assert!(result.errors[0].message.contains("javascript"));
     }
 }

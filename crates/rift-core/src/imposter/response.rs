@@ -9,8 +9,12 @@ use super::types::{
 };
 use crate::behaviors::{
     DecorateError, HasRepeatBehavior, RequestContext, apply_decorate, is_js_config_decorate,
-    rewrite_js_config_to_rhai,
 };
+// Fallback-only (issue #357 Item 6): the real JS `config =>` decorate path is Boa
+// (`execute_mountebank_config_decorate`); this textual transpiler is used only when the
+// `javascript` feature is disabled and no JS engine is available.
+#[cfg(not(feature = "javascript"))]
+use crate::behaviors::rewrite_js_config_to_rhai;
 use crate::imposter::Predicate;
 use std::collections::HashMap;
 
@@ -276,26 +280,35 @@ pub fn create_stub_from_proxy_response(
     }
 }
 
-/// Apply decorate behavior - handles both JavaScript and Rhai scripts
+/// Apply decorate behavior - handles both JavaScript and Rhai scripts.
+///
+/// `imposter_port` identifies the per-imposter state shared with predicate injects and response
+/// injects for the same imposter (issue #355 Item 0) — decorate reads and writes the same
+/// persisted state rather than a throwaway object. `stub_id` tags the script logger's tracing
+/// events with the owning stub, when known (issue #355 AC1).
 pub fn apply_js_or_rhai_decorate(
     script: &str,
     request: &RequestContext,
     body: &str,
     status: u16,
     headers: &mut HashMap<String, String>,
+    imposter_port: u16,
+    stub_id: Option<&str>,
 ) -> Result<(String, u16), DecorateError> {
-    // Mountebank's JS `config =>` convention (issue #191): rewrite simple field access onto the
-    // Rhai request/response maps. Checked before the `function` route since arrow scripts don't
-    // start with "function" and `function(config)` uses the config model, not (request, response).
+    // Only the JS engine call sites below consume `imposter_port`/`stub_id`; without the feature
+    // the parameters would otherwise be unused.
+    #[cfg(not(feature = "javascript"))]
+    let _ = (imposter_port, stub_id);
+
+    // Mountebank's JS `config =>` convention (issue #191). Issue #357 Item 6: every such script
+    // now runs through REAL Boa execution (`execute_mountebank_config_decorate`, which already
+    // backed the `require()` case for issue #305) instead of the lossy textual JS→Rhai
+    // transpiler — one JS contract everywhere, so e.g. `JSON.parse` + real object mutation work.
+    // Checked before the `function` route since arrow scripts don't start with "function" and
+    // `function(config)` uses the config model, not (request, response).
     if is_js_config_decorate(script) {
-        // Issue #305: a `config =>` decorate that `require()`s an external CommonJS module
-        // can't be represented by the lossy Rhai rewrite below (it doesn't run real JS), so
-        // route it through the Boa engine instead, where `require()` actually works.
         #[cfg(feature = "javascript")]
-        // `require(` / `require (` → needs the real JS engine (not the lossy Rhai rewrite). A false
-        // positive only routes a simple decorate through Boa (still correct); a false negative would
-        // fail loudly at Rhai-eval, never silently.
-        if script.contains("require(") || script.contains("require (") {
+        {
             let mb_request = crate::scripting::MountebankRequest {
                 method: request.method.clone(),
                 path: request.path.clone(),
@@ -303,12 +316,35 @@ pub fn apply_js_or_rhai_decorate(
                 headers: request.headers.clone(),
                 body: request.body.clone(),
             };
+            // `execute_mountebank_config_decorate` calls `decorate_fn` as a function value
+            // (`{decorate_fn}(__config)`), so a bare body with no `function`/arrow wrapper (the
+            // "config.response.body = ...;" convention `is_js_config_decorate` also accepts)
+            // must be wrapped into one first.
+            //
+            // B4 (issue #357): detect "already a function value" via START-ANCHORED prefixes (the
+            // same wrapper forms `is_js_config_decorate` recognizes), NOT a substring `=>` test —
+            // a bare body can legitimately contain an inner arrow lambda, e.g.
+            // `config.response.body = JSON.stringify(items.map(x => x.id));`, and a `contains("=>")`
+            // check would then leave it unwrapped, producing `var __fn = <statement>` (a throw).
+            let trimmed = script.trim_start();
+            let already_function_value = trimmed.starts_with("function")
+                || trimmed.starts_with("config =>")
+                || trimmed.starts_with("config=>")
+                || trimmed.starts_with("(config) =>")
+                || trimmed.starts_with("(config)=>");
+            let wrapped_script = if already_function_value {
+                std::borrow::Cow::Borrowed(script)
+            } else {
+                std::borrow::Cow::Owned(format!("function(config) {{ {script} }}"))
+            };
             return match crate::scripting::execute_mountebank_config_decorate(
-                script,
+                &wrapped_script,
                 &mb_request,
                 body,
                 status,
                 headers,
+                imposter_port,
+                stub_id,
             ) {
                 Ok(result) => {
                     for (k, v) in result.headers {
@@ -320,8 +356,14 @@ pub fn apply_js_or_rhai_decorate(
             };
         }
 
-        let rhai_script = rewrite_js_config_to_rhai(script);
-        return apply_decorate(&rhai_script, request, body, status, headers);
+        // No JS engine compiled in (`--no-default-features`): fall back to the textual rewrite
+        // so simple field-access decorates still work, at the cost of real JS semantics
+        // (require(), JSON.parse/stringify on nested values, closures).
+        #[cfg(not(feature = "javascript"))]
+        {
+            let rhai_script = rewrite_js_config_to_rhai(script);
+            return apply_decorate(&rhai_script, request, body, status, headers);
+        }
     }
 
     // Check if it's a JavaScript function declaration
@@ -343,6 +385,8 @@ pub fn apply_js_or_rhai_decorate(
                 body,
                 status,
                 headers,
+                imposter_port,
+                stub_id,
             ) {
                 Ok(result) => {
                     // Update headers from the result
@@ -377,6 +421,14 @@ pub fn apply_js_or_rhai_decorate(
 mod tests {
     use super::*;
 
+    // Allocates a fresh port per test so parallel tests never share `IMPOSTER_STATE` (disjoint
+    // from the range used by `rift-core/src/scripting/js_engine.rs`'s own tests in this binary).
+    fn test_port() -> u16 {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static NEXT: AtomicU32 = AtomicU32::new(41_100);
+        NEXT.fetch_add(1, Ordering::Relaxed) as u16
+    }
+
     // Issue #191: the JS `config =>` decorate convention runs (rewritten to Rhai) end-to-end.
     fn decorate_req() -> RequestContext {
         RequestContext {
@@ -397,6 +449,8 @@ mod tests {
             "original",
             200,
             &mut headers,
+            test_port(),
+            None,
         )
         .unwrap();
         assert_eq!(body, "hello");
@@ -412,6 +466,8 @@ mod tests {
             "original",
             200,
             &mut headers,
+            test_port(),
+            None,
         )
         .unwrap();
         assert_eq!(body, "REQ-BODY");
@@ -437,11 +493,90 @@ mod tests {
             module.display()
         );
         let mut headers = std::collections::HashMap::new();
-        let result =
-            apply_js_or_rhai_decorate(&script, &decorate_req(), "original", 200, &mut headers);
+        let result = apply_js_or_rhai_decorate(
+            &script,
+            &decorate_req(),
+            "original",
+            200,
+            &mut headers,
+            test_port(),
+            None,
+        );
         let _ = std::fs::remove_file(&module);
         let (body, _) = result.expect("require-based config decorate should run");
         assert_eq!(body, "REQUIRE-RAN");
+    }
+
+    // Issue #357 Item 6: every `config =>` decorate now runs through real Boa execution, not the
+    // lossy textual JS→Rhai transpiler. Prove it with something the transpiler's regex-based
+    // `JSON.parse`/`JSON.stringify` handling could never do: parse a NESTED request body and
+    // mutate the resulting object before re-serializing it — `rewrite_js_config_to_rhai`'s
+    // `JSON_FN_RE` only handles a single, non-nested argument (see its doc comment), so this
+    // would previously have been left un-rewritten (`JSON.parse({"nested":...})`, a syntax error).
+    #[cfg(feature = "javascript")]
+    #[test]
+    fn decorate_js_config_real_json_parse_and_mutation_runs_through_boa() {
+        let mut headers = std::collections::HashMap::new();
+        let request = RequestContext {
+            method: "POST".to_string(),
+            path: "/orders".to_string(),
+            query: std::collections::HashMap::new(),
+            headers: std::collections::HashMap::new(),
+            body: Some(r#"{"order": {"id": 42, "items": ["a", "b"]}}"#.to_string()),
+        };
+        let script = r#"config => {
+            var parsed = JSON.parse(config.request.body);
+            parsed.order.itemCount = parsed.order.items.length;
+            delete parsed.order.items;
+            config.response.body = JSON.stringify(parsed);
+        }"#;
+        let (body, _) = apply_js_or_rhai_decorate(
+            script,
+            &request,
+            "original",
+            200,
+            &mut headers,
+            test_port(),
+            None,
+        )
+        .expect("real JS JSON.parse/stringify decorate must execute via Boa");
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(parsed["order"]["id"], 42);
+        assert_eq!(parsed["order"]["itemCount"], 2);
+        assert!(parsed["order"].get("items").is_none());
+    }
+
+    // B4 (issue #357): a BARE-BODY decorate (no `function`/arrow wrapper) that legitimately
+    // contains an INNER arrow lambda must still be wrapped and run — the old `contains("=>")`
+    // detection wrongly classified it as an already-wrapped function value and left it unwrapped,
+    // producing `var __fn = <statement>` (a throw).
+    #[cfg(feature = "javascript")]
+    #[test]
+    fn decorate_bare_body_with_inner_arrow_runs_through_boa() {
+        let mut headers = std::collections::HashMap::new();
+        let request = RequestContext {
+            method: "GET".to_string(),
+            path: "/orders".to_string(),
+            query: std::collections::HashMap::new(),
+            headers: std::collections::HashMap::new(),
+            body: None,
+        };
+        // Bare body (starts with `config.response.`, detected via that prefix), containing an
+        // inner `.map(x => x.id)` arrow.
+        let script =
+            r#"config.response.body = JSON.stringify([{id:1},{id:2},{id:3}].map(x => x.id));"#;
+        let (body, _) = apply_js_or_rhai_decorate(
+            script,
+            &request,
+            "original",
+            200,
+            &mut headers,
+            test_port(),
+            None,
+        )
+        .expect("bare-body decorate with an inner arrow must execute via Boa");
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(parsed, serde_json::json!([1, 2, 3]));
     }
 
     #[test]
@@ -453,6 +588,8 @@ mod tests {
             "original",
             200,
             &mut headers,
+            test_port(),
+            None,
         )
         .unwrap();
         assert_eq!(status, 404);
@@ -469,6 +606,8 @@ mod tests {
             "original",
             200,
             &mut headers,
+            test_port(),
+            None,
         )
         .unwrap();
         assert_eq!(body, "fn");
@@ -485,6 +624,8 @@ mod tests {
             "original",
             200,
             &mut headers,
+            test_port(),
+            None,
         )
         .unwrap();
         assert_eq!(body, "bare");
@@ -499,6 +640,8 @@ mod tests {
             "original",
             200,
             &mut headers,
+            test_port(),
+            None,
         )
         .unwrap();
         assert_eq!(body, "/orders", "existing Rhai decorate must be unchanged");

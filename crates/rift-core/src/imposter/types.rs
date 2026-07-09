@@ -835,6 +835,11 @@ pub struct RiftConfig {
     /// Global script engine configuration
     #[serde(skip_serializing_if = "Option::is_none")]
     pub script_engine: Option<RiftScriptEngineConfig>,
+    /// Named script registry (issue #356): a response script can reference an entry here via
+    /// `{ "ref": "name" }` instead of inlining `code`/`file`. Each entry is itself a `code:` or
+    /// `file:` script — not `ref:` (no chains).
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub scripts: HashMap<String, RiftScriptConfig>,
 }
 
 /// Flow state configuration for Rift extensions
@@ -961,7 +966,7 @@ fn default_idle_timeout() -> u64 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RiftScriptEngineConfig {
-    /// Default script engine: "rhai", "lua", or "javascript"
+    /// Default script engine: "rhai" or "javascript"
     #[serde(default = "default_script_engine")]
     pub default_engine: String,
     /// Script execution timeout in milliseconds
@@ -988,6 +993,12 @@ pub struct RiftResponseExtension {
     /// Script-based response generation
     #[serde(skip_serializing_if = "Option::is_none")]
     pub script: Option<RiftScriptConfig>,
+    /// Opt-in declarative response templating (issue #359): when `true`, `{{ function args |
+    /// filter }}` tokens in the response body and every header value are evaluated (see
+    /// `crate::extensions::template_fn`). Off by default so recorded fixtures containing a
+    /// literal `{{` are served verbatim.
+    #[serde(default)]
+    pub templated: bool,
 }
 
 /// Fault injection configuration for responses
@@ -1049,15 +1060,54 @@ fn default_error_status() -> u16 {
     503
 }
 
-/// Script configuration for response generation
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Script configuration for response generation.
+///
+/// Exactly one of `code`, `file`, or `ref` must be set (issue #356). This is enforced by the
+/// config-time script-resolution pass (`imposter::script_resolve`) rather than at deserialize
+/// time, so a validation error can name the offending stub/registry entry instead of a generic
+/// serde failure — and so existing configs using only `code` keep deserializing unchanged.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct RiftScriptConfig {
-    /// Script engine: "rhai", "lua", or "javascript"
-    #[serde(default = "default_script_engine")]
-    pub engine: String,
-    /// Inline script code
-    pub code: String,
+    /// Script engine: "rhai" or "javascript". When absent, the resolver infers it from
+    /// `file`'s extension (`.rhai`/`.js`; a `.lua` file still resolves to the now-removed "lua"
+    /// engine so it is rejected with a clear error rather than silently mis-run), falling back to
+    /// "rhai" — the legacy default — when neither `engine` nor an inferable extension is present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine: Option<String>,
+    /// Inline script code.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    /// Path to a script file. Resolved relative to the config file's directory for
+    /// `--configfile`/`--datadir` loads, or to `--scripts-dir` for admin-API-created imposters
+    /// (a path that escapes `--scripts-dir` is rejected rather than read).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    /// Name of a `_rift.scripts` registry entry (see [`RiftConfig::scripts`]) to resolve this
+    /// script from. The referenced entry must itself use `code` or `file` — a `ref` chain is a
+    /// validation error.
+    #[serde(default, rename = "ref", skip_serializing_if = "Option::is_none")]
+    pub ref_name: Option<String>,
+}
+
+impl RiftScriptConfig {
+    /// How many of `code`/`file`/`ref` are set. Exactly one is valid; used by both the resolver
+    /// and rift-lint to report "missing source" vs. "multiple sources" distinctly.
+    pub fn source_count(&self) -> usize {
+        [
+            self.code.is_some(),
+            self.file.is_some(),
+            self.ref_name.is_some(),
+        ]
+        .into_iter()
+        .filter(|set| *set)
+        .count()
+    }
+
+    /// True when exactly one of `code`/`file`/`ref` is set.
+    pub fn has_valid_source(&self) -> bool {
+        self.source_count() == 1
+    }
 }
 
 // ============================================================================
@@ -1109,6 +1159,88 @@ mod tests {
         assert_eq!(
             out.get("flowIdSource").and_then(|v| v.as_str()),
             Some("header:X-Mock-Space")
+        );
+    }
+
+    // Issue #356: `code`/`file`/`ref` all deserialize into the right field; `engine` stays
+    // optional (resolution — not deserialize — fills it in).
+    #[test]
+    fn script_config_deserializes_code_file_and_ref_variants() {
+        let code: RiftScriptConfig =
+            serde_json::from_value(json!({ "code": "fn respond() {}" })).unwrap();
+        assert_eq!(code.code.as_deref(), Some("fn respond() {}"));
+        assert_eq!(code.file, None);
+        assert_eq!(code.ref_name, None);
+        assert_eq!(
+            code.engine, None,
+            "engine is not defaulted at deserialize time"
+        );
+
+        let file: RiftScriptConfig =
+            serde_json::from_value(json!({ "file": "scripts/a.rhai" })).unwrap();
+        assert_eq!(file.file.as_deref(), Some("scripts/a.rhai"));
+        assert_eq!(file.code, None);
+
+        let by_ref: RiftScriptConfig =
+            serde_json::from_value(json!({ "ref": "failTwice" })).unwrap();
+        assert_eq!(by_ref.ref_name.as_deref(), Some("failTwice"));
+        assert_eq!(by_ref.code, None);
+    }
+
+    // Issue #356: back-compat — a pre-existing `{ "engine": ..., "code": ... }` config (the shape
+    // before `file`/`ref` existed) still deserializes unchanged.
+    #[test]
+    fn script_config_back_compat_engine_and_code() {
+        let cfg: RiftScriptConfig = serde_json::from_value(json!({
+            "engine": "rhai",
+            "code": "fn respond() {}"
+        }))
+        .unwrap();
+        assert_eq!(cfg.engine.as_deref(), Some("rhai"));
+        assert_eq!(cfg.code.as_deref(), Some("fn respond() {}"));
+        assert!(cfg.has_valid_source());
+    }
+
+    // Issue #356: exactly one of `code`/`file`/`ref` is valid; zero or multiple is not.
+    #[test]
+    fn script_config_source_count_invariant() {
+        let none = RiftScriptConfig::default();
+        assert_eq!(none.source_count(), 0);
+        assert!(!none.has_valid_source());
+
+        let one = RiftScriptConfig {
+            code: Some("x".to_string()),
+            ..Default::default()
+        };
+        assert!(one.has_valid_source());
+
+        let two = RiftScriptConfig {
+            code: Some("x".to_string()),
+            file: Some("y.rhai".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(two.source_count(), 2);
+        assert!(!two.has_valid_source());
+    }
+
+    // Issue #356: `_rift.scripts` registry round-trips and defaults to empty/omitted.
+    #[test]
+    fn rift_config_scripts_registry_round_trips() {
+        let cfg: RiftConfig = serde_json::from_value(json!({
+            "scripts": { "failTwice": { "file": "fail-twice.rhai" } }
+        }))
+        .unwrap();
+        assert_eq!(
+            cfg.scripts.get("failTwice").and_then(|s| s.file.as_deref()),
+            Some("fail-twice.rhai")
+        );
+
+        let empty = RiftConfig::default();
+        assert!(empty.scripts.is_empty());
+        let out = serde_json::to_value(&empty).unwrap();
+        assert!(
+            out.get("scripts").is_none(),
+            "empty registry must be omitted on serialize"
         );
     }
 

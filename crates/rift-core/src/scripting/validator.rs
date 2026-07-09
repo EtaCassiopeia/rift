@@ -1,7 +1,7 @@
 //! Script validator trait and unified error types.
 //!
 //! Provides a common interface for validating scripts across different engines
-//! (Rhai, Lua, JavaScript), enabling consistent validation behavior and error
+//! (Rhai, JavaScript), enabling consistent validation behavior and error
 //! handling throughout the codebase.
 
 use std::error::Error;
@@ -130,7 +130,7 @@ mod tests {
     fn test_script_validation_error_engine() {
         let err = ScriptValidationError::MissingFunction {
             engine: "javascript".to_string(),
-            function: "should_inject".to_string(),
+            function: "respond".to_string(),
         };
         assert_eq!(err.engine(), "javascript");
     }
@@ -138,7 +138,7 @@ mod tests {
     #[test]
     fn test_script_validation_error_message() {
         let err = ScriptValidationError::CompilationError {
-            engine: "lua".to_string(),
+            engine: "javascript".to_string(),
             message: "failed to parse".to_string(),
         };
         assert_eq!(err.message(), "failed to parse");

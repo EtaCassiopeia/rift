@@ -193,8 +193,8 @@ aborts).
 ## Top-Level Fault Response (Mountebank Parity)
 
 Mountebank lets a stub response be a bare `fault` instead of an `is`/`proxy`/`inject` body. Rift
-supports the same shape, and a top-level fault now **resets the connection at the transport level**
-rather than returning an HTTP 502 (Mountebank parity, issue #362):
+supports the same shape, and a top-level fault **resets the connection at the transport level**,
+matching Mountebank's transport-fault semantics:
 
 ```json
 {
@@ -216,9 +216,6 @@ Like `_rift.fault.tcp`, a bare top-level `fault` also forces the whole imposter 
 only**: it is a connection-level event, and aborting a socket mid-stream is incompatible with
 HTTP/2 multiplexing — so an imposter with even one stub returning a top-level `fault` never
 negotiates HTTP/2, regardless of what its other stubs do.
-
-> **Behavior change:** before v0.8.0 a top-level `fault` returned a framed HTTP `502`. It now
-> performs a real connection reset/close, matching Mountebank's transport-fault semantics.
 
 ### Fault Precedence
 
@@ -247,11 +244,15 @@ evaluated. If you want the top-level transport fault, the response must be a bar
 
 ## Scripted Faults
 
-For dynamic fault injection based on request data or state, use the scripting feature.
+For dynamic fault injection based on request data or state, use the scripting feature. Full
+reference (the unified `ctx` object, result constructors, entrypoint placement) lives on the
+[Scripting](./scripting.md#ctx-api) page; this section just shows it applied to fault injection.
 
 ### Rhai Script - Retry Simulation
 
-Fail the first 2 requests, pass through on the 3rd:
+Fail the first 2 requests, pass through on the 3rd. Bare-expression form: the whole script body is
+the `respond(ctx)` function, with `ctx` already in scope, and `http(status, body)` replaces a
+hand-built `#{ inject:, fault: }` map:
 
 ```json
 {
@@ -265,27 +266,7 @@ Fail the first 2 requests, pass through on the 3rd:
       "_rift": {
         "script": {
           "engine": "rhai",
-          "code": "let flow_id = request.headers[\"x-flow-id\"]; if flow_id == () { flow_id = \"default\"; }; let attempts = flow_store.get(flow_id, \"attempts\"); if attempts == () { attempts = 0; }; attempts += 1; flow_store.set(flow_id, \"attempts\", attempts); if attempts <= 2 { #{inject: true, fault: \"error\", status: 503, body: `{\"error\":\"Temporary failure\",\"attempt\":${attempts}}`, headers: #{\"Content-Type\": \"application/json\"}} } else { #{inject: false} }"
-        }
-      }
-    }]
-  }]
-}
-```
-
-### Lua Script - Rate Limiting
-
-```json
-{
-  "_rift": {
-    "flowState": {"backend": "inmemory", "ttlSeconds": 60}
-  },
-  "stubs": [{
-    "responses": [{
-      "_rift": {
-        "script": {
-          "engine": "lua",
-          "code": "function should_inject(request, flow_store)\n  local fid = 'ratelimit'\n  local count = flow_store:increment(fid, 'requests')\n  if count > 100 then\n    return {\n      inject = true,\n      fault = 'error',\n      status = 429,\n      body = '{\"error\":\"Rate limit exceeded\"}',\n      headers = {['Content-Type'] = 'application/json', ['Retry-After'] = '60'}\n    }\n  end\n  return {inject = false}\nend"
+          "code": "let n = ctx.state.incr(\"attempts\"); if n <= 2 { http(503, #{ error: \"Temporary failure\", attempt: n }) } else { pass() }"
         }
       }
     }]
@@ -295,50 +276,19 @@ Fail the first 2 requests, pass through on the 3rd:
 
 ### Script Return Values
 
-Scripts must return a map/table with an `inject` flag:
+`respond(ctx)` returns a result constructor — see [Scripting](./scripting.md#result-constructors)
+for the full reference. The shapes used above, restated:
 
 **Rhai:**
 ```rhai
 // No injection - pass through
-#{ inject: false }
+pass()
 
 // Inject error
-#{
-  inject: true,
-  fault: "error",
-  status: 503,
-  body: "{\"error\": \"Service unavailable\"}",
-  headers: #{ "Content-Type": "application/json" }
-}
+http(503, #{ error: "Service unavailable" })
 
 // Inject latency
-#{
-  inject: true,
-  fault: "latency",
-  duration_ms: 500
-}
-```
-
-**Lua:**
-```lua
--- No injection
-return { inject = false }
-
--- Inject error
-return {
-  inject = true,
-  fault = "error",
-  status = 503,
-  body = '{"error": "Service unavailable"}',
-  headers = { ["Content-Type"] = "application/json" }
-}
-
--- Inject latency
-return {
-  inject = true,
-  fault = "latency",
-  duration_ms = 500
-}
+delay(500)
 ```
 
 ---
@@ -373,7 +323,7 @@ Use scripting to fail a specific number of requests before succeeding:
   "port": 4545,
   "protocol": "http",
   "_rift": {
-    "flowState": {"backend": "inmemory", "ttlSeconds": 300}
+    "flowState": {"backend": "inmemory", "ttlSeconds": 300, "flowIdSource": "header:X-Request-Id"}
   },
   "stubs": [{
     "predicates": [{ "equals": { "path": "/api/resource" } }],
@@ -381,7 +331,7 @@ Use scripting to fail a specific number of requests before succeeding:
       "_rift": {
         "script": {
           "engine": "rhai",
-          "code": "let flow_id = request.headers[\"x-request-id\"]; if flow_id == () { flow_id = \"default\"; }; let attempts = flow_store.increment(flow_id, \"attempts\"); if attempts <= 2 { #{inject: true, fault: \"error\", status: 503, body: `{\"error\":\"Retry later\",\"attempt\":${attempts}}`, headers: #{\"Content-Type\": \"application/json\", \"Retry-After\": \"1\"}} } else { #{inject: false} }"
+          "code": "let attempts = ctx.state.incr(\"attempts\"); if attempts <= 2 { http(503, #{ error: \"Retry later\", attempt: attempts }).header(\"Retry-After\", \"1\") } else { pass() }"
         }
       }
     }]

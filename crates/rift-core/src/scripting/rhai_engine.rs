@@ -1,127 +1,96 @@
-use crate::extensions::flow_state::FlowStore;
+use crate::extensions::flow_state::{CasOutcome, FlowStore};
 use anyhow::{Result, anyhow};
 use rhai::{AST, Dynamic, Engine, Map, Scope};
 use serde_json::Value;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use super::{FaultDecision, ScriptFlowStore, ScriptRequest};
+use super::{
+    FaultDecision, ScriptCtxExtras, ScriptCtxInput, ScriptFlowStore, ScriptRequest,
+    ScriptResponseContext, ScriptResult, ScriptResultBody, entrypoints,
+};
 
 /// Helper function to check if a year is a leap year
 fn is_leap_year(year: u64) -> bool {
     (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400)
 }
 
-/// Create a Rhai Map from a ScriptRequest
-fn create_request_map(request: &ScriptRequest) -> Map {
-    let mut request_map = Map::new();
-    request_map.insert("method".into(), Dynamic::from(request.method.clone()));
-    request_map.insert("path".into(), Dynamic::from(request.path.clone()));
-
-    // Convert headers
-    let mut headers_map = Map::new();
-    for (k, v) in &request.headers {
-        headers_map.insert(k.clone().into(), Dynamic::from(v.clone()));
-    }
-    request_map.insert("headers".into(), Dynamic::from(headers_map));
-
-    // Convert query parameters
-    let mut query_map = Map::new();
-    for (k, v) in &request.query {
-        query_map.insert(k.clone().into(), Dynamic::from(v.clone()));
-    }
-    request_map.insert("query".into(), Dynamic::from(query_map));
-
-    // Convert path parameters
-    let mut path_params_map = Map::new();
-    for (k, v) in &request.path_params {
-        path_params_map.insert(k.clone().into(), Dynamic::from(v.clone()));
-    }
-    request_map.insert("pathParams".into(), Dynamic::from(path_params_map));
-
-    // Convert body
-    request_map.insert("body".into(), json_to_dynamic(request.body.clone()));
-
-    request_map
-}
-
 /// Rhai script engine for fault injection
 ///
-/// # Script Interface
+/// # Script Interface (v2 `ctx` API, issue #357; the pre-1.0 v1 `should_inject` contract was
+/// removed in issue #453)
 ///
-/// Scripts must define a `should_inject` function with the following signature:
+/// Scripts define a `respond` function (or a bare expression with no function declarations at
+/// all) taking a single `ctx` argument:
 ///
 /// ```rhai
-/// fn should_inject(request, flow_store) {
+/// fn respond(ctx) {
 ///     // Your logic here
-///     return #{ inject: false };
+///     pass()
 /// }
 /// ```
 ///
-/// ## Request Object
+/// ## `ctx.request`
 ///
-/// The `request` parameter is a map containing:
-/// - `method` - HTTP method (string): "GET", "POST", "PUT", "DELETE", etc.
-/// - `path` - Request path (string): "/api/users/123"
-/// - `headers` - Map of header name (string) to value (string)
-/// - `body` - Request body (parsed JSON value or null)
-/// - `query` - Map of query parameter name (string) to value (string)
-/// - `pathParams` - Map of path parameters extracted from route patterns
+/// - `ctx.request.method` - HTTP method (string): "GET", "POST", "PUT", "DELETE", etc.
+/// - `ctx.request.path` - Request path (string): "/api/users/123"
+/// - `ctx.request.headers` - Map of (lowercased) header name to value
+/// - `ctx.request.header(name)` - Case-insensitive header getter
+/// - `ctx.request.body` - Raw request body (string)
+/// - `ctx.request.json` - Lazily parsed JSON body (unit if not valid JSON)
+/// - `ctx.request.query` - Map of query parameter name to value
+/// - `ctx.request.pathParams` - Map of path parameters extracted from route patterns
 ///
-/// ## Flow Store Object
+/// ## `ctx.state` (flow-scoped storage)
 ///
-/// The `flow_store` parameter provides state management across requests:
-/// - `flow_store.get(flow_id, key)` - Get a stored value (returns unit if not found)
-/// - `flow_store.set(flow_id, key, value)` - Store a value (returns bool)
-/// - `flow_store.exists(flow_id, key)` - Check if key exists (returns bool)
-/// - `flow_store.delete(flow_id, key)` - Delete a key (returns bool)
-/// - `flow_store.increment(flow_id, key)` - Increment counter (returns i64)
-/// - `flow_store.set_ttl(flow_id, ttl_seconds)` - Set flow expiration (returns bool)
-/// - `flow_store.last_error()` - Take the last flow-store op's error (returns unit if none)
+/// `ctx.state` is already scoped to the current flow id:
+/// - `ctx.state.get(key)` - Get a stored value (returns unit if not found)
+/// - `ctx.state.set(key, value)` - Store a value (returns bool)
+/// - `ctx.state.exists(key)` - Check if key exists (returns bool)
+/// - `ctx.state.delete(key)` - Delete a key (returns bool)
+/// - `ctx.state.incr(key)` - Increment counter (returns i64)
+/// - `ctx.state.get_or(key, default)` - Get a value, or `default` if absent
+/// - `ctx.state.incr_by(key, by)` - Atomic increment by `by`, starting at 0 when absent
+/// - `ctx.state.cas(key, expected, new)` - Atomic compare-and-set
+/// - `ctx.state.ttl(seconds)` - Set flow expiration
+///
+/// `ctx.store.flow(flow_id)` returns the same handle scoped to an arbitrary (not necessarily the
+/// request's own) flow id.
 ///
 /// ## Return Value
 ///
-/// The function must return a map with the fault decision:
+/// The function returns one of the result constructors, or nothing (equivalent to `pass()`):
 ///
 /// ```rhai
 /// // No fault injection
-/// #{ inject: false }
+/// pass()
 ///
 /// // Latency injection
-/// #{ inject: true, fault: "latency", duration_ms: 500 }
+/// delay(500)
 ///
 /// // Error injection
-/// #{ inject: true, fault: "error", status: 503, body: "Service unavailable" }
+/// http(503, "Service unavailable")
 ///
-/// // Error with custom headers
-/// #{
-///     inject: true,
-///     fault: "error",
-///     status: 429,
-///     body: "Rate limited",
-///     headers: #{ "Retry-After": "60" }
-/// }
+/// // Error with custom headers and a JSON body
+/// http(429, #{ error: "Rate limited" }).header("Retry-After", "60")
 /// ```
 ///
 /// ## Example
 ///
 /// ```rhai
-/// fn should_inject(request, flow_store) {
-///     // Rate limit based on flow ID from header
-///     let flow_id = request.headers["x-flow-id"];
-///     if flow_id != () {
-///         let attempts = flow_store.increment(flow_id, "attempts");
-///         if attempts > 3 {
-///             return #{ inject: true, fault: "error", status: 429, body: "Rate limited" };
-///         }
+/// fn respond(ctx) {
+///     // Rate limit based on the resolved flow id
+///     let attempts = ctx.state.incr("attempts");
+///     if attempts > 3 {
+///         return http(429, "Rate limited");
 ///     }
 ///
 ///     // Inject fault for POST requests to specific path
-///     if request.method == "POST" && request.path == "/api/test" {
-///         return #{ inject: true, fault: "latency", duration_ms: 100 };
+///     if ctx.request.method == "POST" && ctx.request.path == "/api/test" {
+///         return delay(100);
 ///     }
 ///
-///     #{ inject: false }
+///     pass()
 /// }
 /// ```
 #[derive(Clone)]
@@ -234,135 +203,551 @@ impl RhaiEngine {
             )
         });
 
+        register_v2_api(&mut engine);
+
         engine
     }
 
+    /// Execute the `respond(ctx)` entrypoint (or bare-expression script) and determine if a fault
+    /// should be injected — see [`ScriptEngine::should_inject_fault`] for the full contract.
     pub fn should_inject_fault(
         &self,
         request: &ScriptRequest,
         flow_store: Arc<dyn FlowStore>,
     ) -> Result<FaultDecision> {
-        let engine = Self::create_engine();
-        let mut scope = Scope::new();
-
-        // Create request map
-        let request_map = create_request_map(request);
-
-        // Create flow_store wrapper
-        let flow_store_wrapper = ScriptFlowStore::new(flow_store);
-
-        // First, evaluate the AST to define the should_inject function
-        engine
-            .run_ast_with_scope(&mut scope, self.ast.as_ref())
-            .map_err(|e| anyhow!("Script execution error: {e}"))?;
-
-        // Now call the should_inject function with request and flow_store arguments
-        let result: Dynamic = engine
-            .call_fn(
-                &mut scope,
-                self.ast.as_ref(),
-                "should_inject",
-                (request_map, flow_store_wrapper),
-            )
-            .map_err(|e| anyhow!("Failed to call should_inject function: {e}"))?;
-
-        // Parse result
-        self.parse_fault_decision(result)
+        self.should_inject_fault_with_ctx(request, flow_store, &ScriptCtxExtras::default())
     }
 
-    fn parse_fault_decision(&self, result: Dynamic) -> Result<FaultDecision> {
-        if result.is_unit() {
-            return Ok(FaultDecision::None);
-        }
-
-        let map = result
-            .try_cast::<Map>()
-            .ok_or_else(|| anyhow!("Script must return a map"))?;
-
-        // Check inject flag
-        let inject = map
-            .get("inject")
-            .and_then(|v| v.as_bool().ok())
-            .unwrap_or(false);
-
-        if !inject {
-            return Ok(FaultDecision::None);
-        }
-
-        // Get fault type
-        let fault_type = map
-            .get("fault")
-            .and_then(|v| v.clone().try_cast::<String>())
-            .ok_or_else(|| anyhow!("Missing 'fault' field"))?;
-
-        match fault_type.as_str() {
-            "latency" => {
-                let duration_ms = map
-                    .get("duration_ms")
-                    .and_then(|v| v.as_int().ok())
-                    .ok_or_else(|| anyhow!("Missing 'duration_ms' for latency fault"))?;
-
-                Ok(FaultDecision::Latency {
-                    duration_ms: duration_ms as u64,
-                    rule_id: self.rule_id.clone(),
-                })
-            }
-            "error" => {
-                let status = map
-                    .get("status")
-                    .and_then(|v| v.as_int().ok())
-                    .ok_or_else(|| anyhow!("Missing 'status' for error fault"))?;
-
-                let body = map
-                    .get("body")
-                    .map(|v| {
-                        if let Some(s) = v.clone().try_cast::<String>() {
-                            s
-                        } else {
-                            match v.clone().try_cast::<Map>() {
-                                Some(m) => {
-                                    // Convert map to JSON string
-                                    serde_json::to_string(&dynamic_to_json(Dynamic::from(m)))
-                                        .unwrap_or_else(|_| "{}".to_string())
-                                }
-                                _ => {
-                                    format!("{v}")
-                                }
-                            }
-                        }
-                    })
-                    .unwrap_or_else(|| "{}".to_string());
-
-                // Extract optional headers map
-                let mut headers = std::collections::HashMap::new();
-                if let Some(headers_value) = map.get("headers")
-                    && let Some(headers_map) = headers_value.clone().try_cast::<Map>()
-                {
-                    for (key, value) in headers_map {
-                        // Try to convert value to string
-                        let value_str = if let Some(s) = value.clone().try_cast::<String>() {
-                            s
-                        } else {
-                            format!("{value}")
-                        };
-                        headers.insert(key.to_string(), value_str);
-                    }
-                }
-
-                Ok(FaultDecision::Error {
-                    status: status as u16,
-                    body,
-                    rule_id: self.rule_id.clone(),
-                    headers,
-                })
-            }
-            _ => Err(anyhow!("Unknown fault type: {fault_type}")),
-        }
+    /// As [`Self::should_inject_fault`], but with real `ctx.flowId`/`ctx.stub` context (issue
+    /// #357 Item 1).
+    pub fn should_inject_fault_with_ctx(
+        &self,
+        request: &ScriptRequest,
+        flow_store: Arc<dyn FlowStore>,
+        extra: &ScriptCtxExtras,
+    ) -> Result<FaultDecision> {
+        let engine = Self::create_engine();
+        let ctx_input = extra.build_ctx_input(request);
+        call_respond(
+            &engine,
+            self.ast.as_ref(),
+            &ctx_input,
+            flow_store,
+            &self.rule_id,
+        )
     }
 }
 
-/// Public function to execute Rhai script with a reusable engine (for script pool)
-/// This is used by the script_pool module to execute scripts efficiently
+/// Register the v2 `ctx` API (issue #357 Items 1/3) on an [`Engine`]: `ctx.state`/`ctx.store`
+/// (flow-store handles), `ctx.logger`, the `http`/`delay`/`reset`/`pass` result constructors, and
+/// a case-insensitive `.header(name)` getter usable on `ctx.request`/`ctx.response`. Shared by
+/// `RhaiEngine::create_engine` so every caller (pooled, bounded, direct) gets the same API.
+fn register_v2_api(engine: &mut Engine) {
+    engine
+        .register_type::<RhaiStateHandle>()
+        .register_fn("get", RhaiStateHandle::get)
+        .register_fn("set", RhaiStateHandle::set)
+        .register_fn("incr", RhaiStateHandle::incr)
+        .register_fn("exists", RhaiStateHandle::exists)
+        .register_fn("delete", RhaiStateHandle::delete)
+        .register_fn("get_or", RhaiStateHandle::get_or)
+        .register_fn("incr_by", RhaiStateHandle::incr_by)
+        .register_fn("cas", RhaiStateHandle::cas)
+        .register_fn("ttl", RhaiStateHandle::ttl);
+
+    engine
+        .register_type::<RhaiStoreHandle>()
+        .register_fn("flow", RhaiStoreHandle::flow);
+
+    engine
+        .register_type::<RhaiLogger>()
+        .register_fn("debug", RhaiLogger::debug)
+        .register_fn("info", RhaiLogger::info)
+        .register_fn("warn", RhaiLogger::warn)
+        .register_fn("error", RhaiLogger::error);
+
+    engine
+        .register_type::<RhaiScriptResult>()
+        .register_fn("header", RhaiScriptResult::header);
+
+    engine.register_fn("http", |status: i64| {
+        RhaiScriptResult(ScriptResult::http(clamp_u16(status), None))
+    });
+    engine.register_fn("http", |status: i64, body: Dynamic| {
+        RhaiScriptResult(ScriptResult::http(
+            clamp_u16(status),
+            Some(dynamic_to_script_result_body(body)),
+        ))
+    });
+    engine.register_fn("delay", |ms: i64| {
+        RhaiScriptResult(ScriptResult::Delay(ms.max(0) as u64))
+    });
+    engine.register_fn("reset", || RhaiScriptResult(ScriptResult::Reset));
+    engine.register_fn("pass", || RhaiScriptResult(ScriptResult::Pass));
+
+    // `ctx.request.header("X-Flow-Id")` / `ctx.response.header(...)`: case-insensitive lookup
+    // into the receiver map's own `headers` field. Registered generically on `Map` (Rhai method
+    // calls dispatch on the receiver's runtime type), so it's a harmless no-op on any other map
+    // that doesn't happen to carry a `headers` key.
+    engine.register_fn("header", |m: &mut Map, name: &str| -> Dynamic {
+        let Some(headers_val) = m.get("headers") else {
+            return Dynamic::UNIT;
+        };
+        let Some(headers_map) = headers_val.clone().try_cast::<Map>() else {
+            return Dynamic::UNIT;
+        };
+        headers_map
+            .iter()
+            .find(|(k, _)| k.as_str().eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.clone())
+            .unwrap_or(Dynamic::UNIT)
+    });
+}
+
+fn clamp_u16(n: i64) -> u16 {
+    n.clamp(0, i64::from(u16::MAX)) as u16
+}
+
+fn dynamic_to_script_result_body(value: Dynamic) -> ScriptResultBody {
+    if let Some(s) = value.clone().try_cast::<String>() {
+        ScriptResultBody::Str(s)
+    } else {
+        ScriptResultBody::Json(dynamic_to_json(value))
+    }
+}
+
+/// Flow-state handle bound to one flow id — `ctx.state` and the value returned by
+/// `ctx.store.flow(id)` (issue #357 Item 1). Wraps `ScriptFlowStore` so every call omits the
+/// `flow_id` argument; also carries the atomic ops (`get_or`/`incr_by`/`cas`/`ttl`, issue #358).
+#[derive(Clone)]
+pub struct RhaiStateHandle {
+    inner: ScriptFlowStore,
+    flow_id: String,
+}
+
+impl RhaiStateHandle {
+    fn new(store: Arc<dyn FlowStore>, flow_id: String) -> Self {
+        Self {
+            // `ctx.state` is always fail-loud (issue #358).
+            inner: ScriptFlowStore::new(store),
+            flow_id,
+        }
+    }
+
+    pub fn get(&mut self, key: String) -> std::result::Result<Dynamic, Box<rhai::EvalAltResult>> {
+        self.inner.get(self.flow_id.clone(), key)
+    }
+
+    pub fn set(
+        &mut self,
+        key: String,
+        value: Dynamic,
+    ) -> std::result::Result<bool, Box<rhai::EvalAltResult>> {
+        self.inner.set(self.flow_id.clone(), key, value)
+    }
+
+    pub fn incr(&mut self, key: String) -> std::result::Result<i64, Box<rhai::EvalAltResult>> {
+        self.inner.increment(self.flow_id.clone(), key)
+    }
+
+    pub fn exists(&mut self, key: String) -> std::result::Result<bool, Box<rhai::EvalAltResult>> {
+        self.inner.exists(self.flow_id.clone(), key)
+    }
+
+    pub fn delete(&mut self, key: String) -> std::result::Result<bool, Box<rhai::EvalAltResult>> {
+        self.inner.delete(self.flow_id.clone(), key)
+    }
+
+    /// Value or `default` if the key is absent (issue #358) — kills the
+    /// `if v == () { v = 0; }` idiom. A store failure always raises (fail-loud).
+    pub fn get_or(
+        &mut self,
+        key: String,
+        default: Dynamic,
+    ) -> std::result::Result<Dynamic, Box<rhai::EvalAltResult>> {
+        self.inner.get_or(self.flow_id.clone(), key, default)
+    }
+
+    /// Atomic increment by `by`, starting at 0 when absent (issue #358). Always fail-loud.
+    pub fn incr_by(
+        &mut self,
+        key: String,
+        by: i64,
+    ) -> std::result::Result<i64, Box<rhai::EvalAltResult>> {
+        self.inner.increment_by(self.flow_id.clone(), key, by)
+    }
+
+    /// Atomic compare-and-set (issue #358, #311). Returns an object map — `#{"applied": true}` on
+    /// success, or `#{"applied": false, "current": <value-or-unit>}` on conflict — deliberately an
+    /// object rather than a bare value so "conflict, current value happens to be `true`" can never
+    /// be confused with "applied". Always fail-loud.
+    pub fn cas(
+        &mut self,
+        key: String,
+        expected: Dynamic,
+        new: Dynamic,
+    ) -> std::result::Result<Dynamic, Box<rhai::EvalAltResult>> {
+        let outcome = self.inner.cas(self.flow_id.clone(), key, expected, new)?;
+        Ok(cas_outcome_to_dynamic(outcome))
+    }
+
+    /// Per-flow TTL override in seconds (issue #358). Always fail-loud.
+    pub fn ttl(&mut self, seconds: i64) -> std::result::Result<bool, Box<rhai::EvalAltResult>> {
+        self.inner.ttl(self.flow_id.clone(), seconds)
+    }
+}
+
+/// Convert a [`CasOutcome`] to the Rhai return shape for `ctx.state.cas()` (issue #358): an object
+/// map with an `applied` flag and (on conflict) the winning `current` value, so success and
+/// conflict are always structurally distinguishable — never just a bare value that could
+/// coincidentally equal a "success" sentinel.
+fn cas_outcome_to_dynamic(outcome: CasOutcome) -> Dynamic {
+    let mut map = Map::new();
+    match outcome {
+        CasOutcome::Applied => {
+            map.insert("applied".into(), Dynamic::from(true));
+            map.insert("current".into(), Dynamic::UNIT);
+        }
+        CasOutcome::Conflict(current) => {
+            map.insert("applied".into(), Dynamic::from(false));
+            map.insert(
+                "current".into(),
+                current.map(json_to_dynamic).unwrap_or(Dynamic::UNIT),
+            );
+        }
+    }
+    Dynamic::from(map)
+}
+
+/// `ctx.store`: the flow-store escape hatch (issue #357 Item 1) — `.flow(id)` returns a handle
+/// scoped to an arbitrary (not necessarily the request's own) flow id.
+#[derive(Clone)]
+pub struct RhaiStoreHandle {
+    store: Arc<dyn FlowStore>,
+}
+
+impl RhaiStoreHandle {
+    fn new(store: Arc<dyn FlowStore>) -> Self {
+        Self { store }
+    }
+
+    pub fn flow(&mut self, flow_id: String) -> RhaiStateHandle {
+        RhaiStateHandle::new(Arc::clone(&self.store), flow_id)
+    }
+}
+
+/// `ctx.logger`: real `debug`/`info`/`warn`/`error`, routed to `tracing` at target
+/// `"rift::script"` (issue #357 Item 1, reusing P1's logging target — issue #355).
+#[derive(Clone)]
+pub struct RhaiLogger {
+    port: u16,
+    stub_id: Option<String>,
+}
+
+impl RhaiLogger {
+    fn log(&self, level: tracing::Level, message: &str) {
+        let port = self.port;
+        let stub_id = self.stub_id.as_deref().unwrap_or("");
+        match level {
+            tracing::Level::DEBUG => {
+                tracing::debug!(target: "rift::script", port, stub_id, "{message}")
+            }
+            tracing::Level::INFO => {
+                tracing::info!(target: "rift::script", port, stub_id, "{message}")
+            }
+            tracing::Level::WARN => {
+                tracing::warn!(target: "rift::script", port, stub_id, "{message}")
+            }
+            _ => tracing::error!(target: "rift::script", port, stub_id, "{message}"),
+        }
+    }
+
+    pub fn debug(&mut self, message: String) {
+        self.log(tracing::Level::DEBUG, &message);
+    }
+    pub fn info(&mut self, message: String) {
+        self.log(tracing::Level::INFO, &message);
+    }
+    pub fn warn(&mut self, message: String) {
+        self.log(tracing::Level::WARN, &message);
+    }
+    pub fn error(&mut self, message: String) {
+        self.log(tracing::Level::ERROR, &message);
+    }
+}
+
+/// The v2 result-constructor builder (issue #357 Item 3): `http()`/`delay()`/`reset()`/`pass()`
+/// all produce one of these; `.header(k, v)` mutates and returns a clone for chaining (Rhai's
+/// builder idiom — a `()`-returning method can't be chained).
+#[derive(Clone)]
+pub struct RhaiScriptResult(pub ScriptResult);
+
+impl RhaiScriptResult {
+    pub fn header(&mut self, key: String, value: String) -> Self {
+        self.0.add_header(key, value);
+        self.clone()
+    }
+}
+
+/// Run one v2 entrypoint (`respond`/`matches`/`transform`/`delay`, issue #357 Item 2): a function
+/// named `entrypoint` → call it with `ctx`. Else (bare-expression form) → evaluate the whole
+/// script with `ctx` in scope and use the tail expression's value.
+fn run_entrypoint(
+    engine: &Engine,
+    ast: &AST,
+    entrypoint: &str,
+    ctx_input: &ScriptCtxInput,
+    flow_store: Arc<dyn FlowStore>,
+) -> Result<Dynamic> {
+    let mut scope = Scope::new();
+    let ctx_map = build_ctx_map(ctx_input, flow_store);
+
+    let has_named = ast.iter_functions().any(|f| f.name == entrypoint);
+    if has_named {
+        engine
+            .run_ast_with_scope(&mut scope, ast)
+            .map_err(|e| anyhow!("Script execution error: {e}"))?;
+        let result: Dynamic = engine
+            .call_fn(&mut scope, ast, entrypoint, (ctx_map,))
+            .map_err(|e| anyhow!("Failed to call {entrypoint}(ctx): {e}"))?;
+        Ok(result)
+    } else {
+        // Bare-expression script (issue #357 Item 2): the whole body IS the function, with `ctx`
+        // in scope; its tail expression is the return value (Rhai's normal "eval" semantics).
+        let has_any_function = ast.iter_functions().next().is_some();
+        scope.push("ctx", ctx_map);
+        let result: Dynamic = engine
+            .eval_ast_with_scope(&mut scope, ast)
+            .map_err(|e| anyhow!("Script execution error: {e}"))?;
+        // B1 (issue #357, "nothing fails silently"): a script that declares function(s) but none
+        // is the requested entrypoint and whose top-level completion value is unit almost
+        // certainly has a MISNAMED entrypoint (e.g. `fn respnod(ctx)`). Falling back to the
+        // bare-expression path would silently yield `None` — a normal response served with no
+        // sign the script never ran. Surface it as an explicit error instead. A genuine bare
+        // expression is still fine: it either has no function declarations, or produces a
+        // non-unit value.
+        if result.is_unit() && has_any_function {
+            return Err(anyhow!(
+                "script defines function(s) but none is the `{entrypoint}` entrypoint \
+                 (and there is no bare expression to evaluate); did you mean `{entrypoint}`?"
+            ));
+        }
+        Ok(result)
+    }
+}
+
+fn dynamic_to_fault_decision(result: Dynamic, rule_id: &str) -> Result<FaultDecision> {
+    if result.is_unit() {
+        return Ok(FaultDecision::None);
+    }
+    let script_result = result.try_cast::<RhaiScriptResult>().ok_or_else(|| {
+        anyhow!("respond(ctx) must return http(...)/delay(...)/reset()/pass() or nothing")
+    })?;
+    Ok(script_result.0.into_fault_decision(rule_id))
+}
+
+fn dynamic_to_matches_bool(result: Dynamic) -> bool {
+    result.as_bool().unwrap_or(false)
+}
+
+fn dynamic_to_delay_ms(result: Dynamic) -> Result<u64> {
+    if let Ok(n) = result.as_int() {
+        Ok(n.max(0) as u64)
+    } else if let Ok(f) = result.as_float() {
+        Ok(f.max(0.0) as u64)
+    } else {
+        Err(anyhow!("delay(ctx) must return a number of milliseconds"))
+    }
+}
+
+fn dynamic_to_transform_result(result: Dynamic) -> Result<Option<ScriptResult>> {
+    if result.is_unit() {
+        return Ok(None);
+    }
+    let script_result = result
+        .try_cast::<RhaiScriptResult>()
+        .ok_or_else(|| anyhow!("transform(ctx) must return http(...)/pass() or nothing"))?;
+    Ok(Some(script_result.0))
+}
+
+/// `respond(ctx)` (issue #357 Item 2): the response-script entrypoint.
+pub fn call_respond(
+    engine: &Engine,
+    ast: &AST,
+    ctx_input: &ScriptCtxInput,
+    flow_store: Arc<dyn FlowStore>,
+    rule_id: &str,
+) -> Result<FaultDecision> {
+    let result = run_entrypoint(engine, ast, entrypoints::RESPOND, ctx_input, flow_store)?;
+    dynamic_to_fault_decision(result, rule_id)
+}
+
+/// `matches(ctx)` (issue #357 Item 2): the predicate-script entrypoint, returns a bool.
+pub fn call_matches(
+    engine: &Engine,
+    ast: &AST,
+    ctx_input: &ScriptCtxInput,
+    flow_store: Arc<dyn FlowStore>,
+) -> Result<bool> {
+    let result = run_entrypoint(engine, ast, entrypoints::MATCHES, ctx_input, flow_store)?;
+    Ok(dynamic_to_matches_bool(result))
+}
+
+/// `transform(ctx)` (issue #357 Item 2): the decorate-behavior entrypoint. Returns `None` when
+/// the script returns nothing (no change to the response); `Some(result)` when it returns an
+/// `http(...)`/`pass()` result constructor describing the new response. NOTE: unlike a true
+/// in-place `ctx.response` mutation, this iteration requires the new response to be *returned* —
+/// see the module-level doc for why in-place sharing isn't guaranteed across engines yet.
+pub fn call_transform(
+    engine: &Engine,
+    ast: &AST,
+    ctx_input: &ScriptCtxInput,
+    flow_store: Arc<dyn FlowStore>,
+) -> Result<Option<ScriptResult>> {
+    let result = run_entrypoint(engine, ast, entrypoints::TRANSFORM, ctx_input, flow_store)?;
+    dynamic_to_transform_result(result)
+}
+
+/// `delay(ctx)` (issue #357 Item 2): the wait-behavior entrypoint, returns a millisecond count.
+pub fn call_delay(
+    engine: &Engine,
+    ast: &AST,
+    ctx_input: &ScriptCtxInput,
+    flow_store: Arc<dyn FlowStore>,
+) -> Result<u64> {
+    let result = run_entrypoint(engine, ast, entrypoints::DELAY, ctx_input, flow_store)?;
+    dynamic_to_delay_ms(result)
+}
+
+fn header_map_lowercased(headers: &std::collections::HashMap<String, String>) -> Map {
+    let mut m = Map::new();
+    for (k, v) in headers {
+        m.insert(k.to_ascii_lowercase().into(), Dynamic::from(v.clone()));
+    }
+    m
+}
+
+/// Parse `raw` as JSON for `ctx.request.json`/`ctx.response.json` (issue #357 Item 1): valid JSON
+/// (including the literal `null`) or a parse failure both yield `Dynamic::UNIT` — Rhai's "nothing"
+/// — since a `null` body and a non-JSON body are indistinguishable at this field's use sites.
+fn parse_json_or_unit(raw: &str) -> Dynamic {
+    serde_json::from_str::<Value>(raw)
+        .map(json_to_dynamic)
+        .unwrap_or(Dynamic::UNIT)
+}
+
+fn build_request_ctx_map(request: &ScriptRequest) -> Map {
+    let mut m = Map::new();
+    m.insert("method".into(), Dynamic::from(request.method.clone()));
+    m.insert("path".into(), Dynamic::from(request.path.clone()));
+
+    let mut path_params = Map::new();
+    for (k, v) in &request.path_params {
+        path_params.insert(k.clone().into(), Dynamic::from(v.clone()));
+    }
+    m.insert("pathParams".into(), Dynamic::from(path_params));
+
+    let mut query = Map::new();
+    for (k, v) in &request.query {
+        query.insert(k.clone().into(), Dynamic::from(v.clone()));
+    }
+    m.insert("query".into(), Dynamic::from(query));
+
+    m.insert(
+        "headers".into(),
+        Dynamic::from(header_map_lowercased(&request.headers)),
+    );
+
+    // ctx.request.body is always the raw string (issue #357 Item 1); fall back to
+    // re-serializing the parsed `body` for callers that only populated that field.
+    let raw = request.raw_body.clone().unwrap_or_else(|| {
+        if request.body.is_null() {
+            String::new()
+        } else {
+            serde_json::to_string(&request.body).unwrap_or_default()
+        }
+    });
+    m.insert("json".into(), parse_json_or_unit(&raw));
+    m.insert("body".into(), Dynamic::from(raw));
+
+    m
+}
+
+fn build_response_ctx_map(response: &ScriptResponseContext) -> Map {
+    let mut m = Map::new();
+    m.insert("status".into(), Dynamic::from(response.status as i64));
+    m.insert(
+        "headers".into(),
+        Dynamic::from(header_map_lowercased(&response.headers)),
+    );
+    m.insert("json".into(), parse_json_or_unit(&response.body));
+    m.insert("body".into(), Dynamic::from(response.body.clone()));
+    m
+}
+
+fn build_stub_ctx_map(stub: &super::ScriptStubContext) -> Map {
+    let mut m = Map::new();
+    m.insert(
+        "scenarioName".into(),
+        stub.scenario_name
+            .clone()
+            .map_or(Dynamic::UNIT, Dynamic::from),
+    );
+    m.insert(
+        "scenarioState".into(),
+        stub.scenario_state
+            .clone()
+            .map_or(Dynamic::UNIT, Dynamic::from),
+    );
+    m.insert(
+        "id".into(),
+        stub.stub_id.clone().map_or(Dynamic::UNIT, Dynamic::from),
+    );
+    m
+}
+
+/// Build the v2 `ctx` map (issue #357 Item 1): identical field names/semantics across engines —
+/// see the doc comment on [`ScriptCtxInput`].
+fn build_ctx_map(input: &ScriptCtxInput, flow_store: Arc<dyn FlowStore>) -> Map {
+    let mut ctx = Map::new();
+    ctx.insert(
+        "request".into(),
+        Dynamic::from(build_request_ctx_map(input.request)),
+    );
+    if let Some(resp) = &input.response {
+        ctx.insert(
+            "response".into(),
+            Dynamic::from(build_response_ctx_map(resp)),
+        );
+    }
+    ctx.insert("flowId".into(), Dynamic::from(input.flow_id.clone()));
+    ctx.insert(
+        "stub".into(),
+        Dynamic::from(build_stub_ctx_map(&input.stub)),
+    );
+    ctx.insert(
+        "state".into(),
+        Dynamic::from(RhaiStateHandle::new(
+            Arc::clone(&flow_store),
+            input.flow_id.clone(),
+        )),
+    );
+    ctx.insert(
+        "store".into(),
+        Dynamic::from(RhaiStoreHandle::new(Arc::clone(&flow_store))),
+    );
+    ctx.insert(
+        "logger".into(),
+        Dynamic::from(RhaiLogger {
+            port: input.port,
+            stub_id: input.stub.stub_id.clone(),
+        }),
+    );
+    ctx
+}
+
+/// Public function to execute Rhai script with a reusable engine (for script pool); `ctx` gets
+/// best-effort defaults since the pool has no imposter context here.
 pub fn execute_rhai_with_engine(
     engine: &Engine,
     ast: &Arc<AST>,
@@ -370,122 +755,8 @@ pub fn execute_rhai_with_engine(
     flow_store: Arc<dyn FlowStore>,
     rule_id: &str,
 ) -> Result<FaultDecision> {
-    let mut scope = Scope::new();
-
-    // Create request map
-    let request_map = create_request_map(request);
-
-    // Create flow_store wrapper
-    let flow_store_wrapper = ScriptFlowStore::new(flow_store);
-
-    // First, evaluate the AST to define the should_inject function
-    engine
-        .run_ast_with_scope(&mut scope, ast)
-        .map_err(|e| anyhow!("Script execution error: {e}"))?;
-
-    // Now call the should_inject function with request and flow_store arguments
-    let result: Dynamic = engine
-        .call_fn(
-            &mut scope,
-            ast,
-            "should_inject",
-            (request_map, flow_store_wrapper),
-        )
-        .map_err(|e| anyhow!("Failed to call should_inject function: {e}"))?;
-
-    // Parse result
-    parse_fault_decision_with_rule_id(result, rule_id)
-}
-
-/// Helper to parse fault decision with a given rule_id
-fn parse_fault_decision_with_rule_id(result: Dynamic, rule_id: &str) -> Result<FaultDecision> {
-    if result.is_unit() {
-        return Ok(FaultDecision::None);
-    }
-
-    let map = result
-        .try_cast::<Map>()
-        .ok_or_else(|| anyhow!("Script must return a map"))?;
-
-    // Check inject flag
-    let inject = map
-        .get("inject")
-        .and_then(|v| v.as_bool().ok())
-        .unwrap_or(false);
-
-    if !inject {
-        return Ok(FaultDecision::None);
-    }
-
-    // Get fault type
-    let fault_type = map
-        .get("fault")
-        .and_then(|v| v.clone().try_cast::<String>())
-        .ok_or_else(|| anyhow!("Missing 'fault' field"))?;
-
-    match fault_type.as_str() {
-        "latency" => {
-            let duration_ms = map
-                .get("duration_ms")
-                .and_then(|v| v.as_int().ok())
-                .ok_or_else(|| anyhow!("Missing 'duration_ms' for latency fault"))?;
-
-            Ok(FaultDecision::Latency {
-                duration_ms: duration_ms as u64,
-                rule_id: rule_id.to_string(),
-            })
-        }
-        "error" => {
-            let status = map
-                .get("status")
-                .and_then(|v| v.as_int().ok())
-                .ok_or_else(|| anyhow!("Missing 'status' for error fault"))?;
-
-            let body = map
-                .get("body")
-                .map(|v| {
-                    if let Some(s) = v.clone().try_cast::<String>() {
-                        s
-                    } else {
-                        match v.clone().try_cast::<Map>() {
-                            Some(m) => {
-                                // Convert map to JSON string
-                                serde_json::to_string(&dynamic_to_json(Dynamic::from(m)))
-                                    .unwrap_or_else(|_| "{}".to_string())
-                            }
-                            _ => {
-                                format!("{v}")
-                            }
-                        }
-                    }
-                })
-                .unwrap_or_else(|| "{}".to_string());
-
-            // Extract optional headers map
-            let mut headers = std::collections::HashMap::new();
-            if let Some(headers_value) = map.get("headers")
-                && let Some(headers_map) = headers_value.clone().try_cast::<Map>()
-            {
-                for (key, value) in headers_map {
-                    // Try to convert value to string
-                    let value_str = if let Some(s) = value.clone().try_cast::<String>() {
-                        s
-                    } else {
-                        format!("{value}")
-                    };
-                    headers.insert(key.to_string(), value_str);
-                }
-            }
-
-            Ok(FaultDecision::Error {
-                status: status as u16,
-                body,
-                rule_id: rule_id.to_string(),
-                headers,
-            })
-        }
-        _ => Err(anyhow!("Unknown fault type: {fault_type}")),
-    }
+    let ctx_input = ScriptCtxExtras::default().build_ctx_input(request);
+    call_respond(engine, ast, &ctx_input, flow_store, rule_id)
 }
 
 // Helper functions to convert between Rhai Dynamic and serde_json::Value
@@ -546,18 +817,23 @@ pub(super) fn dynamic_to_json(value: Dynamic) -> Value {
     }
 }
 
-/// Run a Rhai `should_inject` with a wall-clock interrupt hook (issue #308). While the AST
+/// Run a Rhai `respond(ctx)` with a wall-clock interrupt hook (issue #308). While the AST
 /// evaluates, Rhai calls the registered `on_progress` callback periodically; when `abort`
 /// is set (by the caller's deadline), it returns `Some(_)`, terminating execution with an
 /// error — the same mechanism the pooled path uses (#172).
+///
+/// The AST is compiled through the content-addressed cache (issue #356): repeated requests for
+/// the same `code` (e.g. several stubs `ref:`-ing the same registry entry, or repeated requests
+/// against the same stub) reuse the compiled AST instead of recompiling every call.
 pub fn run_should_inject_with_abort_rhai(
     code: &str,
     rule_id: &str,
     request: &ScriptRequest,
     flow_store: Arc<dyn FlowStore>,
     abort: &Arc<AtomicBool>,
+    ctx_extra: &ScriptCtxExtras,
 ) -> Result<FaultDecision> {
-    let compiled = RhaiEngine::new(code, rule_id)?;
+    let ast = super::compiled_cache::cached_rhai_ast(code)?;
     let mut engine = RhaiEngine::create_engine();
     let flag = Arc::clone(abort);
     engine.on_progress(move |_ops| {
@@ -567,7 +843,8 @@ pub fn run_should_inject_with_abort_rhai(
             None
         }
     });
-    execute_rhai_with_engine(&engine, compiled.ast(), request, flow_store, rule_id)
+    let ctx_input = ctx_extra.build_ctx_input(request);
+    call_respond(&engine, &ast, &ctx_input, flow_store, rule_id)
 }
 
 #[cfg(test)]
@@ -579,18 +856,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_simple_fault_injection() {
-        // New unified pattern: define should_inject(request, flow_store) function
         let script = r#"
-            fn should_inject(request, flow_store) {
-                if request.method == "POST" {
-                    return #{
-                        inject: true,
-                        fault: "error",
-                        status: 503,
-                        body: "Service unavailable"
-                    };
+            fn respond(ctx) {
+                if ctx.request.method == "POST" {
+                    return http(503, "Service unavailable");
                 }
-                #{ inject: false }
+                pass()
             }
         "#;
 
@@ -598,6 +869,7 @@ mod tests {
         let store: Arc<dyn FlowStore> = Arc::new(InMemoryFlowStore::new(300));
 
         let request = ScriptRequest {
+            raw_body: None,
             method: "POST".to_string(),
             path: "/test".to_string(),
             headers: HashMap::new(),
@@ -627,12 +899,8 @@ mod tests {
     #[tokio::test]
     async fn test_latency_fault() {
         let script = r#"
-            fn should_inject(request, flow_store) {
-                #{
-                    inject: true,
-                    fault: "latency",
-                    duration_ms: 500
-                }
+            fn respond(ctx) {
+                delay(500)
             }
         "#;
 
@@ -640,6 +908,7 @@ mod tests {
         let store: Arc<dyn FlowStore> = Arc::new(InMemoryFlowStore::new(300));
 
         let request = ScriptRequest {
+            raw_body: None,
             method: "GET".to_string(),
             path: "/api/test".to_string(),
             headers: HashMap::new(),
@@ -665,20 +934,14 @@ mod tests {
     #[tokio::test]
     async fn test_flow_store_increment() {
         let script = r#"
-            fn should_inject(request, flow_store) {
-                let flow_id = request.headers["x-flow-id"];
-                let attempts = flow_store.increment(flow_id, "attempts");
+            fn respond(ctx) {
+                let attempts = ctx.state.incr("attempts");
 
                 if attempts <= 2 {
-                    return #{
-                        inject: true,
-                        fault: "error",
-                        status: 503,
-                        body: "Retry later"
-                    };
+                    return http(503, "Retry later");
                 }
 
-                #{ inject: false }
+                pass()
             }
         "#;
 
@@ -689,6 +952,7 @@ mod tests {
         headers.insert("x-flow-id".to_string(), "flow123".to_string());
 
         let request = ScriptRequest {
+            raw_body: None,
             method: "GET".to_string(),
             path: "/test".to_string(),
             headers: headers.clone(),
@@ -717,18 +981,14 @@ mod tests {
     #[tokio::test]
     async fn test_header_based_routing() {
         let script = r#"
-            fn should_inject(request, flow_store) {
-                let user_id = request.headers["x-user-id"];
+            fn respond(ctx) {
+                let user_id = ctx.request.header("x-user-id");
 
                 if user_id.starts_with("beta-") {
-                    return #{
-                        inject: true,
-                        fault: "latency",
-                        duration_ms: 1000
-                    };
+                    return delay(1000);
                 }
 
-                #{ inject: false }
+                pass()
             }
         "#;
 
@@ -740,6 +1000,7 @@ mod tests {
         headers1.insert("x-user-id".to_string(), "beta-user-123".to_string());
 
         let request1 = ScriptRequest {
+            raw_body: None,
             method: "GET".to_string(),
             path: "/test".to_string(),
             headers: headers1,
@@ -758,6 +1019,7 @@ mod tests {
         headers2.insert("x-user-id".to_string(), "regular-user-456".to_string());
 
         let request2 = ScriptRequest {
+            raw_body: None,
             method: "GET".to_string(),
             path: "/test".to_string(),
             headers: headers2,
@@ -775,16 +1037,11 @@ mod tests {
         // This test verifies that AST is wrapped in Arc and can be reused
         // across multiple executions with a reusable engine (Day 3 feature)
         let script = r#"
-            fn should_inject(request, flow_store) {
-                if request.path == "/cache-test" {
-                    return #{
-                        inject: true,
-                        fault: "error",
-                        status: 429,
-                        body: "Rate limited"
-                    };
+            fn respond(ctx) {
+                if ctx.request.path == "/cache-test" {
+                    return http(429, "Rate limited");
                 }
-                #{ inject: false }
+                pass()
             }
         "#;
 
@@ -800,6 +1057,7 @@ mod tests {
         // Execute same AST multiple times with reusable engine
         for i in 0..10 {
             let request = ScriptRequest {
+                raw_body: None,
                 method: "GET".to_string(),
                 path: "/cache-test".to_string(),
                 headers: HashMap::new(),
@@ -831,5 +1089,659 @@ mod tests {
             Arc::ptr_eq(ast, &ast_clone),
             "AST should be same Arc instance"
         );
+    }
+
+    // ============================================
+    // Issue #357: unified ctx, v2 entrypoints, result constructors
+    // ============================================
+    mod v2 {
+        use super::*;
+        use crate::backends::InMemoryFlowStore;
+
+        fn req(headers: HashMap<String, String>, raw_body: Option<&str>) -> ScriptRequest {
+            ScriptRequest {
+                method: "POST".to_string(),
+                path: "/api/orders".to_string(),
+                headers,
+                body: serde_json::Value::Null,
+                query: HashMap::from([("page".to_string(), "2".to_string())]),
+                path_params: HashMap::from([("id".to_string(), "42".to_string())]),
+                raw_body: raw_body.map(|s| s.to_string()),
+            }
+        }
+
+        fn store() -> Arc<dyn FlowStore> {
+            Arc::new(InMemoryFlowStore::new(300))
+        }
+
+        fn run_respond(script: &str, request: &ScriptRequest) -> Result<FaultDecision> {
+            let engine = RhaiEngine::new(script, "v2-rule").unwrap();
+            engine.should_inject_fault(request, store())
+        }
+
+        // --- ctx.request ---
+
+        #[test]
+        fn ctx_request_header_is_case_insensitive() {
+            let headers = HashMap::from([("X-Flow-Id".to_string(), "flow-9".to_string())]);
+            let script = r#"
+                fn respond(ctx) {
+                    let v = ctx.request.header("x-flow-id");
+                    http(200, #{ seen: v })
+                }
+            "#;
+            let decision = run_respond(script, &req(headers, None)).unwrap();
+            match decision {
+                FaultDecision::Error { body, .. } => assert!(body.contains("flow-9")),
+                other => panic!("expected Error(200) carrier, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn ctx_request_headers_map_is_lowercased() {
+            let headers = HashMap::from([("X-Flow-Id".to_string(), "flow-9".to_string())]);
+            let script = r#"
+                fn respond(ctx) {
+                    if ctx.request.headers.contains("x-flow-id") {
+                        http(200)
+                    } else {
+                        http(500)
+                    }
+                }
+            "#;
+            let decision = run_respond(script, &req(headers, None)).unwrap();
+            match decision {
+                FaultDecision::Error { status, .. } => assert_eq!(status, 200),
+                other => panic!("expected 200, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn ctx_request_json_lazy_parse_valid() {
+            let script = r#"
+                fn respond(ctx) {
+                    http(200, #{ n: ctx.request.json.n })
+                }
+            "#;
+            let decision = run_respond(script, &req(HashMap::new(), Some(r#"{"n": 7}"#))).unwrap();
+            match decision {
+                FaultDecision::Error { body, .. } => assert!(body.contains('7')),
+                other => panic!("expected Error(200) carrier, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn ctx_request_json_is_unit_for_non_json_body() {
+            let script = r#"
+                fn respond(ctx) {
+                    if ctx.request.json == () {
+                        http(200)
+                    } else {
+                        http(500)
+                    }
+                }
+            "#;
+            let decision =
+                run_respond(script, &req(HashMap::new(), Some("not json at all"))).unwrap();
+            match decision {
+                FaultDecision::Error { status, .. } => assert_eq!(status, 200),
+                other => panic!("expected 200 (json is unit), got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn ctx_request_path_params_and_query() {
+            let script = r#"
+                fn respond(ctx) {
+                    http(200, #{ id: ctx.request.pathParams.id, page: ctx.request.query.page })
+                }
+            "#;
+            let decision = run_respond(script, &req(HashMap::new(), None)).unwrap();
+            match decision {
+                FaultDecision::Error { body, .. } => {
+                    assert!(body.contains("42"));
+                    assert!(body.contains('2'));
+                }
+                other => panic!("expected Error(200) carrier, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn ctx_request_body_is_raw_string() {
+            let script = r#"
+                fn respond(ctx) {
+                    http(200, ctx.request.body)
+                }
+            "#;
+            let decision =
+                run_respond(script, &req(HashMap::new(), Some("plain text, not json"))).unwrap();
+            match decision {
+                FaultDecision::Error { body, .. } => assert_eq!(body, "plain text, not json"),
+                other => panic!("expected Error(200) carrier, got {other:?}"),
+            }
+        }
+
+        // --- entrypoints: named wrapper + bare, respond/matches/transform/delay ---
+
+        #[test]
+        fn respond_named_wrapper() {
+            let script = r#"
+                fn respond(ctx) {
+                    http(503, #{ error: "unavailable" })
+                }
+            "#;
+            let decision = run_respond(script, &req(HashMap::new(), None)).unwrap();
+            match decision {
+                FaultDecision::Error {
+                    status,
+                    body,
+                    headers,
+                    ..
+                } => {
+                    assert_eq!(status, 503);
+                    assert!(body.contains("unavailable"));
+                    assert_eq!(
+                        headers.get("Content-Type").map(String::as_str),
+                        Some("application/json")
+                    );
+                }
+                other => panic!("expected Error, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn respond_bare_expression() {
+            // No `fn respond` wrapper at all — the whole script body is the function.
+            let script = r#"
+                if ctx.request.method == "POST" {
+                    http(503, #{ error: "unavailable" })
+                } else {
+                    pass()
+                }
+            "#;
+            let decision = run_respond(script, &req(HashMap::new(), None)).unwrap();
+            assert!(matches!(decision, FaultDecision::Error { status: 503, .. }));
+        }
+
+        #[test]
+        fn matches_named_wrapper_true_and_false() {
+            let engine = RhaiEngine::create_engine();
+            let script = r#" fn matches(ctx) { ctx.request.method == "POST" } "#;
+            let ast = engine.compile(script).unwrap();
+
+            let post_req = req(HashMap::new(), None);
+            let ctx_input = ScriptCtxInput::new(&post_req, "flow-1");
+            let matched = call_matches(&engine, &ast, &ctx_input, store()).unwrap();
+            assert!(matched);
+
+            let mut get_req = req(HashMap::new(), None);
+            get_req.method = "GET".to_string();
+            let ctx_input2 = ScriptCtxInput::new(&get_req, "flow-1");
+            let matched2 = call_matches(&engine, &ast, &ctx_input2, store()).unwrap();
+            assert!(!matched2);
+        }
+
+        #[test]
+        fn matches_bare_expression() {
+            let engine = RhaiEngine::create_engine();
+            let script = r#" ctx.request.path == "/api/orders" "#;
+            let ast = engine.compile(script).unwrap();
+            let request = req(HashMap::new(), None);
+            let ctx_input = ScriptCtxInput::new(&request, "flow-1");
+            let matched = call_matches(&engine, &ast, &ctx_input, store()).unwrap();
+            assert!(matched);
+        }
+
+        #[test]
+        fn transform_named_wrapper_returns_new_response() {
+            let engine = RhaiEngine::create_engine();
+            let script = r#"
+                fn transform(ctx) {
+                    http(ctx.response.status, #{ wrapped: ctx.response.body })
+                }
+            "#;
+            let ast = engine.compile(script).unwrap();
+            let request = req(HashMap::new(), None);
+            let ctx_input =
+                ScriptCtxInput::new(&request, "flow-1").with_response(ScriptResponseContext {
+                    status: 201,
+                    headers: HashMap::new(),
+                    body: "original".to_string(),
+                });
+            let result = call_transform(&engine, &ast, &ctx_input, store())
+                .unwrap()
+                .expect("transform must return a result");
+            match result.into_fault_decision("rule") {
+                FaultDecision::Error { status, body, .. } => {
+                    assert_eq!(status, 201);
+                    assert!(body.contains("original"));
+                }
+                other => panic!("expected Error, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn transform_bare_returns_nothing_means_no_change() {
+            let engine = RhaiEngine::create_engine();
+            let script = "()"; // explicit no-op bare expression
+            let ast = engine.compile(script).unwrap();
+            let request = req(HashMap::new(), None);
+            let ctx_input = ScriptCtxInput::new(&request, "flow-1");
+            let result = call_transform(&engine, &ast, &ctx_input, store()).unwrap();
+            assert!(result.is_none());
+        }
+
+        #[test]
+        fn delay_named_wrapper_and_bare() {
+            let engine = RhaiEngine::create_engine();
+            let script = " fn delay(ctx) { 250 } ";
+            let ast = engine.compile(script).unwrap();
+            let request = req(HashMap::new(), None);
+            let ctx_input = ScriptCtxInput::new(&request, "flow-1");
+            let ms = call_delay(&engine, &ast, &ctx_input, store()).unwrap();
+            assert_eq!(ms, 250);
+
+            let bare_script = " 100 + 25 ";
+            let bare_ast = engine.compile(bare_script).unwrap();
+            let ms2 = call_delay(&engine, &bare_ast, &ctx_input, store()).unwrap();
+            assert_eq!(ms2, 125);
+        }
+
+        // --- result constructors ---
+
+        #[test]
+        fn http_json_body_sets_content_type_unless_overridden() {
+            let script = r#"
+                fn respond(ctx) {
+                    http(503, #{ error: "x" }).header("Retry-After", "1")
+                }
+            "#;
+            let decision = run_respond(script, &req(HashMap::new(), None)).unwrap();
+            match decision {
+                FaultDecision::Error {
+                    status,
+                    body,
+                    headers,
+                    ..
+                } => {
+                    assert_eq!(status, 503);
+                    assert_eq!(body, r#"{"error":"x"}"#);
+                    assert_eq!(headers.get("Retry-After").map(String::as_str), Some("1"));
+                    assert_eq!(
+                        headers.get("Content-Type").map(String::as_str),
+                        Some("application/json")
+                    );
+                }
+                other => panic!("expected Error, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn http_explicit_content_type_wins() {
+            let script = r#"
+                fn respond(ctx) {
+                    http(200, #{ a: 1 }).header("Content-Type", "application/vnd.custom+json")
+                }
+            "#;
+            let decision = run_respond(script, &req(HashMap::new(), None)).unwrap();
+            match decision {
+                FaultDecision::Error { headers, .. } => {
+                    assert_eq!(
+                        headers.get("Content-Type").map(String::as_str),
+                        Some("application/vnd.custom+json")
+                    );
+                }
+                other => panic!("expected Error, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn http_string_body_passes_through_verbatim() {
+            let script = r#"
+                fn respond(ctx) {
+                    http(200, "hello world")
+                }
+            "#;
+            let decision = run_respond(script, &req(HashMap::new(), None)).unwrap();
+            match decision {
+                FaultDecision::Error { body, headers, .. } => {
+                    assert_eq!(body, "hello world");
+                    assert!(!headers.contains_key("Content-Type"));
+                }
+                other => panic!("expected Error, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn delay_constructor() {
+            let script = " fn respond(ctx) { delay(42) } ";
+            let decision = run_respond(script, &req(HashMap::new(), None)).unwrap();
+            match decision {
+                FaultDecision::Latency { duration_ms, .. } => assert_eq!(duration_ms, 42),
+                other => panic!("expected Latency, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn reset_constructor() {
+            let script = " fn respond(ctx) { reset() } ";
+            let decision = run_respond(script, &req(HashMap::new(), None)).unwrap();
+            assert!(matches!(decision, FaultDecision::Reset { .. }));
+        }
+
+        #[test]
+        fn pass_constructor_and_bare_nothing_both_mean_none() {
+            let decision =
+                run_respond(" fn respond(ctx) { pass() } ", &req(HashMap::new(), None)).unwrap();
+            assert!(matches!(decision, FaultDecision::None));
+
+            let decision2 =
+                run_respond(" fn respond(ctx) { () } ", &req(HashMap::new(), None)).unwrap();
+            assert!(matches!(decision2, FaultDecision::None));
+        }
+
+        // Issue #453: v1 `should_inject` was removed — a script defining only `should_inject`
+        // (and no `respond`) is now just a misnamed entrypoint, not a special v1 detection.
+        #[test]
+        fn should_inject_only_script_is_misnamed_entrypoint_error() {
+            let script = r#"
+                fn should_inject(request, flow_store) {
+                    #{ inject: true, fault: "error", status: 418, body: "teapot" }
+                }
+            "#;
+            let err = run_respond(script, &req(HashMap::new(), None)).unwrap_err();
+            let msg = err.to_string();
+            assert!(
+                msg.contains("entrypoint") && msg.contains("respond"),
+                "expected the standard misnamed-entrypoint error naming `respond`, got: {msg}"
+            );
+        }
+
+        // --- retry example from the issue: ctx.state.incr + http() end-to-end ---
+
+        #[test]
+        fn retry_example_end_to_end_with_ctx_state_incr() {
+            let script = r#"
+                fn respond(ctx) {
+                    let n = ctx.state.incr("attempts");
+                    if n <= 2 {
+                        http(503, #{ error: "unavailable", attempt: n }).header("Retry-After", "1")
+                    } else {
+                        http(200, #{ ok: true, succeededOnAttempt: n })
+                    }
+                }
+            "#;
+            let engine = RhaiEngine::new(script, "retry-rule").unwrap();
+            let shared_store = store();
+            let request = req(HashMap::new(), None);
+
+            let d1 = engine
+                .should_inject_fault(&request, Arc::clone(&shared_store))
+                .unwrap();
+            assert!(matches!(d1, FaultDecision::Error { status: 503, .. }));
+
+            let d2 = engine
+                .should_inject_fault(&request, Arc::clone(&shared_store))
+                .unwrap();
+            assert!(matches!(d2, FaultDecision::Error { status: 503, .. }));
+
+            let d3 = engine.should_inject_fault(&request, shared_store).unwrap();
+            match d3 {
+                FaultDecision::Error { status, body, .. } => {
+                    assert_eq!(status, 200);
+                    assert!(body.contains("succeededOnAttempt"));
+                }
+                other => panic!("expected 200 on third attempt, got {other:?}"),
+            }
+        }
+
+        // --- ctx.store escape hatch ---
+
+        #[test]
+        fn ctx_store_flow_scopes_to_another_flow_id() {
+            let script = r#"
+                fn respond(ctx) {
+                    ctx.store.flow("other-flow").set("shared", 99);
+                    let v = ctx.store.flow("other-flow").get("shared");
+                    http(200, #{ v: v })
+                }
+            "#;
+            let decision = run_respond(script, &req(HashMap::new(), None)).unwrap();
+            match decision {
+                FaultDecision::Error { status, body, .. } => {
+                    assert_eq!(status, 200);
+                    assert!(body.contains("99"));
+                }
+                other => panic!("expected 200, got {other:?}"),
+            }
+        }
+
+        // --- ctx.state atomic ops (issue #358) ---
+
+        #[test]
+        fn get_or_returns_default_when_absent_then_stored_value() {
+            let script = r#"
+                fn respond(ctx) {
+                    let n = ctx.state.get_or("count", 0);
+                    ctx.state.set("count", 7);
+                    let n2 = ctx.state.get_or("count", 0);
+                    http(200, #{ first: n, second: n2 })
+                }
+            "#;
+            let decision = run_respond(script, &req(HashMap::new(), None)).unwrap();
+            match decision {
+                FaultDecision::Error { body, .. } => {
+                    assert!(body.contains("\"first\":0"), "got {body}");
+                    assert!(body.contains("\"second\":7"), "got {body}");
+                }
+                other => panic!("expected Error(200), got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn incr_by_is_atomic_and_starts_at_zero() {
+            let script = r#"
+                fn respond(ctx) {
+                    let n = ctx.state.incr_by("hits", 5);
+                    http(200, #{ n: n })
+                }
+            "#;
+            let engine = RhaiEngine::new(script, "incr-by-rule").unwrap();
+            let shared_store = store();
+            let request = req(HashMap::new(), None);
+
+            let d1 = engine
+                .should_inject_fault(&request, Arc::clone(&shared_store))
+                .unwrap();
+            match d1 {
+                FaultDecision::Error { body, .. } => assert!(body.contains("\"n\":5")),
+                other => panic!("expected Error(200), got {other:?}"),
+            }
+
+            let d2 = engine.should_inject_fault(&request, shared_store).unwrap();
+            match d2 {
+                FaultDecision::Error { body, .. } => assert!(body.contains("\"n\":10")),
+                other => panic!("expected Error(200), got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn cas_distinguishes_applied_from_conflict() {
+            let shared_store = store();
+            let request = req(HashMap::new(), None);
+
+            // First call: key "status" absent, expected () (unit) matches -> Applied, sets "paid".
+            let applied_script = r#"
+                fn respond(ctx) {
+                    let outcome = ctx.state.cas("status", (), "paid");
+                    http(200, #{ applied: outcome.applied, current: outcome.current })
+                }
+            "#;
+            let applied_engine = RhaiEngine::new(applied_script, "cas-applied").unwrap();
+            let d1 = applied_engine
+                .should_inject_fault(&request, Arc::clone(&shared_store))
+                .unwrap();
+            match d1 {
+                FaultDecision::Error { body, .. } => {
+                    assert!(body.contains("\"applied\":true"), "got {body}");
+                }
+                other => panic!("expected 200, got {other:?}"),
+            }
+
+            // Second call: current is now "paid"; asking for expected "pending" must conflict and
+            // report the winning current value, distinguishing it from the Applied case above.
+            let conflict_script = r#"
+                fn respond(ctx) {
+                    let outcome = ctx.state.cas("status", "pending", "shipped");
+                    http(200, #{ applied: outcome.applied, current: outcome.current })
+                }
+            "#;
+            let conflict_engine = RhaiEngine::new(conflict_script, "cas-conflict").unwrap();
+            let d2 = conflict_engine
+                .should_inject_fault(&request, shared_store)
+                .unwrap();
+            match d2 {
+                FaultDecision::Error { body, .. } => {
+                    assert!(body.contains("\"applied\":false"), "got {body}");
+                    assert!(body.contains("\"current\":\"paid\""), "got {body}");
+                }
+                other => panic!("expected 200, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn ttl_sets_per_flow_expiry() {
+            let script = r#"
+                fn respond(ctx) {
+                    ctx.state.set("k", 1);
+                    let applied = ctx.state.ttl(3600);
+                    http(200, #{ applied: applied })
+                }
+            "#;
+            let decision = run_respond(script, &req(HashMap::new(), None)).unwrap();
+            match decision {
+                FaultDecision::Error { body, .. } => {
+                    assert!(body.contains("\"applied\":true"), "got {body}");
+                }
+                other => panic!("expected 200, got {other:?}"),
+            }
+        }
+
+        // Issue #358 (fail-loud) / #322: a backend failure on any atomic op must propagate as a
+        // script error, never a silently-returned default — unlike the lenient #322 fallback the
+        // older get/set/incr/exists/delete ops use.
+        #[cfg(feature = "test-backend")]
+        #[test]
+        fn atomic_ops_propagate_store_errors_fail_loud() {
+            use crate::extensions::flow_state::FailingFlowStore;
+            let failing_store: Arc<dyn FlowStore> = Arc::new(FailingFlowStore);
+            let request = req(HashMap::new(), None);
+
+            let get_or_result = RhaiEngine::new(
+                r#"fn respond(ctx) { ctx.state.get_or("k", 0) }"#,
+                "fail-get-or",
+            )
+            .unwrap()
+            .should_inject_fault(&request, Arc::clone(&failing_store));
+            assert!(
+                get_or_result.is_err(),
+                "get_or must propagate a store failure, not a default"
+            );
+
+            let incr_by_result = RhaiEngine::new(
+                r#"fn respond(ctx) { ctx.state.incr_by("k", 1) }"#,
+                "fail-incr-by",
+            )
+            .unwrap()
+            .should_inject_fault(&request, Arc::clone(&failing_store));
+            assert!(
+                incr_by_result.is_err(),
+                "incr_by must propagate a store failure"
+            );
+
+            let cas_result = RhaiEngine::new(
+                r#"fn respond(ctx) { ctx.state.cas("k", (), "v") }"#,
+                "fail-cas",
+            )
+            .unwrap()
+            .should_inject_fault(&request, Arc::clone(&failing_store));
+            assert!(cas_result.is_err(), "cas must propagate a store failure");
+
+            let ttl_result =
+                RhaiEngine::new(r#"fn respond(ctx) { ctx.state.ttl(60) }"#, "fail-ttl")
+                    .unwrap()
+                    .should_inject_fault(&request, failing_store);
+            assert!(ttl_result.is_err(), "ttl must propagate a store failure");
+        }
+
+        // Issue #358 B1 / #322: the `ctx.state` ops (get/incr) are unconditionally fail-loud.
+        #[cfg(feature = "test-backend")]
+        #[test]
+        fn state_ops_fail_loud_on_backend_failure() {
+            use crate::extensions::flow_state::FailingFlowStore;
+            let request = req(HashMap::new(), None);
+
+            let get_err = RhaiEngine::new(r#"fn respond(ctx) { ctx.state.get("k") }"#, "v2-get")
+                .unwrap()
+                .should_inject_fault(&request, Arc::new(FailingFlowStore));
+            assert!(get_err.is_err(), "v2 ctx.state.get must fail loud");
+
+            let incr_err = RhaiEngine::new(r#"fn respond(ctx) { ctx.state.incr("k") }"#, "v2-incr")
+                .unwrap()
+                .should_inject_fault(&request, Arc::new(FailingFlowStore));
+            assert!(incr_err.is_err(), "v2 ctx.state.incr must fail loud");
+        }
+
+        // --- ctx.stub ---
+
+        #[test]
+        fn ctx_stub_none_when_unavailable() {
+            let script = r#"
+                fn respond(ctx) {
+                    if ctx.stub.scenarioName == () && ctx.stub.id == () {
+                        http(200)
+                    } else {
+                        http(500)
+                    }
+                }
+            "#;
+            let decision = run_respond(script, &req(HashMap::new(), None)).unwrap();
+            assert!(matches!(decision, FaultDecision::Error { status: 200, .. }));
+        }
+
+        // B1 (issue #357, "nothing fails silently"): a script that defines ONLY a misnamed
+        // entrypoint (`respnod` typo) must Err, not silently fall back to bare → None.
+        #[test]
+        fn misnamed_entrypoint_errors_not_none() {
+            let script = r#"
+                fn respnod(ctx) {
+                    http(500)
+                }
+            "#;
+            let result = run_respond(script, &req(HashMap::new(), None));
+            assert!(
+                result.is_err(),
+                "a misnamed entrypoint must surface an error, got {result:?}"
+            );
+        }
+
+        // A genuine bare expression (no function declarations, non-unit value) still works.
+        #[test]
+        fn genuine_bare_expression_still_ok_after_b1() {
+            let decision = run_respond("http(503)", &req(HashMap::new(), None)).unwrap();
+            assert!(matches!(decision, FaultDecision::Error { status: 503, .. }));
+        }
+
+        // A helper function plus a bare expression producing a value is still allowed (the bare
+        // value is non-unit, so B1's "declared-but-unmatched + unit" guard doesn't trip).
+        #[test]
+        fn helper_function_plus_bare_expression_ok() {
+            let script = r#"
+                fn helper() { 503 }
+                http(helper())
+            "#;
+            let decision = run_respond(script, &req(HashMap::new(), None)).unwrap();
+            assert!(matches!(decision, FaultDecision::Error { status: 503, .. }));
+        }
     }
 }
