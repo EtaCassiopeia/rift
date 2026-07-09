@@ -49,6 +49,13 @@ jobs:
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
 
+      # Unlike the other CI jobs (which only build the current, Lua-free tree), this gate also
+      # benchmarks the PR *base* commit — and any base predating the Lua removal (#450) still links
+      # LuaJIT via mlua. Keep the system lib here so the base bench builds; it's a harmless no-op
+      # once the base no longer uses Lua.
+      - name: Install LuaJIT (needed to build a pre-#450 base)
+        run: sudo apt-get update && sudo apt-get install -y libluajit-5.1-dev
+
       # Record BENCH_SAMPLES independent runs per side (baselines base-1..N / pr-1..N). The gate
       # compares the fastest run of each side (issue #446): noise only ever makes a run slower, so
       # min-of-N is the least-contended, most-representative measurement and cancels cross-run jitter.
