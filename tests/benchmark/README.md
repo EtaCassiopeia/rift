@@ -65,7 +65,30 @@ Install all tools automatically:
 ./scripts/install-tools.sh
 ```
 
-## Benchmark Configuration
+## Admin create/read mode
+
+`scripts/bench_direct.py` measures request *serving*. `scripts/bench_admin.py` measures the other
+side of the engine — the **admin control plane**: the cost of creating an imposter with many stubs
+and reading it back. This is where Rift's stub-overlap analysis lives (issue #423), a Rift
+extension Mountebank does not perform, so it is where the two engines' admin behaviour differs
+most.
+
+```bash
+python3 scripts/bench_admin.py --run-all \
+    --rift-bin ../../target/release/rift-http-proxy \
+    --mb-bin ~/bench-mb/node_modules/mountebank/bin/mb
+
+cat results/ADMIN_BENCHMARK_REPORT.md
+```
+
+For each engine and each (predicate shape, stub count) it launches a **fresh** engine process (so
+the RSS delta is isolated), `POST`s one imposter, then `GET`s it five times, recording create
+latency, GET latency, process RSS delta, response size, and Rift's `_rift.warnings` count
+(Mountebank's is always 0). Two shapes are exercised: `identical/overlap` (all stubs share one
+predicate — the O(n²)-prone case #423 fixed) and `distinct` (the cheap control). Same
+sequential/disjoint-port/hard-teardown discipline as `bench_direct.py`.
+
+
 
 ### Test Environment
 

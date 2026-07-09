@@ -6,6 +6,10 @@ results/DIRECT_BENCHMARK_REPORT.md
 results/direct_*.csv
 results/*-engine.log
 
+# Admin create/read mode outputs (machine-specific; regenerate with scripts/bench_admin.py)
+results/ADMIN_BENCHMARK_REPORT.md
+results/admin-*.log
+
 # Keep summary reports tracked
 !results/BENCHMARK_REPORT.md
 !results/results.csv
