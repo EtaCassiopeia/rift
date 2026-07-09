@@ -43,7 +43,9 @@ pub enum EntrypointCheckError {
     UnknownEngine(String),
     #[error("{engine} engine is not enabled (requires the '{feature}' feature)")]
     EngineDisabled { engine: String, feature: String },
-    #[error("the {0} scripting engine was removed (issue #450); use engine \"rhai\" or \"javascript\"")]
+    #[error(
+        "the {0} scripting engine was removed (issue #450); use engine \"rhai\" or \"javascript\""
+    )]
     EngineRemoved(String),
     #[error("Syntax error: {0}")]
     Syntax(String),
