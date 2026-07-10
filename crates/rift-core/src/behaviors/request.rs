@@ -56,9 +56,11 @@ impl RequestContext {
 
         let mut header_map = HashMap::new();
         for (name, value) in headers.iter() {
-            if let Ok(v) = value.to_str() {
-                header_map.insert(header_to_title_case(name.as_str()), v.to_string());
-            }
+            // Coerce a non-UTF-8 value to "" rather than dropping the header (issue #480): the
+            // request hot path now passes hyper's raw HeaderMap, and a dropped key would flip a
+            // header from present-but-empty to absent for behaviors/predicates that read it.
+            let v = value.to_str().unwrap_or("");
+            header_map.insert(header_to_title_case(name.as_str()), v.to_string());
         }
 
         Self {
@@ -68,5 +70,60 @@ impl RequestContext {
             headers: header_map,
             body: body.map(|s| s.to_string()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Issue #480 — the request context is now built from `req.headers().clone()`, whose names are
+    // hyper's lowercase form, instead of a HashMap that was pre-title-cased. `from_request` must
+    // title-case the names itself so the resulting context is unchanged regardless of input casing.
+    #[test]
+    fn from_request_title_cases_lowercase_headermap() {
+        let mut headers = hyper::HeaderMap::new();
+        headers.insert(
+            hyper::header::HeaderName::from_static("content-type"),
+            hyper::header::HeaderValue::from_static("application/json"),
+        );
+        headers.insert(
+            hyper::header::HeaderName::from_static("x-custom-header"),
+            hyper::header::HeaderValue::from_static("v"),
+        );
+        let uri: hyper::Uri = "/p".parse().unwrap();
+
+        let ctx = RequestContext::from_request("GET", &uri, &headers, None);
+
+        assert_eq!(
+            ctx.headers.get("Content-Type").map(String::as_str),
+            Some("application/json"),
+            "header names must be Title-Case regardless of the input HeaderMap's casing"
+        );
+        assert_eq!(
+            ctx.headers.get("X-Custom-Header").map(String::as_str),
+            Some("v")
+        );
+    }
+
+    // Issue #480 — the hot path now passes hyper's raw HeaderMap, which can hold a value that is not
+    // valid UTF-8. Such a header must stay PRESENT (coerced to "") rather than being silently
+    // dropped, preserving the prior request-context behavior for behaviors/predicates that read it.
+    #[test]
+    fn from_request_keeps_non_utf8_header_as_empty() {
+        let mut headers = hyper::HeaderMap::new();
+        headers.insert(
+            hyper::header::HeaderName::from_static("x-bin"),
+            hyper::header::HeaderValue::from_bytes(&[0xff, 0xfe]).unwrap(),
+        );
+        let uri: hyper::Uri = "/p".parse().unwrap();
+
+        let ctx = RequestContext::from_request("GET", &uri, &headers, None);
+
+        assert_eq!(
+            ctx.headers.get("X-Bin").map(String::as_str),
+            Some(""),
+            "a non-UTF-8 header value must remain present as empty, not be dropped"
+        );
     }
 }

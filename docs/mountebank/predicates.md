@@ -315,6 +315,10 @@ Enable case-sensitive matching (default: false):
 }
 ```
 
+Case-insensitive matching (the default) folds **ASCII** letters only (`A`–`Z` ↔ `a`–`z`) across
+`equals`, `contains`, `startsWith`, and `endsWith`. Non-ASCII characters (e.g. `É` vs `é`) are
+compared exactly.
+
 ### except
 
 Exclude fields from matching:

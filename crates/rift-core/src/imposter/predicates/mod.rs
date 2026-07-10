@@ -26,9 +26,10 @@ pub fn stub_matches(
     form: Option<&HashMap<String, String>>,
     imposter_port: u16,
 ) -> anyhow::Result<bool> {
-    // Parse the body once for standalone callers; the request hot path parses once per request
-    // (before the stub scan) and calls `stub_matches_inner` directly (issue #290).
+    // Parse the body and query once for standalone callers; the request hot path parses each once
+    // per request (before the stub scan) and calls `stub_matches_inner` directly (issues #290, #480).
     let body_json = body.and_then(|b| serde_json::from_str::<serde_json::Value>(b).ok());
+    let query_map = parse_query(query);
     stub_matches_inner(
         predicates,
         method,
@@ -41,6 +42,7 @@ pub fn stub_matches(
         form,
         imposter_port,
         body_json.as_ref(),
+        Some(&query_map),
     )
 }
 
@@ -61,6 +63,7 @@ pub(crate) fn stub_matches_inner(
     form: Option<&HashMap<String, String>>,
     imposter_port: u16,
     body_json: Option<&serde_json::Value>,
+    query_map: Option<&HashMap<String, String>>,
 ) -> anyhow::Result<bool> {
     // If no predicates, match everything
     if predicates.is_empty() {
@@ -81,6 +84,7 @@ pub(crate) fn stub_matches_inner(
             form,
             imposter_port,
             body_json,
+            query_map,
         )? {
             return Ok(false);
         }
@@ -91,6 +95,32 @@ pub(crate) fn stub_matches_inner(
 /// Parse query string for predicate matching, URL-decoding both keys and values
 pub fn parse_query(query: Option<&str>) -> HashMap<String, String> {
     query.map_or_else(HashMap::new, parse_query_string)
+}
+
+// Allocation-free ASCII case-insensitive string tests (issue #480). The previous
+// `haystack.to_lowercase().contains(&needle.to_lowercase())` allocated a lowercase copy of BOTH
+// sides on every evaluation — the haystack can be the whole request body. These fold only ASCII
+// A–Z/a–z, matching `str_equals`' existing `eq_ignore_ascii_case`, so the whole predicate engine
+// is now consistently ASCII-case-insensitive rather than mixing ASCII equals with Unicode contains.
+fn contains_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
+    let (h, n) = (haystack.as_bytes(), needle.as_bytes());
+    if n.is_empty() {
+        return true;
+    }
+    if n.len() > h.len() {
+        return false;
+    }
+    h.windows(n.len()).any(|w| w.eq_ignore_ascii_case(n))
+}
+
+fn starts_with_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
+    let (h, n) = (haystack.as_bytes(), needle.as_bytes());
+    h.len() >= n.len() && h[..n.len()].eq_ignore_ascii_case(n)
+}
+
+fn ends_with_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
+    let (h, n) = (haystack.as_bytes(), needle.as_bytes());
+    h.len() >= n.len() && h[h.len() - n.len()..].eq_ignore_ascii_case(n)
 }
 
 /// Check if a single predicate matches (Mountebank-compatible)
@@ -112,9 +142,10 @@ pub fn predicate_matches(
     form: Option<&HashMap<String, String>>,
     imposter_port: u16,
 ) -> anyhow::Result<bool> {
-    // Standalone callers parse the body here; the request hot path parses once per request and
-    // calls `predicate_matches_inner` directly with the shared parse (issue #290).
+    // Standalone callers parse the body and query here; the request hot path parses each once per
+    // request and calls `predicate_matches_inner` directly with the shared parses (issues #290, #480).
     let body_json = body.and_then(|b| serde_json::from_str::<serde_json::Value>(b).ok());
+    let query_map = parse_query(query);
     predicate_matches_inner(
         predicate,
         method,
@@ -127,6 +158,7 @@ pub fn predicate_matches(
         form,
         imposter_port,
         body_json.as_ref(),
+        Some(&query_map),
     )
 }
 
@@ -148,6 +180,7 @@ pub(crate) fn predicate_matches_inner(
     form: Option<&HashMap<String, String>>,
     imposter_port: u16,
     body_json: Option<&serde_json::Value>,
+    query_map: Option<&HashMap<String, String>>,
 ) -> anyhow::Result<bool> {
     // Get predicate options
     let case_sensitive = predicate.parameters.case_sensitive.unwrap_or(false);
@@ -190,7 +223,7 @@ pub(crate) fn predicate_matches_inner(
         if case_sensitive {
             haystack.contains(needle)
         } else {
-            haystack.to_lowercase().contains(&needle.to_lowercase())
+            contains_ignore_ascii_case(haystack, needle)
         }
     };
 
@@ -198,7 +231,7 @@ pub(crate) fn predicate_matches_inner(
         if case_sensitive {
             haystack.starts_with(needle)
         } else {
-            haystack.to_lowercase().starts_with(&needle.to_lowercase())
+            starts_with_ignore_ascii_case(haystack, needle)
         }
     };
 
@@ -206,12 +239,20 @@ pub(crate) fn predicate_matches_inner(
         if case_sensitive {
             haystack.ends_with(needle)
         } else {
-            haystack.to_lowercase().ends_with(&needle.to_lowercase())
+            ends_with_ignore_ascii_case(haystack, needle)
         }
     };
 
-    // Build request context for field access
-    let query_map = parse_query(query);
+    // Build request context for field access. Use the once-per-request parse when the caller
+    // threaded it (hot path / standalone wrappers); only parse locally as a fallback (issue #480).
+    let parsed_query;
+    let query_map: &HashMap<String, String> = match query_map {
+        Some(q) => q,
+        None => {
+            parsed_query = parse_query(query);
+            &parsed_query
+        }
+    };
     let body_str = body.unwrap_or("");
 
     // Handle jsonpath parameter - extract value from JSON body
@@ -360,6 +401,7 @@ pub(crate) fn predicate_matches_inner(
             form,
             imposter_port,
             body_json,
+            Some(query_map),
         )?),
         PredicateOperation::Or(children) => {
             // Short-circuits on the first match, like the old `.any()`; a predicate-inject error
@@ -378,6 +420,7 @@ pub(crate) fn predicate_matches_inner(
                     form,
                     imposter_port,
                     body_json,
+                    Some(query_map),
                 )? {
                     return Ok(true);
                 }
@@ -400,6 +443,7 @@ pub(crate) fn predicate_matches_inner(
                     form,
                     imposter_port,
                     body_json,
+                    Some(query_map),
                 )? {
                     return Ok(false);
                 }
@@ -410,11 +454,11 @@ pub(crate) fn predicate_matches_inner(
             #[cfg(feature = "javascript")]
             {
                 use crate::scripting::{MountebankRequest, execute_predicate_inject};
-                let query_map = parse_query(query);
                 let mb_request = MountebankRequest {
                     method: method.to_string(),
                     path: path.to_string(),
-                    query: query_map,
+                    // Reuse the once-per-request query map instead of re-parsing (issue #480).
+                    query: query_map.clone(),
                     headers: headers.clone(),
                     body: body.map(|b| b.to_string()),
                 };
@@ -2208,6 +2252,7 @@ mod tests {
                 None,
                 0,
                 None,
+                None,
             )
             .is_err(),
             "an `or` must propagate a nested inject error rather than short-circuit past it"
@@ -2227,6 +2272,7 @@ mod tests {
                 None,
                 0,
                 None,
+                None,
             )
             .is_err(),
             "an `and` must propagate a nested inject error"
@@ -2245,6 +2291,7 @@ mod tests {
                 None,
                 None,
                 0,
+                None,
                 None,
             )
             .is_err(),
@@ -2277,5 +2324,144 @@ mod tests {
             result.is_err(),
             "stub_matches must propagate a predicate-inject error, not collapse it to false"
         );
+    }
+
+    // Issue #480 — the query is now parsed once per request and threaded into predicate matching.
+    // Passing the pre-parsed map (Some) must give the identical result as the local-parse fallback
+    // (None); the optimization is behavior-preserving.
+    #[test]
+    fn query_hoist_matches_local_parse() {
+        let fields: HashMap<String, serde_json::Value> =
+            [("query".to_string(), json!({ "key": "value" }))]
+                .into_iter()
+                .collect();
+        let pred = make_predicate(PredicateOperation::Equals(fields));
+        let query = Some("key=value");
+        let parsed = parse_query(query);
+
+        let with_hoisted = predicate_matches_inner(
+            &pred,
+            "GET",
+            "/test",
+            query,
+            &empty_headers(),
+            None,
+            None,
+            None,
+            None,
+            0,
+            None,
+            Some(&parsed),
+        )
+        .unwrap();
+        let with_fallback = predicate_matches_inner(
+            &pred,
+            "GET",
+            "/test",
+            query,
+            &empty_headers(),
+            None,
+            None,
+            None,
+            None,
+            0,
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert!(
+            with_hoisted,
+            "query predicate must match via the threaded map"
+        );
+        assert_eq!(
+            with_hoisted, with_fallback,
+            "threaded map and local-parse fallback must agree"
+        );
+    }
+
+    // Issue #480: the resolved query map must reach predicates nested inside Or/And/Not, which
+    // recurse through `predicate_matches_inner`. A query predicate inside an `or` must still match.
+    #[test]
+    fn nested_query_predicate_in_or_matches() {
+        let query_eq: HashMap<String, serde_json::Value> =
+            [("query".to_string(), json!({ "k": "v" }))]
+                .into_iter()
+                .collect();
+        let never: HashMap<String, serde_json::Value> =
+            [("path".to_string(), json!("/nope"))].into_iter().collect();
+        let or_pred = make_predicate(PredicateOperation::Or(vec![
+            make_predicate(PredicateOperation::Equals(never)),
+            make_predicate(PredicateOperation::Equals(query_eq)),
+        ]));
+
+        let matched = predicate_matches(
+            &or_pred,
+            "GET",
+            "/test",
+            Some("k=v"),
+            &empty_headers(),
+            None,
+            None,
+            None,
+            None,
+            0,
+        )
+        .unwrap();
+        assert!(
+            matched,
+            "a query predicate nested in `or` must see the threaded query map"
+        );
+    }
+
+    // Issue #480 — the case-insensitive string helpers are allocation-free ASCII folds. They must
+    // behave like the old `to_lowercase()` path for ASCII input, including edge cases.
+    #[test]
+    fn ascii_case_insensitive_helpers() {
+        // contains
+        assert!(contains_ignore_ascii_case("Hello World", "LO WO"));
+        assert!(contains_ignore_ascii_case("anything", "")); // empty needle matches
+        assert!(!contains_ignore_ascii_case("short", "longer needle"));
+        assert!(!contains_ignore_ascii_case("abc", "xyz"));
+        // starts_with / ends_with
+        assert!(starts_with_ignore_ascii_case("Content-Type", "content-"));
+        assert!(!starts_with_ignore_ascii_case("abc", "abcd"));
+        assert!(ends_with_ignore_ascii_case("image.PNG", ".png"));
+        assert!(!ends_with_ignore_ascii_case("abc", "zabc"));
+        // non-ASCII bytes fold only ASCII: exact non-ASCII still matches, cross-case non-ASCII does not
+        assert!(contains_ignore_ascii_case("caf\u{00e9}", "CAF\u{00e9}"));
+    }
+
+    // Issue #480 — predicate-level case-insensitive contains/startsWith/endsWith still match with
+    // mixed ASCII case after switching to the allocation-free path.
+    #[test]
+    fn case_insensitive_string_predicates_still_match() {
+        let ci = PredicateParameters {
+            case_sensitive: Some(false),
+            ..PredicateParameters::default()
+        };
+        let run = |op: PredicateOperation| {
+            let pred = make_predicate_with_params(op, ci.clone());
+            predicate_matches(
+                &pred,
+                "GET",
+                "/API/Users",
+                None,
+                &empty_headers(),
+                None,
+                None,
+                None,
+                None,
+                0,
+            )
+            .unwrap()
+        };
+        let path_field = |needle: &str| -> HashMap<String, serde_json::Value> {
+            [("path".to_string(), json!(needle))].into_iter().collect()
+        };
+
+        assert!(run(PredicateOperation::Contains(path_field("api/users"))));
+        assert!(run(PredicateOperation::StartsWith(path_field("/api"))));
+        assert!(run(PredicateOperation::EndsWith(path_field("USERS"))));
     }
 }

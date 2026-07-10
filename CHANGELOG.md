@@ -11,6 +11,18 @@ record.
 
 ## [Unreleased]
 
+### Changed
+- **Case-insensitive `contains`/`startsWith`/`endsWith` predicates now fold ASCII only** (#480), for
+  consistency with `equals` (already ASCII case-insensitive) and to avoid a per-request allocation on
+  the matching hot path. Predicates over non-ASCII text that previously matched via Unicode case
+  folding (e.g. `É` vs `é`) now require exact non-ASCII bytes; pure-ASCII matching is unchanged.
+
+### Performance
+- **Fewer per-request allocations in the imposter matching hot path** (#480): the query string is
+  parsed once per request (not once per predicate), case-insensitive string compares no longer
+  allocate a lowercased copy of each side, and the request-context header map is captured directly
+  instead of being rebuilt and re-validated per request.
+
 ### Fixed
 - **Proxy `predicateGenerators.inject` failures no longer record a match-all stub** (#498). When an
   inject predicate generator fails (script error, invalid output, script-pool failure, or timeout),

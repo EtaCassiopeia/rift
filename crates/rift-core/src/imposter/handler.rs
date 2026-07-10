@@ -182,6 +182,11 @@ async fn handle_request_inner(
     // Extract parts we need before consuming the request body
     let method = req.method().to_string();
     let uri = req.uri().clone();
+    // Clone the original validated HeaderMap up front for the request context, instead of rebuilding
+    // one from the title-cased HashMap below (which re-validated every header per request, issue
+    // #480). `RequestContext::from_request` title-cases the names itself, so the map's own casing
+    // (hyper stores lowercase) does not change the resulting context.
+    let headers_for_context = req.headers().clone();
     let headers_clone: HashMap<String, String> = req
         .headers()
         .iter()
@@ -238,17 +243,6 @@ async fn handle_request_inner(
             ));
         }
     };
-
-    // Build HeaderMap from captured headers for request context
-    let mut headers_for_context = hyper::HeaderMap::new();
-    for (k, v) in &headers_clone {
-        if let (Ok(name), Ok(value)) = (
-            hyper::header::HeaderName::from_bytes(k.as_bytes()),
-            hyper::header::HeaderValue::from_str(v),
-        ) {
-            headers_for_context.insert(name, value);
-        }
-    }
 
     // Build request context for behaviors
     let request_context =
