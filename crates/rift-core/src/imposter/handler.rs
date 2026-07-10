@@ -1495,8 +1495,31 @@ async fn apply_rift_fault(
 // since it needs a non-predicate error that a listener test can't easily provoke.
 #[cfg(all(test, feature = "javascript"))]
 mod matcher_error_response_tests {
-    use super::matcher_error_response;
+    use super::{inject_timeout_response, matcher_error_response};
     use hyper::StatusCode;
+
+    // Issue #499: the shared builder for a timed-out response/predicate `inject` — a 504 with the
+    // Mountebank error envelope (timeout-specific code) plus the inject-error + script-timeout
+    // markers. The Boa `inject` timeout paths route through this; they are unit-tested here rather
+    // than end-to-end because a real Boa busy-loop parks a shared-pool worker (see the note in
+    // tests/handler_error_responses.rs).
+    #[tokio::test]
+    async fn inject_timeout_response_is_504_with_code_and_markers() {
+        use http_body_util::BodyExt;
+        let resp = inject_timeout_response("injection timeout", "inject timed out after 1ms");
+        assert_eq!(resp.status(), StatusCode::GATEWAY_TIMEOUT);
+        assert!(resp.headers().contains_key("x-rift-inject-error"));
+        assert!(
+            resp.headers().contains_key("x-rift-script-timeout"),
+            "the timeout marker distinguishes a deadline miss from a broken inject"
+        );
+        let bytes = resp.into_body().collect().await.expect("body").to_bytes();
+        let body = String::from_utf8(bytes.to_vec()).expect("utf8");
+        assert!(
+            body.contains("\"code\":\"injection timeout\""),
+            "body must carry the timeout-specific code, got: {body}"
+        );
+    }
 
     #[test]
     fn predicate_inject_error_maps_to_400() {
