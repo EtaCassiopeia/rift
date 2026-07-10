@@ -20,7 +20,7 @@ mod core;
 mod fault_io;
 mod handler;
 mod manager;
-mod predicates;
+pub(crate) mod predicates;
 mod reconcile;
 mod response;
 mod script_resolve;

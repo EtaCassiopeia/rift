@@ -308,8 +308,17 @@ fn apply_filter(value: &str, name: &str, args: &[String]) -> Result<String, Stri
             let group: usize = group_str
                 .parse()
                 .map_err(|_| format!("regex filter: invalid group number '{group_str}'"))?;
-            let re = Regex::new(pattern)
-                .map_err(|e| format!("regex filter: invalid pattern '{pattern}': {e}"))?;
+            // Route through the shared regex cache (issue #481) so a templated response that
+            // uses this filter does not recompile the pattern on every render.
+            let Some(re) = crate::imposter::predicates::regex_cache::cached_regex(pattern, false)
+            else {
+                // Cold path: an invalid pattern errors anyway — recompile once to surface the
+                // concrete syntax error in the message.
+                return Err(match Regex::new(pattern) {
+                    Err(e) => format!("regex filter: invalid pattern '{pattern}': {e}"),
+                    Ok(_) => format!("regex filter: invalid pattern '{pattern}'"),
+                });
+            };
             let caps = re
                 .captures(value)
                 .ok_or_else(|| format!("regex filter: pattern '{pattern}' did not match"))?;
@@ -631,6 +640,18 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out, "11111111-1111-1111-1111-111111111111");
+    }
+
+    // Issue #481: the regex filter now resolves via the shared cache, which returns None on an
+    // invalid pattern. The error contract (a message naming the bad pattern) must be preserved.
+    #[test]
+    fn regex_filter_invalid_pattern_errors() {
+        let data = request_data();
+        let s = store();
+        let tctx = ctx(&data, "flow-1", &s);
+        // debug=true so a failing token aborts with its error instead of rendering empty.
+        let err = render_templated("{{request.path | regex '([' 1}}", &tctx, true).unwrap_err();
+        assert!(err.contains("invalid pattern"), "got: {err}");
     }
 
     #[test]

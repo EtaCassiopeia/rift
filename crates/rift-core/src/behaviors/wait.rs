@@ -1,6 +1,28 @@
 //! Wait behavior - add latency before response.
 
+use regex::Regex;
 use serde::{Deserialize, Serialize};
+use std::sync::LazyLock;
+
+// Fixed patterns for the no-`javascript`-feature wait fallback (issue #481): compile once at
+// first use instead of on every request. These are compile-time-constant patterns, so a compile
+// failure is a programming error caught immediately by tests, not a data-dependent runtime error.
+static WAIT_FLOOR_OFFSET_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"Math\.floor\s*\(\s*Math\.random\s*\(\s*\)\s*\*\s*(\d+)\s*\)\s*\+\s*(\d+)")
+        .expect("wait floor+offset pattern is a valid constant regex")
+});
+static WAIT_RANDOM_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"Math\.random\s*\(\s*\)\s*\*\s*(\d+)")
+        .expect("wait random pattern is a valid constant regex")
+});
+static WAIT_SOLO_MIN_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"var\s+min\s*=\s*Math\.ceil\s*\(\s*(\d+)\s*\)")
+        .expect("wait solo-min pattern is a valid constant regex")
+});
+static WAIT_SOLO_MAX_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"var\s+max\s*=\s*Math\.floor\s*\(\s*(\d+)\s*\)")
+        .expect("wait solo-max pattern is a valid constant regex")
+});
 
 /// Wait behavior - add latency before response
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -125,21 +147,15 @@ impl WaitBehavior {
             // Parse: Math.floor(Math.random() * N) + M
             if body.contains("Math.random()") {
                 use rand::Rng;
-                // Extract multiplier and offset using regex
-                let re = regex::Regex::new(
-                    r"Math\.floor\s*\(\s*Math\.random\s*\(\s*\)\s*\*\s*(\d+)\s*\)\s*\+\s*(\d+)",
-                )
-                .ok()?;
-
-                if let Some(caps) = re.captures(&body) {
+                // Extract multiplier and offset using the cached constant patterns.
+                if let Some(caps) = WAIT_FLOOR_OFFSET_RE.captures(&body) {
                     let range = caps.get(1)?.as_str().parse::<u64>().ok()?;
                     let offset = caps.get(2)?.as_str().parse::<u64>().ok()?;
                     return Some(rand::thread_rng().gen_range(offset..=offset + range));
                 }
 
                 // Simpler pattern: Math.random() * N
-                let re = regex::Regex::new(r"Math\.random\s*\(\s*\)\s*\*\s*(\d+)").ok()?;
-                if let Some(caps) = re.captures(&body) {
+                if let Some(caps) = WAIT_RANDOM_RE.captures(&body) {
                     let range = caps.get(1)?.as_str().parse::<u64>().ok()?;
                     return Some(rand::thread_rng().gen_range(0..=range));
                 }
@@ -158,16 +174,14 @@ impl WaitBehavior {
         use rand::Rng;
 
         // Extract min value: var min = Math.ceil(N)
-        let min_re = regex::Regex::new(r"var\s+min\s*=\s*Math\.ceil\s*\(\s*(\d+)\s*\)").ok()?;
-        let min_val = min_re
+        let min_val = WAIT_SOLO_MIN_RE
             .captures(body)
             .and_then(|c| c.get(1))
             .and_then(|m| m.as_str().parse::<u64>().ok())
             .unwrap_or(0);
 
         // Extract max value: var max = Math.floor(N)
-        let max_re = regex::Regex::new(r"var\s+max\s*=\s*Math\.floor\s*\(\s*(\d+)\s*\)").ok()?;
-        let max_val = max_re
+        let max_val = WAIT_SOLO_MAX_RE
             .captures(body)
             .and_then(|c| c.get(1))
             .and_then(|m| m.as_str().parse::<u64>().ok())
@@ -286,5 +300,30 @@ mod tests {
     fn wait_function_huge_value_is_capped() {
         let wait = WaitBehavior::Function("function() { return 999999999; }".to_string());
         assert_eq!(wait.get_duration_ms(), 60_000);
+    }
+
+    // Issue #481: the no-`javascript`-feature regex fallback now uses shared LazyLock statics.
+    // Exercise it directly (the default-feature tests above hit the Boa path instead) so every
+    // constant pattern is compiled and matched — this pins that the statics' `.expect` never
+    // fires and the patterns still recognize each shape.
+    #[test]
+    fn wait_regex_fallback_parses_all_patterns() {
+        // Math.floor(Math.random() * N) + M
+        let floor = WaitBehavior::execute_js_wait_function_regex(
+            "function() { return Math.floor(Math.random() * 100) + 50; }",
+        );
+        assert!(matches!(floor, Some(d) if (50..=150).contains(&d)));
+
+        // Math.random() * N (no offset)
+        let random = WaitBehavior::execute_js_wait_function_regex(
+            "function() { return Math.floor(Math.random() * 30); }",
+        );
+        assert!(matches!(random, Some(d) if d <= 30));
+
+        // Solo pattern (var min = Math.ceil(N); var max = Math.floor(M); ...)
+        let solo = WaitBehavior::execute_js_wait_function_regex(
+            "function() { var min = Math.ceil(50); var max = Math.floor(100); var num = Math.floor(Math.random() * (max - min + 1)); var wait = (num + min); return wait; }",
+        );
+        assert!(matches!(solo, Some(d) if (50..=100).contains(&d)));
     }
 }

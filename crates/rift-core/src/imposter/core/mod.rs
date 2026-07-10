@@ -1120,6 +1120,63 @@ mod tests {
         );
     }
 
+    // Issue #481: the `except` regex for the path site now resolves via the shared cache;
+    // this pins that the strip still applies (the method site alone left path/body untested).
+    #[test]
+    fn test_generator_except_applied_to_path() {
+        let imposter = make_test_imposter();
+
+        let generators = vec![json!({
+            "matches": { "path": true },
+            "except": r"\d+$"
+        })];
+
+        let headers = HashMap::new();
+        let predicates = imposter.generate_predicates_from_request(
+            &generators,
+            "GET",
+            "/orders/123",
+            &headers,
+            None,
+            None,
+        );
+
+        assert_eq!(predicates.len(), 1);
+        let path_val = predicates[0]["equals"]["path"].as_str().unwrap();
+        assert_eq!(
+            path_val, "/orders/",
+            "except pattern should strip the trailing digits from the path"
+        );
+    }
+
+    // Issue #481: same for the body except site.
+    #[test]
+    fn test_generator_except_applied_to_body() {
+        let imposter = make_test_imposter();
+
+        let generators = vec![json!({
+            "matches": { "body": true },
+            "except": r"\d+"
+        })];
+
+        let headers = HashMap::new();
+        let predicates = imposter.generate_predicates_from_request(
+            &generators,
+            "POST",
+            "/test",
+            &headers,
+            Some("token=abc123"),
+            None,
+        );
+
+        assert_eq!(predicates.len(), 1);
+        let body_val = predicates[0]["equals"]["body"].as_str().unwrap();
+        assert_eq!(
+            body_val, "token=abc",
+            "except pattern should strip digits from the body"
+        );
+    }
+
     // Fix #109: generate_predicates_from_request now handles query parameters
     #[test]
     fn test_generator_includes_query_parameters() {
