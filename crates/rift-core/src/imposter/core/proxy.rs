@@ -3,6 +3,7 @@
 //! Part of the `Imposter` implementation; see `core/mod.rs` for the struct definition.
 
 use super::*;
+use crate::imposter::predicates::regex_cache::cached_regex;
 
 /// Parts read from a successful upstream proxy response, before recording:
 /// `(status, headers, body, latency_ms)`.
@@ -84,7 +85,7 @@ impl Imposter {
                 let mut path_val = path.to_string();
                 // Apply except pattern if present
                 if let Some(pattern) = except_pattern
-                    && let Ok(re) = regex::Regex::new(pattern)
+                    && let Some(re) = cached_regex(pattern, false)
                 {
                     path_val = re.replace_all(&path_val, "").to_string();
                 }
@@ -99,7 +100,7 @@ impl Imposter {
             {
                 let mut method_val = method.to_string();
                 if let Some(pattern) = except_pattern
-                    && let Ok(re) = regex::Regex::new(pattern)
+                    && let Some(re) = cached_regex(pattern, false)
                 {
                     method_val = re.replace_all(&method_val, "").to_string();
                 }
@@ -154,7 +155,7 @@ impl Imposter {
                 let mut body_val = body_str.to_string();
                 // Apply except pattern if present
                 if let Some(pattern) = except_pattern
-                    && let Ok(re) = regex::Regex::new(pattern)
+                    && let Some(re) = cached_regex(pattern, false)
                 {
                     body_val = re.replace_all(&body_val, "").to_string();
                 }

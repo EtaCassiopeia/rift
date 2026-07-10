@@ -434,7 +434,7 @@ pub(crate) fn predicate_matches_inner(
 
 mod fields;
 mod json;
-mod regex_cache;
+pub(crate) mod regex_cache;
 use fields::{check_predicate_fields, check_predicate_fields_regex};
 use json::check_exists_predicate;
 use regex_cache::cached_regex;
