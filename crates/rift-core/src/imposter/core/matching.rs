@@ -53,6 +53,8 @@ impl Imposter {
         // Parse the request body as JSON once per request and reuse it across every stub's
         // predicates, instead of re-parsing per predicate per stub (issue #290).
         let body_json = body.and_then(|b| serde_json::from_str::<serde_json::Value>(b).ok());
+        // Likewise parse the query string once per request rather than per predicate (issue #480).
+        let query_map = crate::imposter::predicates::parse_query(query);
         for stub_idx in snapshot.candidates(path) {
             let stub_state = &stubs[stub_idx];
             let stub = &stub_state.stub;
@@ -85,6 +87,7 @@ impl Imposter {
                 form.as_ref(),
                 imposter_port,
                 body_json.as_ref(),
+                Some(&query_map),
             )? {
                 // Bump the refcount instead of deep-cloning the whole `StubState` (issue #287).
                 // The caller (`handler.rs`) holds the returned `Arc<StubState>` across `.await`
@@ -213,6 +216,7 @@ impl Imposter {
         let imposter_port = self.script_state_key();
         let flow_id = self.resolve_flow_id(headers_map);
         let body_json = body.and_then(|b| serde_json::from_str::<serde_json::Value>(b).ok());
+        let query_map = crate::imposter::predicates::parse_query(query);
         for (index, stub_state) in stubs.iter().enumerate() {
             let stub = &stub_state.stub;
             if let Some(space) = &stub.space
@@ -238,6 +242,7 @@ impl Imposter {
                 form.as_ref(),
                 imposter_port,
                 body_json.as_ref(),
+                Some(&query_map),
             )? {
                 return Ok(Some((Arc::clone(stub_state), index)));
             }
@@ -578,6 +583,51 @@ mod bounded_matching_tests {
             .await
             .expect("scenario_state through helper");
         assert_eq!(state, INITIAL_SCENARIO_STATE);
+    }
+
+    // Issue #480: the query is parsed once per request in the hot path (find_matching_stub_with_client)
+    // and threaded into predicate matching. Drive a VALUE-based query predicate through that real
+    // entry point to prove the threaded map carries the right keys AND values — not merely presence.
+    #[test]
+    fn hot_path_value_query_predicate_matches() {
+        let imp = imposter(json!([
+            { "predicates": [{ "equals": { "query": { "status": "active" } } }],
+              "responses": [{ "is": { "statusCode": 200 } }] }
+        ]));
+        let headers = no_headers();
+
+        let hit = imp
+            .find_matching_stub_with_client(
+                "GET",
+                "/x",
+                &headers,
+                Some("status=active"),
+                None,
+                None,
+                None,
+            )
+            .expect("no backend error");
+        assert_eq!(
+            hit.map(|(_, i)| i),
+            Some(0),
+            "a value-based query predicate must match via the once-per-request hoisted query map"
+        );
+
+        let miss = imp
+            .find_matching_stub_with_client(
+                "GET",
+                "/x",
+                &headers,
+                Some("status=inactive"),
+                None,
+                None,
+                None,
+            )
+            .expect("no backend error");
+        assert!(
+            miss.is_none(),
+            "the hoisted map must carry query VALUES, not just keys — a wrong value must not match"
+        );
     }
 
     /// A FlowStore that reports `is_blocking() == true` (delegating storage to an in-memory store)
