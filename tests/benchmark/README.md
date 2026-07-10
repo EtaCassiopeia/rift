@@ -168,10 +168,11 @@ hey -z 10s -c 50 http://localhost:5545/api/v1/resource1  # Rift
 
 Results are saved in the `results/` directory:
 
-- `BENCHMARK_REPORT.md` - Summary report with tables
-- `results.csv` - Raw data in CSV format
-- `mountebank_detailed.txt` - Full hey output for Mountebank
-- `rift_detailed.txt` - Full hey output for Rift
+- `BENCHMARK_REPORT.md` - Docker-suite summary report with tables (tracked)
+- `results.csv` - Docker-suite raw data in CSV format (tracked)
+- `mountebank_detailed.txt` / `rift_detailed.txt` - Full `hey` output per engine (gitignored)
+- `DIRECT_BENCHMARK_REPORT.md` / `direct_*.csv` - `bench_direct.py` native run (gitignored, machine-specific)
+- `ADMIN_BENCHMARK_REPORT.md` - `bench_admin.py` admin create/read run (gitignored, machine-specific)
 
 ### Interpreting Results
 
@@ -182,108 +183,140 @@ Results are saved in the `results/` directory:
 
 ## Benchmark Findings
 
-### Latest Results (November 25, 2025)
+### Latest Results (2026-07-09)
 
-Test configuration: 15s duration, 50 concurrent connections, 2 CPUs, 1GB RAM per service
+Regenerated from the Docker suite (`docker compose up -d --build` + `scripts/run-benchmark.sh`)
+so the numbers are directly comparable to the previous run.
+
+- **Rift:** `0.1.0` @ `e539853` · **Mountebank:** `2.9.2`
+- **Config:** 15s per scenario, 50 concurrent connections, both engines capped at **2 CPUs / 1GB RAM**
+- **Host:** Apple M4 (10 cores), macOS · `hey` load generator
+- **Fixture:** 12 imposters, ~1140 stubs (see the table above)
+
+> These are the resource-constrained Docker numbers. Run unconstrained on native
+> processes (`scripts/bench_direct.py`, see [Direct-process mode](#direct-process-mode-no-docker)),
+> Rift serves **160k–205k RPS** on the same host; those numbers aren't comparable to the
+> capped run below and are regenerated per machine.
 
 #### Core Functionality
 
 | Test Scenario | Mountebank (RPS) | Rift (RPS) | Speedup | Avg Latency (MB → Rift) |
 |---------------|------------------|------------|---------|-------------------------|
-| Simple: Health Check | 1,914 | 39,127 | **20x faster** | 26.1ms → 1.3ms |
-| Simple: Ping/Pong | 1,763 | 36,391 | **21x faster** | 28.4ms → 1.4ms |
-| Admin: List Imposters | 6,361 | 29,021 | **4.5x faster** | 7.9ms → 1.7ms |
-| Admin: Get Imposter | 396 | 884 | **2.2x faster** | 125.7ms → 56.4ms |
+| Simple: Health Check | 2,308 | 44,901 | **19x faster** | 21.7ms → 1.1ms |
+| Simple: Ping/Pong | 2,051 | 54,994 | **27x faster** | 24.4ms → 0.9ms |
+| Admin: List Imposters | 9,884 | 29,747 | **3.0x faster** | 5.1ms → 1.7ms |
+| Admin: Get Imposter | 452 | 758 | **1.7x faster** | 110.3ms → 65.8ms |
 
 #### API Stub Matching (500 stubs)
 
 | Test Scenario | Mountebank (RPS) | Rift (RPS) | Speedup | Avg Latency (MB → Rift) |
 |---------------|------------------|------------|---------|-------------------------|
-| API: First Stub Match | 1,865 | 33,422 | **18x faster** | 26.8ms → 1.5ms |
-| API: Middle Stub Match | 589 | 25,512 | **43x faster** | 84.6ms → 2.0ms |
-| API: Last Stub Match | 290 | 22,042 | **76x faster** | 171.1ms → 2.3ms |
-| API: No Match (404) | 297 | 22,664 | **76x faster** | 167.0ms → 2.2ms |
+| API: First Stub Match | 2,342 | 40,226 | **17x faster** | 21.3ms → 1.2ms |
+| API: Middle Stub Match | 590 | 41,978 | **71x faster** | 84.3ms → 1.2ms |
+| API: Last Stub Match | 364 | 37,905 | **104x faster** | 136.8ms → 1.3ms |
+| API: No Match (404) | 261 | 42,296 | **162x faster** | 190.6ms → 1.2ms |
 
 #### JSON Body Matching
 
 | Test Scenario | Mountebank (RPS) | Rift (RPS) | Speedup | Avg Latency (MB → Rift) |
 |---------------|------------------|------------|---------|-------------------------|
-| JSON: Body Equals (First) | 1,794 | 29,252 | **16x faster** | 27.9ms → 1.7ms |
-| JSON: Body Equals (Middle) | 1,022 | 24,052 | **24x faster** | 48.8ms → 2.1ms |
-| JSON: Body Contains | 1,272 | 24,352 | **19x faster** | 39.3ms → 2.1ms |
+| JSON: Body Equals (First) | 2,301 | 45,417 | **20x faster** | 21.7ms → 1.1ms |
+| JSON: Body Equals (Middle) | 1,662 | 45,052 | **27x faster** | 30.1ms → 1.1ms |
+| JSON: Body Contains | 2,078 | 47,831 | **23x faster** | 24.1ms → 1.0ms |
 
 #### JSONPath Predicates (Standout Performance)
 
 | Test Scenario | Mountebank (RPS) | Rift (RPS) | Speedup | Avg Latency (MB → Rift) |
 |---------------|------------------|------------|---------|-------------------------|
-| JSONPath: First Match | 107 | 26,583 | **247x faster** | 458.8ms → 1.9ms |
-| JSONPath: Middle Match | 129 | 28,751 | **221x faster** | 380.5ms → 1.7ms |
-| JSONPath: Last Match | 124 | 27,070 | **218x faster** | 397.1ms → 1.8ms |
+| JSONPath: First Match | 136 | 42,043 | **310x faster** | 363.7ms → 1.2ms |
+| JSONPath: Middle Match | 177 | 33,065 | **187x faster** | 280.1ms → 1.5ms |
+| JSONPath: Last Match | 185 | 29,402 | **159x faster** | 268.4ms → 1.7ms |
 
-#### XPath Predicates (Standout Performance)
+#### XPath Predicates
 
 | Test Scenario | Mountebank (RPS) | Rift (RPS) | Speedup | Avg Latency (MB → Rift) |
 |---------------|------------------|------------|---------|-------------------------|
-| XPath: First Match | 169 | 28,745 | **170x faster** | 292.4ms → 1.7ms |
-| XPath: Middle Match | 168 | 27,234 | **161x faster** | 293.3ms → 1.8ms |
-| XPath: Last Match | 173 | 27,248 | **157x faster** | 285.1ms → 1.8ms |
+| XPath: First Match | 240 | 39,791 | **166x faster** | 206.5ms → 1.3ms |
+| XPath: Middle Match | 236 | 8,964 | **38x faster** | 210.1ms → 5.6ms |
+| XPath: Last Match | 82 | 3,168 | **39x faster** | 598.4ms → 15.8ms |
+
+> XPath is the one matcher where **Rift itself degrades with stub position** (40k → 9k → 3k):
+> an XPath selector can't be hash-dispatched, so each candidate stub re-evaluates the document.
+> It's still 38–166x faster than Mountebank, but it's Rift's weakest predicate and the clearest
+> optimization target.
 
 #### Regex Matching
 
 | Test Scenario | Mountebank (RPS) | Rift (RPS) | Speedup | Avg Latency (MB → Rift) |
 |---------------|------------------|------------|---------|-------------------------|
-| Regex: First Pattern | 1,560 | 7,040 | **4.5x faster** | 32.0ms → 7.1ms |
-| Regex: Middle Pattern | 118 | 257 | **2.1x faster** | 414.9ms → 193.0ms |
-| Regex: Last Pattern | 65 | 130 | **2.0x faster** | 749.1ms → 378.2ms |
+| Regex: First Pattern | 2,049 | 47,440 | **23x faster** | 24.4ms → 1.1ms |
+| Regex: Middle Pattern | 174 | 40,800 | **235x faster** | 285.3ms → 1.2ms |
+| Regex: Last Pattern | 94 | 31,234 | **331x faster** | 522.3ms → 1.6ms |
+
+> Regex is the biggest mover since the previous run: Rift went from ~130–7,000 RPS (and heavy
+> position-dependent decay) to a flat **31k–47k RPS**. It no longer collapses on the 100th pattern.
 
 #### Template Responses
 
 | Test Scenario | Mountebank (RPS) | Rift (RPS) | Speedup | Avg Latency (MB → Rift) |
 |---------------|------------------|------------|---------|-------------------------|
-| Template: Simple | 1,856 | 26,858 | **14x faster** | 26.9ms → 1.9ms |
-| Template: With Query | 1,349 | 28,158 | **21x faster** | 37.0ms → 1.8ms |
+| Template: Simple | 1,705 | 19,454 | **11x faster** | 29.3ms → 2.6ms |
+| Template: With Query | 1,684 | 43,071 | **26x faster** | 29.7ms → 1.2ms |
 
 #### Header & Query Routing
 
 | Test Scenario | Mountebank (RPS) | Rift (RPS) | Speedup | Avg Latency (MB → Rift) |
 |---------------|------------------|------------|---------|-------------------------|
-| Header: First Route | 1,763 | 27,937 | **16x faster** | 28.3ms → 1.8ms |
-| Header: Middle Route | 1,199 | 29,345 | **24x faster** | 41.6ms → 1.7ms |
-| Header: Last Route | 843 | 28,971 | **34x faster** | 59.2ms → 1.7ms |
-| Query: First Match | 1,787 | 28,549 | **16x faster** | 28.0ms → 1.8ms |
-| Query: Middle Match | 1,143 | 24,425 | **21x faster** | 43.7ms → 2.0ms |
-| Query: Last Match | 801 | 21,185 | **26x faster** | 62.2ms → 2.4ms |
+| Header: First Route | 2,258 | 43,801 | **19x faster** | 22.1ms → 1.1ms |
+| Header: Middle Route | 1,447 | 26,149 | **18x faster** | 34.5ms → 1.9ms |
+| Header: Last Route | 425 | 18,284 | **43x faster** | 117.2ms → 2.7ms |
+| Query: First Match | 1,998 | 37,741 | **19x faster** | 25.0ms → 1.3ms |
+| Query: Middle Match | 1,496 | 32,211 | **22x faster** | 33.4ms → 1.6ms |
+| Query: Last Match | 968 | 23,554 | **24x faster** | 51.6ms → 2.1ms |
 
 #### Decorate Behaviors & Stress
 
 | Test Scenario | Mountebank (RPS) | Rift (RPS) | Speedup | Avg Latency (MB → Rift) |
 |---------------|------------------|------------|---------|-------------------------|
-| Decorate: First | 1,759 | 6,141 | **3.4x faster** | 28.4ms → 8.1ms |
-| Decorate: Middle | 1,640 | 5,980 | **3.6x faster** | 30.4ms → 8.4ms |
-| Complex: AND/OR | 904 | 29,322 | **32x faster** | 55.2ms → 1.7ms |
-| Stress: 200 Concurrent | 1,830 | 29,716 | **16x faster** | 109.1ms → 6.7ms |
+| Decorate: First | 2,183 | 12,735 | **5.8x faster** | 22.9ms → 3.9ms |
+| Decorate: Middle | 1,719 | 12,478 | **7.3x faster** | 29.1ms → 4.0ms |
+| Complex: AND/OR | 957 | 40,842 | **43x faster** | 52.1ms → 1.2ms |
+| Stress: 200 Concurrent | 2,276 | 49,918 | **22x faster** | 87.8ms → 4.0ms |
 
 ### Key Findings
 
-1. **JSONPath/XPath Performance**: The most dramatic improvements are in JSONPath (**217-247x faster**) and XPath (**157-170x faster**) predicates. Mountebank's JavaScript-based implementations are extremely slow (~100-170 RPS), while Rift's native Rust implementations maintain ~27k RPS.
+1. **Regex, massively improved**: The biggest change since the previous run. Rift's regex path went
+   from ~130–7,000 RPS (with steep position-dependent decay) to a flat **31k–47k RPS**, no longer
+   collapsing at the 100th pattern. Now **23–331x** faster than Mountebank, whose JS `RegExp` scan
+   falls to 94 RPS at the last pattern.
 
-2. **Stub Lookup Performance**: Rift's performance remains consistent regardless of stub position. Mountebank shows linear degradation as stub count increases (290 RPS for last stub vs 1,865 RPS for first stub). Rift maintains ~22-33k RPS across all positions.
+2. **Stub-position independence**: For hash-dispatched predicates (exact path/method, JSON body,
+   header/query, regex) Rift holds **~30k–55k RPS** whether the matching stub is first or last, and
+   on a no-match 404. Mountebank degrades linearly with stub count (2,342 → 261 RPS,
+   first → no-match) — up to **162x** at the tail.
 
-3. **404 Handling**: **76x faster** when no stub matches. Mountebank must iterate through all stubs before returning 404, while Rift's optimized matching is significantly faster.
+3. **JSONPath / complex predicates**: **43–310x** faster. Native Rust evaluation stays 29k–43k RPS
+   while Mountebank's JavaScript path runs 136–960 RPS.
 
-4. **Complex Predicates**: **32x** improvement for AND/OR predicate combinations, showing efficient predicate evaluation in Rust.
+4. **XPath is the exception**: XPath is the only matcher where *Rift* degrades with stub position
+   (39,791 → 8,964 → 3,168 RPS) because an XPath selector can't be hash-dispatched. Still 38–166x
+   faster than Mountebank, but it's Rift's weakest predicate and the clearest thing left to optimize.
 
-5. **JSON Body Matching**: **16-24x faster** for JSON body predicates (equals, contains), demonstrating efficient JSON parsing and matching.
+5. **Latency**: Rift average latency stays **0.9–2.7ms** on hash-dispatched scenarios (XPath-last and
+   decorate are the outliers at 15.8ms / 3.9ms), while Mountebank ranges 5–598ms depending on stub
+   count, match position, and predicate type.
 
-6. **Template Responses**: **14-21x faster** for EJS template rendering, with Rift's native template engine outperforming Node.js.
+6. **Templates & decorate**: The smallest margins — templates **11–26x**, decorate (JS injection)
+   **5.8–7.3x** — because both engines execute JavaScript on that path; Rift wins on request-handling
+   overhead rather than the interpreter.
 
-7. **Header/Query Routing**: **16-34x faster** for header and query parameter matching, with consistent performance regardless of match position.
+7. **High concurrency**: Under 200 concurrent connections Rift sustains 49,918 RPS vs Mountebank's
+   2,276 RPS (**22x**).
 
-8. **Decorate Behaviors**: **3.4-3.6x faster** for JavaScript injection behaviors. This is the smallest improvement because both implementations execute JavaScript, but Rift still benefits from faster request handling overhead.
-
-9. **High Concurrency**: Under 200 concurrent connections, Rift maintains 29,716 RPS vs Mountebank's 1,830 RPS (**16x** improvement).
-
-10. **Latency Consistency**: Rift maintains consistent low latency (1.3-8.4ms) across all scenarios, while Mountebank latency varies widely (7.9-749ms) depending on stub count, match position, and predicate type.
+8. **Admin plane / overlap analysis** (`scripts/bench_admin.py`): creating 1,000 fully-overlapping
+   stubs — the O(n²) case issue #423 fixed — Rift creates in **5.0ms vs Mountebank's 60ms** and grows
+   RSS **+9MB vs +72MB (8x less memory)**, while still computing 101 stub-overlap warnings that
+   Mountebank does not produce.
 
 ### Architecture Comparison
 

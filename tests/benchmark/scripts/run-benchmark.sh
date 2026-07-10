@@ -119,13 +119,14 @@ run_benchmark() {
     # Extract metrics
     mb_rps=$(echo "$mb_result" | grep "Requests/sec:" | awk '{print $2}')
     mb_avg=$(echo "$mb_result" | grep "Average:" | head -1 | awk '{print $2}')
-    mb_p50=$(echo "$mb_result" | grep -E "^\s*50%" | awk '{print $2}' | head -1)
-    mb_p99=$(echo "$mb_result" | grep -E "^\s*99%" | awk '{print $2}' | head -1)
+    # hey prints "  50% in 0.0011 secs" — the latency value is field 3, not field 2.
+    mb_p50=$(echo "$mb_result" | grep -E "^\s*50%" | awk '{print $3}' | head -1)
+    mb_p99=$(echo "$mb_result" | grep -E "^\s*99%" | awk '{print $3}' | head -1)
 
     rift_rps=$(echo "$rift_result" | grep "Requests/sec:" | awk '{print $2}')
     rift_avg=$(echo "$rift_result" | grep "Average:" | head -1 | awk '{print $2}')
-    rift_p50=$(echo "$rift_result" | grep -E "^\s*50%" | awk '{print $2}' | head -1)
-    rift_p99=$(echo "$rift_result" | grep -E "^\s*99%" | awk '{print $2}' | head -1)
+    rift_p50=$(echo "$rift_result" | grep -E "^\s*50%" | awk '{print $3}' | head -1)
+    rift_p99=$(echo "$rift_result" | grep -E "^\s*99%" | awk '{print $3}' | head -1)
 
     # Default to N/A if not found
     [ -z "$mb_p50" ] && mb_p50="N/A"
