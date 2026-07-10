@@ -186,7 +186,7 @@ impl FlowStore for InMemoryFlowStore {
 
         // Nested keying (issue #483): touch only this flow's entries, not the whole store.
         if let Some(flow) = data.get_mut(flow_id) {
-            for (_, (_, expiry)) in flow.iter_mut() {
+            for (_, expiry) in flow.values_mut() {
                 *expiry = Some(new_expiry);
             }
         }
