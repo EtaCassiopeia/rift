@@ -175,22 +175,37 @@ async fn predicate_inject_error_returns_400() {
 
 // Issue #499: a script hook that exceeds its wall-clock deadline is a transient 504 carrying the
 // `x-rift-script-timeout` marker — distinct from the 400/500 a genuinely broken script returns, so
-// monitoring can tell a retry-worthy timeout apart from a permanent config error. Each Boa test
-// parks a pool worker on a runaway loop until the #327 iteration cap frees it; the loop is finite
-// so the worker is reclaimed after the 50ms deadline fires (this is the pool-parking the module
-// doc cites as the reason these tests live in a separate process).
-const SLOW_JS_LOOP: &str = "var i = 0; while (i < 100000000) { i += 1; }";
+// monitoring can tell a retry-worthy timeout apart from a permanent config error.
+//
+// Design of the Boa (JS) timeout tests to keep them cheap and non-flaky: the deadline is 1ms, so
+// the CLIENT is released with a 504 almost immediately, while the loop is only ~2M iterations —
+// large enough to always outlast a 1ms deadline (so the timeout reliably fires) yet small enough
+// that the Boa worker it parks is reclaimed in well under a second. Boa has no per-instruction
+// interrupt, so a JS timeout necessarily parks its worker until the loop returns; capping the loop
+// bounds that parking. The four JS timeout tests additionally serialize on [`js_pool_serial`] so at
+// most one Boa worker is ever parked at a time — the shared MB script pool then always has free
+// workers for the throwing-inject/predicate tests running concurrently. (An earlier version used a
+// 100M-iteration loop that, under CI's parallel execution + CPU contention, parked every pool
+// worker for tens of seconds and starved those tests until the job was cancelled.)
+const SLOW_JS_LOOP: &str = "var i = 0; while (i < 2000000) { i += 1; }";
+
+// Serializes the Boa-based timeout tests so only one parks an MB script-pool worker at a time.
+fn js_pool_serial() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
 
 // AC1: a response inject that misses the deadline → 504 `injection timeout` + both markers; a
 // throwing inject still returns 400 `invalid injection` (pinned by `throwing_inject_...` above).
 #[tokio::test]
 async fn inject_timeout_returns_504() {
+    let _serial = js_pool_serial().lock().await;
     let manager = ImposterManager::new();
     create(
         &manager,
         serde_json::json!({
             "port": 19760, "protocol": "http",
-            "_rift": { "scriptEngine": { "timeoutMs": 50 } },
+            "_rift": { "scriptEngine": { "timeoutMs": 1 } },
             "stubs": [
                 { "responses": [{ "inject": format!("function (config) {{ {SLOW_JS_LOOP} return {{ statusCode: 200 }}; }}") }] }
             ]
@@ -219,12 +234,13 @@ async fn inject_timeout_returns_504() {
 // a throwing predicate still returns 400 `invalid predicate injection` (pinned above).
 #[tokio::test]
 async fn predicate_inject_timeout_returns_504() {
+    let _serial = js_pool_serial().lock().await;
     let manager = ImposterManager::new();
     create(
         &manager,
         serde_json::json!({
             "port": 19761, "protocol": "http",
-            "_rift": { "scriptEngine": { "timeoutMs": 50 } },
+            "_rift": { "scriptEngine": { "timeoutMs": 1 } },
             "stubs": [
                 { "predicates": [{ "inject": format!("function (config) {{ {SLOW_JS_LOOP} return true; }}") }],
                   "responses": [{ "is": { "statusCode": 200, "body": "unreached" } }] }
@@ -285,12 +301,13 @@ async fn rift_script_timeout_returns_504() {
 // BOTH `x-rift-decorate-error` and the timeout marker.
 #[tokio::test]
 async fn decorate_timeout_lenient_serves_original_with_markers() {
+    let _serial = js_pool_serial().lock().await;
     let manager = ImposterManager::new();
     create(
         &manager,
         serde_json::json!({
             "port": 19763, "protocol": "http",
-            "_rift": { "scriptEngine": { "timeoutMs": 50 } },
+            "_rift": { "scriptEngine": { "timeoutMs": 1 } },
             "stubs": [
                 { "responses": [{ "is": { "statusCode": 200, "body": "original" },
                   "_behaviors": { "decorate": format!("config => {{ {SLOW_JS_LOOP} }}") } }] }
@@ -328,12 +345,13 @@ async fn decorate_timeout_lenient_serves_original_with_markers() {
 // 500), with both markers.
 #[tokio::test]
 async fn decorate_timeout_strict_returns_504() {
+    let _serial = js_pool_serial().lock().await;
     let manager = ImposterManager::new();
     create(
         &manager,
         serde_json::json!({
             "port": 19764, "protocol": "http", "strictBehaviors": true,
-            "_rift": { "scriptEngine": { "timeoutMs": 50 } },
+            "_rift": { "scriptEngine": { "timeoutMs": 1 } },
             "stubs": [
                 { "responses": [{ "is": { "statusCode": 200, "body": "original" },
                   "_behaviors": { "decorate": format!("config => {{ {SLOW_JS_LOOP} }}") } }] }
