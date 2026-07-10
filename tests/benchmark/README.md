@@ -1,411 +1,110 @@
 # Rift vs Mountebank Performance Benchmark
 
-This benchmark suite compares the performance of Rift (Rust-based HTTP proxy) against Mountebank (Node.js-based service virtualization tool) using identical configurations.
+Compares [Rift](https://github.com/EtaCassiopeia/rift) (Rust) against
+[Mountebank](http://www.mbtest.org/) (Node.js) on byte-identical imposter
+configs. Two harnesses, both native processes (no Docker):
 
-## Quick Start
+- **`bench_direct.py`** — request *serving* throughput and tail latency.
+- **`bench_admin.py`** — the admin control plane: creating an imposter with many
+  stubs and reading it back (where Rift's stub-overlap analysis, issue #423, lives).
+
+## Prerequisites
 
 ```bash
-# 1. Install required tools
-./scripts/install-tools.sh
-
-# 2. Start the benchmark environment
-docker compose up -d --build
-
-# 3. Run the benchmark suite
-./scripts/run-benchmark.sh
-
-# 4. View results
-cat results/BENCHMARK_REPORT.md
-
-# 5. Cleanup
-docker compose down -v
+cargo build --release -p rift-http-proxy          # build Rift from this repo
+cargo install oha                                 # load generator
+npm install --prefix ~/bench-mb mountebank@2.9.1  # reference engine
+# python3 is used to orchestrate the runs
 ```
 
-## Direct-process mode (no Docker)
+> `oha` initialises a TLS stack that reads the macOS keychain even for plain-HTTP
+> targets — run these outside a restricted sandbox.
 
-`scripts/bench_direct.py` runs the same comparison without Docker — useful on
-machines where cgroup limits aren't available (e.g. macOS) or where you'd
-rather give each engine the whole box.
+## Running
 
 ```bash
-# Prereqs: oha (load generator) on PATH, a release Rift binary, and mountebank
-#   cargo build --release -p rift-http-proxy
-#   npm install mountebank@2.9.1        # into ~/bench-mb, or pass --mb-bin
+cd tests/benchmark
 
+# Serving throughput (13 scenarios, ~10 min)
 python3 scripts/bench_direct.py --run-all \
     --duration 20s --warmup 3s --connections 50 \
     --rift-bin ../../target/release/rift-http-proxy \
     --mb-bin ~/bench-mb/node_modules/mountebank/bin/mb
-
 cat results/DIRECT_BENCHMARK_REPORT.md
-```
 
-How it stays fair and correct:
-
-- **Sequential, not concurrent** — each engine runs alone, so they never
-  contend for CPU on a shared machine.
-- **Disjoint port ranges** — Rift on `2525`/`4545+`, Mountebank on
-  `2625`/`4645+`. Even if one engine fails to shut down it cannot be measured
-  in place of the other.
-- **Hard teardown** — each engine is launched in its own process group and
-  killed by group + `lsof`; its ports must be confirmed free before the next
-  engine starts.
-- **Response assertions** — every scenario sends one real request first and
-  checks the returned **body** (not just a 2xx status) proves the intended stub
-  matched. A request that falls through to the empty no-match default aborts the
-  run, so a mis-configured stub can't silently inflate throughput.
-- **Identical configs** — both engines get byte-identical imposter JSON.
-
-> `oha` initialises a TLS stack that reads the macOS keychain even for
-> plain-HTTP targets, so run this outside a restricted sandbox.
-
-
-Install all tools automatically:
-```bash
-./scripts/install-tools.sh
-```
-
-## Admin create/read mode
-
-`scripts/bench_direct.py` measures request *serving*. `scripts/bench_admin.py` measures the other
-side of the engine — the **admin control plane**: the cost of creating an imposter with many stubs
-and reading it back. This is where Rift's stub-overlap analysis lives (issue #423), a Rift
-extension Mountebank does not perform, so it is where the two engines' admin behaviour differs
-most.
-
-```bash
+# Admin create/read
 python3 scripts/bench_admin.py --run-all \
     --rift-bin ../../target/release/rift-http-proxy \
     --mb-bin ~/bench-mb/node_modules/mountebank/bin/mb
-
 cat results/ADMIN_BENCHMARK_REPORT.md
 ```
 
-For each engine and each (predicate shape, stub count) it launches a **fresh** engine process (so
-the RSS delta is isolated), `POST`s one imposter, then `GET`s it five times, recording create
-latency, GET latency, process RSS delta, response size, and Rift's `_rift.warnings` count
-(Mountebank's is always 0). Two shapes are exercised: `identical/overlap` (all stubs share one
-predicate — the O(n²)-prone case #423 fixed) and `distinct` (the cheap control). Same
-sequential/disjoint-port/hard-teardown discipline as `bench_direct.py`.
-
-
-
-### Test Environment
-
-Both services run with identical resource constraints:
-- **CPUs:** 2 cores
-- **Memory:** 1GB RAM
-- **Network:** Docker bridge network
-
-### Imposters Configuration
-
-The benchmark creates 12 imposters with varying complexity:
-
-| Port (MB/Rift) | Name | Stubs | Description |
-|----------------|------|-------|-------------|
-| 4545/5545 | API Server | ~500 | REST API simulation with CRUD endpoints |
-| 4546/5546 | Regex Matcher | 100 | Regex pattern matching stubs |
-| 4547/5547 | Complex Predicates | 50 | AND/OR predicate combinations |
-| 4548/5548 | Behaviors | 20 | Wait/delay behaviors |
-| 4549/5549 | Simple Baseline | 2 | Minimal stubs for baseline |
-| 4550/5550 | JSON Body Matcher | 100 | JSON body equals/contains predicates |
-| 4551/5551 | JSONPath Matcher | 100 | JSONPath expression predicates |
-| 4552/5552 | XPath Matcher | 100 | XPath expression predicates (XML) |
-| 4553/5553 | Template Responses | 50 | EJS template response generation |
-| 4554/5554 | Header Router | 100 | Header-based routing predicates |
-| 4555/5555 | Query Param Matcher | 100 | Query string matching predicates |
-| 4556/5556 | Decorate Behaviors | 20 | JavaScript injection behaviors |
-
-**Total: ~1140+ stubs across all imposters**
-
-### Test Scenarios
-
-1. **Simple Baseline** - Health check endpoints with minimal stubs
-2. **Admin API** - Imposter listing and retrieval operations
-3. **API Endpoints** - REST API with many stubs (first/middle/last match)
-4. **Regex Matching** - Pattern matching with regex predicates
-5. **Complex Predicates** - AND/OR/NOT predicate combinations
-6. **JSON Body Matching** - Body equals and contains predicates
-7. **JSONPath Predicates** - JSONPath expression matching
-8. **XPath Predicates** - XPath expression matching for XML
-9. **Template Responses** - EJS template rendering with variables
-10. **Header Routing** - Header-based request routing
-11. **Query Parameter Matching** - Query string predicate matching
-12. **Decorate Behaviors** - JavaScript injection for response modification
-13. **Stress Test** - High concurrency (200 connections)
-
-## Running Benchmarks
-
-### Full Benchmark Suite
-
-```bash
-# Default: 30s duration, 50 concurrent connections
-./scripts/run-benchmark.sh
-```
-
-### Custom Configuration
-
-```bash
-# Longer duration, more connections
-DURATION=60s CONNECTIONS=100 ./scripts/run-benchmark.sh
-
-# Quick smoke test
-DURATION=10s CONNECTIONS=20 ./scripts/run-benchmark.sh
-```
-
-### Manual Testing
-
-```bash
-# Setup imposters only
-./scripts/setup-imposters.sh
-
-# Test individual endpoints
-hey -z 10s -c 50 http://localhost:4545/api/v1/resource1  # Mountebank
-hey -z 10s -c 50 http://localhost:5545/api/v1/resource1  # Rift
-```
-
-## Results
-
-Results are saved in the `results/` directory:
-
-- `BENCHMARK_REPORT.md` - Docker-suite summary report with tables (tracked)
-- `results.csv` - Docker-suite raw data in CSV format (tracked)
-- `mountebank_detailed.txt` / `rift_detailed.txt` - Full `hey` output per engine (gitignored)
-- `DIRECT_BENCHMARK_REPORT.md` / `direct_*.csv` - `bench_direct.py` native run (gitignored, machine-specific)
-- `ADMIN_BENCHMARK_REPORT.md` - `bench_admin.py` admin create/read run (gitignored, machine-specific)
-
-### Interpreting Results
-
-- **RPS (Requests/sec)** - Higher is better
-- **Latency** - Lower is better (measured in ms or seconds)
-- **P50/P99** - 50th and 99th percentile latencies
-- **Improvement** - Percentage improvement of Rift over Mountebank
-
-## Benchmark Findings
-
-### Latest Results (2026-07-09)
-
-Regenerated from the Docker suite (`docker compose up -d --build` + `scripts/run-benchmark.sh`)
-so the numbers are directly comparable to the previous run.
-
-- **Rift:** `0.1.0` @ `e539853` · **Mountebank:** `2.9.2`
-- **Config:** 15s per scenario, 50 concurrent connections, both engines capped at **2 CPUs / 1GB RAM**
-- **Host:** Apple M4 (10 cores), macOS · `hey` load generator
-- **Fixture:** 12 imposters, ~1140 stubs (see the table above)
-
-> These are the resource-constrained Docker numbers. Run unconstrained on native
-> processes (`scripts/bench_direct.py`, see [Direct-process mode](#direct-process-mode-no-docker)),
-> Rift serves **160k–205k RPS** on the same host; those numbers aren't comparable to the
-> capped run below and are regenerated per machine.
-
-#### Core Functionality
-
-| Test Scenario | Mountebank (RPS) | Rift (RPS) | Speedup | Avg Latency (MB → Rift) |
-|---------------|------------------|------------|---------|-------------------------|
-| Simple: Health Check | 2,308 | 44,901 | **19x faster** | 21.7ms → 1.1ms |
-| Simple: Ping/Pong | 2,051 | 54,994 | **27x faster** | 24.4ms → 0.9ms |
-| Admin: List Imposters | 9,884 | 29,747 | **3.0x faster** | 5.1ms → 1.7ms |
-| Admin: Get Imposter | 452 | 758 | **1.7x faster** | 110.3ms → 65.8ms |
-
-#### API Stub Matching (500 stubs)
-
-| Test Scenario | Mountebank (RPS) | Rift (RPS) | Speedup | Avg Latency (MB → Rift) |
-|---------------|------------------|------------|---------|-------------------------|
-| API: First Stub Match | 2,342 | 40,226 | **17x faster** | 21.3ms → 1.2ms |
-| API: Middle Stub Match | 590 | 41,978 | **71x faster** | 84.3ms → 1.2ms |
-| API: Last Stub Match | 364 | 37,905 | **104x faster** | 136.8ms → 1.3ms |
-| API: No Match (404) | 261 | 42,296 | **162x faster** | 190.6ms → 1.2ms |
-
-#### JSON Body Matching
-
-| Test Scenario | Mountebank (RPS) | Rift (RPS) | Speedup | Avg Latency (MB → Rift) |
-|---------------|------------------|------------|---------|-------------------------|
-| JSON: Body Equals (First) | 2,301 | 45,417 | **20x faster** | 21.7ms → 1.1ms |
-| JSON: Body Equals (Middle) | 1,662 | 45,052 | **27x faster** | 30.1ms → 1.1ms |
-| JSON: Body Contains | 2,078 | 47,831 | **23x faster** | 24.1ms → 1.0ms |
-
-#### JSONPath Predicates (Standout Performance)
-
-| Test Scenario | Mountebank (RPS) | Rift (RPS) | Speedup | Avg Latency (MB → Rift) |
-|---------------|------------------|------------|---------|-------------------------|
-| JSONPath: First Match | 136 | 42,043 | **310x faster** | 363.7ms → 1.2ms |
-| JSONPath: Middle Match | 177 | 33,065 | **187x faster** | 280.1ms → 1.5ms |
-| JSONPath: Last Match | 185 | 29,402 | **159x faster** | 268.4ms → 1.7ms |
-
-#### XPath Predicates
-
-| Test Scenario | Mountebank (RPS) | Rift (RPS) | Speedup | Avg Latency (MB → Rift) |
-|---------------|------------------|------------|---------|-------------------------|
-| XPath: First Match | 240 | 39,791 | **166x faster** | 206.5ms → 1.3ms |
-| XPath: Middle Match | 236 | 8,964 | **38x faster** | 210.1ms → 5.6ms |
-| XPath: Last Match | 82 | 3,168 | **39x faster** | 598.4ms → 15.8ms |
-
-> XPath is the one matcher where **Rift itself degrades with stub position** (40k → 9k → 3k):
-> an XPath selector can't be hash-dispatched, so each candidate stub re-evaluates the document.
-> It's still 38–166x faster than Mountebank, but it's Rift's weakest predicate and the clearest
-> optimization target.
-
-#### Regex Matching
-
-| Test Scenario | Mountebank (RPS) | Rift (RPS) | Speedup | Avg Latency (MB → Rift) |
-|---------------|------------------|------------|---------|-------------------------|
-| Regex: First Pattern | 2,049 | 47,440 | **23x faster** | 24.4ms → 1.1ms |
-| Regex: Middle Pattern | 174 | 40,800 | **235x faster** | 285.3ms → 1.2ms |
-| Regex: Last Pattern | 94 | 31,234 | **331x faster** | 522.3ms → 1.6ms |
-
-> Regex is the biggest mover since the previous run: Rift went from ~130–7,000 RPS (and heavy
-> position-dependent decay) to a flat **31k–47k RPS**. It no longer collapses on the 100th pattern.
-
-#### Template Responses
-
-| Test Scenario | Mountebank (RPS) | Rift (RPS) | Speedup | Avg Latency (MB → Rift) |
-|---------------|------------------|------------|---------|-------------------------|
-| Template: Simple | 1,705 | 19,454 | **11x faster** | 29.3ms → 2.6ms |
-| Template: With Query | 1,684 | 43,071 | **26x faster** | 29.7ms → 1.2ms |
-
-#### Header & Query Routing
-
-| Test Scenario | Mountebank (RPS) | Rift (RPS) | Speedup | Avg Latency (MB → Rift) |
-|---------------|------------------|------------|---------|-------------------------|
-| Header: First Route | 2,258 | 43,801 | **19x faster** | 22.1ms → 1.1ms |
-| Header: Middle Route | 1,447 | 26,149 | **18x faster** | 34.5ms → 1.9ms |
-| Header: Last Route | 425 | 18,284 | **43x faster** | 117.2ms → 2.7ms |
-| Query: First Match | 1,998 | 37,741 | **19x faster** | 25.0ms → 1.3ms |
-| Query: Middle Match | 1,496 | 32,211 | **22x faster** | 33.4ms → 1.6ms |
-| Query: Last Match | 968 | 23,554 | **24x faster** | 51.6ms → 2.1ms |
-
-#### Decorate Behaviors & Stress
-
-| Test Scenario | Mountebank (RPS) | Rift (RPS) | Speedup | Avg Latency (MB → Rift) |
-|---------------|------------------|------------|---------|-------------------------|
-| Decorate: First | 2,183 | 12,735 | **5.8x faster** | 22.9ms → 3.9ms |
-| Decorate: Middle | 1,719 | 12,478 | **7.3x faster** | 29.1ms → 4.0ms |
-| Complex: AND/OR | 957 | 40,842 | **43x faster** | 52.1ms → 1.2ms |
-| Stress: 200 Concurrent | 2,276 | 49,918 | **22x faster** | 87.8ms → 4.0ms |
-
-### Key Findings
-
-1. **Regex, massively improved**: The biggest change since the previous run. Rift's regex path went
-   from ~130–7,000 RPS (with steep position-dependent decay) to a flat **31k–47k RPS**, no longer
-   collapsing at the 100th pattern. Now **23–331x** faster than Mountebank, whose JS `RegExp` scan
-   falls to 94 RPS at the last pattern.
-
-2. **Stub-position independence**: For hash-dispatched predicates (exact path/method, JSON body,
-   header/query, regex) Rift holds **~30k–55k RPS** whether the matching stub is first or last, and
-   on a no-match 404. Mountebank degrades linearly with stub count (2,342 → 261 RPS,
-   first → no-match) — up to **162x** at the tail.
-
-3. **JSONPath / complex predicates**: **43–310x** faster. Native Rust evaluation stays 29k–43k RPS
-   while Mountebank's JavaScript path runs 136–960 RPS.
-
-4. **XPath is the exception**: XPath is the only matcher where *Rift* degrades with stub position
-   (39,791 → 8,964 → 3,168 RPS) because an XPath selector can't be hash-dispatched. Still 38–166x
-   faster than Mountebank, but it's Rift's weakest predicate and the clearest thing left to optimize.
-
-5. **Latency**: Rift average latency stays **0.9–2.7ms** on hash-dispatched scenarios (XPath-last and
-   decorate are the outliers at 15.8ms / 3.9ms), while Mountebank ranges 5–598ms depending on stub
-   count, match position, and predicate type.
-
-6. **Templates & decorate**: The smallest margins — templates **11–26x**, decorate (JS injection)
-   **5.8–7.3x** — because both engines execute JavaScript on that path; Rift wins on request-handling
-   overhead rather than the interpreter.
-
-7. **High concurrency**: Under 200 concurrent connections Rift sustains 49,918 RPS vs Mountebank's
-   2,276 RPS (**22x**).
-
-8. **Admin plane / overlap analysis** (`scripts/bench_admin.py`): creating 1,000 fully-overlapping
-   stubs — the O(n²) case issue #423 fixed — Rift creates in **5.0ms vs Mountebank's 60ms** and grows
-   RSS **+9MB vs +72MB (8x less memory)**, while still computing 101 stub-overlap warnings that
-   Mountebank does not produce.
-
-### Architecture Comparison
-
-| Aspect | Mountebank | Rift |
-|--------|------------|------|
-| Language | Node.js (JavaScript) | Rust |
-| Concurrency | Single-threaded event loop | Multi-threaded (Tokio) |
-| Memory Model | Garbage collected | Zero-copy, no GC |
-| Regex Engine | JavaScript RegExp | Rust regex crate |
-| Stub Matching | Linear scan | Optimized matching |
-
-### When to Choose Rift
-
-Rift is recommended when you need:
-- **High throughput**: 10-100x more requests per second
-- **Low latency**: Sub-millisecond response times
-- **Many stubs**: Performance doesn't degrade with stub count
-- **High concurrency**: Efficient handling of many connections
-- **Resource efficiency**: Lower CPU and memory usage
-
-## Troubleshooting
-
-### Services Not Starting
-
-```bash
-# Check container logs
-docker logs mb-bench
-docker logs rift-bench
-
-# Verify ports are available
-lsof -i :2525
-lsof -i :3525
-```
-
-### hey Not Found
-
-```bash
-# macOS
-brew install hey
-
-# Linux (with Go installed)
-go install github.com/rakyll/hey@latest
-
-# Linux (direct download)
-sudo curl -sSL https://hey-release.s3.us-east-2.amazonaws.com/hey_linux_amd64 -o /usr/local/bin/hey
-sudo chmod +x /usr/local/bin/hey
-```
-
-### Connection Refused Errors
-
-Wait for services to be healthy:
-```bash
-# Check health status
-docker inspect --format='{{.State.Health.Status}}' mb-bench
-docker inspect --format='{{.State.Health.Status}}' rift-bench
-```
-
-## Architecture Notes
-
-### Why These Tests?
-
-The benchmark suite is designed to test real-world scenarios:
-
-1. **API Server (500 stubs):** Simulates a microservice with multiple REST endpoints, testing stub lookup performance with a large stub count.
-
-2. **Regex Matching:** Tests the regex engine performance, which is critical for path matching and request body validation.
-
-3. **Complex Predicates:** Tests the predicate evaluation engine with nested AND/OR logic.
-
-4. **High Concurrency:** Tests how well each service handles many simultaneous connections.
-
-### Fair Comparison Methodology
-
-- Both services run in containers with identical resource limits
-- Same imposter configurations are loaded via the Mountebank API
-- Tests run sequentially to avoid resource contention
-- Multiple requests ensure warm caches and JIT compilation
-- Results include both raw numbers and percentage comparisons
-
-## Contributing
-
-To add new benchmark scenarios:
-
-1. Add stub generation in `scripts/setup-imposters.sh`
-2. Add benchmark function in `scripts/run-benchmark.sh`
-3. Document the scenario in this README
+Both scripts run each engine **one at a time on disjoint port ranges** (no CPU
+contention, no cross-talk), launch it in its own process group and hard-kill it by
+group + `lsof` before the next engine starts, and post **identical** imposter JSON to
+both. Every serving scenario sends one real request first and asserts the returned
+**body** — a fall-through to the empty no-match default aborts the run, so a
+mis-configured stub can't silently inflate throughput.
+
+Outputs land in `results/` and are gitignored (machine-specific — regenerate per box).
+
+## Latest results
+
+Native processes, unconstrained, on **Apple M4 (10 cores) / macOS**. Rift `0.1.0`
+@ `f029cf8`, Mountebank `2.9.1`, `oha` at 50 keep-alive connections, 20s/scenario
+after a 3s warmup. Fixture: 10 imposters, 862 stubs.
+
+### Request serving
+
+| Scenario | Mountebank (RPS) | Rift (RPS) | Speedup | p99 MB → Rift (ms) |
+|---|--:|--:|--:|---|
+| simple_health | 4,093 | 199,228 | **49x** | 1502* → 0.7 |
+| api_first | 8,124 | 209,555 | **26x** | 2.9 → 0.5 |
+| api_middle | 3,071 | 198,504 | **65x** | 44.1 → 0.6 |
+| api_last | 1,351 | 201,403 | **149x** | 40.3 → 0.6 |
+| no_match (404) | 1,309 | 206,865 | **158x** | 53.1 → 0.5 |
+| regex_last | 106 | 54,434 | **515x** | 640.9 → 1.8 |
+| complex_and_or | 4,646 | 181,320 | **39x** | 17.0 → 0.8 |
+| json_body_equals | 7,802 | 188,247 | **24x** | 9.1 → 0.8 |
+| jsonpath | 4,480 | 173,671 | **39x** | 17.0 → 1.0 |
+| xpath | 5,552 | 174,567 | **31x** | 15.1 → 0.8 |
+| template | 9,446 | 189,649 | **20x** | 7.2 → 0.6 |
+| header_route | 3,050 | 148,739 | **49x** | 34.5 → 0.8 |
+| query_param | 2,366 | 118,228 | **50x** | 49.9 → 1.1 |
+
+<sub>*Mountebank's `simple_health` p99 spike is a Node GC pause during the run; its median was 1.8ms.</sub>
+
+### Admin create/read
+
+Fresh engine per (shape, N); create = `POST /imposters` with N stubs, GET = median
+of 5 reads, RSS via `ps`. `identical` = every stub shares one predicate (the O(n²)
+case #423 fixed); `distinct` = the cheap control. Rift's `warnings` are its
+stub-overlap analysis, a Rift extension Mountebank does not perform.
+
+| Shape | N | Create MB → Rift (ms) | GET MB → Rift (ms) | RSS Δ MB → Rift (MB) | Rift warnings |
+|---|--:|---|---|---|--:|
+| identical | 100 | 16.1 → 9.5 | 4.7 → 1.6 | 6.9 → 2.3 | 99 |
+| identical | 1000 | 114.7 → 6.6 | 6.6 → 2.5 | 51.1 → 9.1 | 101 |
+| distinct | 100 | 13.8 → 2.3 | 2.1 → 0.3 | 6.0 → 2.2 | 0 |
+| distinct | 1000 | 134.9 → 5.3 | 8.6 → 1.4 | 50.3 → 9.5 | 0 |
+
+### Key findings
+
+1. **Position-independent matching.** Rift holds ~200k RPS whether the matching stub
+   is first, middle, or last — and on a no-match 404. Mountebank degrades linearly
+   with stub count (8,124 → 1,309 RPS, first → no-match): up to **158x** at the tail.
+2. **Regex is the extreme.** 515x (Rift 54k vs MB 106) — Mountebank's per-stub JS
+   `RegExp` scan collapses at the 100th pattern. Regex is also Rift's *own* slowest
+   matcher (~54k vs ~180k elsewhere), since a regex can't be hash-dispatched.
+3. **Structured predicates** (JSONPath, XPath, JSON body, complex AND/OR): **24–39x**.
+   Native Rust evaluation stays 174k–188k RPS vs Mountebank's JS 4.5k–7.8k.
+4. **Sub-millisecond tail.** Rift p99 stays 0.5–1.8ms across every scenario;
+   Mountebank ranges 3–641ms depending on stub count, position, and predicate type.
+5. **Admin plane / overlap analysis.** Creating 1,000 fully-overlapping stubs, Rift
+   creates in **6.6ms vs Mountebank's 114.7ms** and grows RSS **+9MB vs +51MB**, while
+   still computing 101 stub-overlap warnings Mountebank never produces.
 
 ## Related
 
-- [Compatibility Tests](../compatibility/) - Functional compatibility tests
-- [Integration Tests](../integration/) - Integration test suite
-- [Mountebank Documentation](http://www.mbtest.org/)
+- [Compatibility Tests](../compatibility/) — functional compatibility
+- [Integration Tests](../integration/) — integration suite

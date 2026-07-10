@@ -296,8 +296,10 @@ cargo test --all
 # Run with debug logging
 RUST_LOG=debug ./target/release/rift-http-proxy
 
-# Run benchmarks
-cd tests/benchmark && ./scripts/run-benchmark.sh
+# Run benchmarks (Rift vs Mountebank; see tests/benchmark/README.md)
+cd tests/benchmark && python3 scripts/bench_direct.py --run-all \
+  --rift-bin ../../target/release/rift-http-proxy \
+  --mb-bin ~/bench-mb/node_modules/mountebank/bin/mb
 ```
 
 ---
