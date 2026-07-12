@@ -23,6 +23,14 @@ record.
   `while (true) {}`) hung the linter, and any engine error whose message lacked `SyntaxError`/
   `unexpected` was silently treated as valid. It now parses without executing and reports every
   syntax error.
+- **Concurrent requests to a mixed-type response array no longer serve the wrong branch or a bogus
+  empty 200.** Dispatch classified the response with a non-advancing peek and then advanced the
+  cycler in a separate step, so under load a concurrent request could move the shared cursor between
+  the two and, e.g., serve an empty `x-rift-no-match` 200 where a `proxy` or `is` response was
+  intended. The cycler is now advanced exactly once per request and dispatched on the returned
+  response. (Behavior note: the cursor now advances even when proxy/inject/script handling fails —
+  a shared cursor can't be safely un-advanced under concurrency — where a failed handling previously
+  left the cursor for the next request to retry.)
 - **Flow-level `ctx.state.ttl(seconds)` no longer revives expired keys on the in-memory backend.**
   The positive-TTL branch re-stamped every entry in the flow — including entries already past their
   expiry that the amortized sweeper hadn't reaped yet — resurrecting them so a later `get`/`exists`
