@@ -301,20 +301,30 @@ char *rift_space_recorded(RiftHandle *h, uint16_t port, const char *flow_id);
 
 /**
  * Start the intercept/TLS-MITM forward-proxy listener on this handle's runtime. The intercept CA
- * is loaded from `caCertPath`/`caKeyPath` when both are supplied (letting independent instances
- * share a committed trust anchor), and generated fresh otherwise. Returns JSON
+ * is loaded from `caCertPath`/`caKeyPath` (files) or `caCertPem`/`caKeyPem` (inline PEM bytes,
+ * issue #593) when a pair is supplied — letting independent instances share a committed trust
+ * anchor — and generated fresh otherwise. The two source pairs are each both-or-neither and are
+ * mutually exclusive. Returns JSON
  * `{"interceptPort":<u16>,"interceptUrl":"http://<bind-host>:<port>"}` the caller frees with
- * [`rift_free`], or null on error (bad JSON, half-configured CA pair, CA load failure, bind
- * failure, or already started — one listener per handle). `interceptUrl` reflects the bound
- * address (the configured `host`, loopback by default; a `0.0.0.0` bind surfaces verbatim, so
+ * [`rift_free`], or null on error (bad JSON, half-configured CA pair, both pairs supplied, CA load
+ * failure, bind failure, or already started — one listener per handle). `interceptUrl` reflects the
+ * bound address (the configured `host`, loopback by default; a `0.0.0.0` bind surfaces verbatim, so
  * dial a concrete interface). `options_json`:
  * `{"host":"127.0.0.1","port":0,"caCertPath":"ca.pem","caKeyPath":"ca.key"}` (port 0 =
  * OS-assigned; CA paths optional, both-or-neither); pass null or `{}` for defaults.
  *
+ * Set `"returnCaKey":true` (only valid when NO CA source is supplied — otherwise `null`/error) to
+ * have the engine mint a fresh CA and return its material once in the response, so a caller can
+ * persist and redistribute a shareable anchor:
+ * `{"interceptPort":…,"interceptUrl":…,"caCertPem":"<cert>","caKeyPem":"<key>"}`. The `caKeyPem`
+ * is the CA private key — treat the response as secret material. Absent `returnCaKey`, the response
+ * carries no CA fields (byte-compatible with pre-#593).
+ *
  * # Safety
  * `h` must be a live handle (or null); `options_json` must be null or a valid C string.
  */
-char *rift_start_intercept(RiftHandle *h, const char *options_json);
+char *rift_start_intercept(RiftHandle *h,
+                           const char *options_json);
 
 /**
  * Stop the intercept listener started by [`rift_start_intercept`] (or over the embedded admin

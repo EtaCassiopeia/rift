@@ -369,3 +369,87 @@ async fn lifecycle_endpoints_are_apikey_gated() {
 
     admin.shutdown().await;
 }
+
+/// Issue #593 AC2: the full CA-bootstrap round-trip over the admin API — generate-and-return a CA,
+/// tear down, restart with the returned pair supplied inline, and confirm the same trust anchor is
+/// live (and actually terminates a proxied TLS handshake).
+#[tokio::test]
+async fn ca_bootstrap_round_trip_over_admin_api() {
+    let (base, admin) = admin_without_intercept_flag().await;
+    let c = reqwest::Client::new();
+
+    // 1. Generate and return the CA pair.
+    let started: serde_json::Value = c
+        .post(format!("{base}/intercept"))
+        .body(r#"{"returnCaKey":true}"#)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let ca_cert = started["caCertPem"]
+        .as_str()
+        .expect("caCertPem")
+        .to_string();
+    let ca_key = started["caKeyPem"].as_str().expect("caKeyPem").to_string();
+    assert!(ca_cert.contains("BEGIN CERTIFICATE") && ca_key.contains("PRIVATE KEY"));
+
+    // 2. Tear the listener down (drops the ephemeral CA from the slot).
+    assert_eq!(
+        c.delete(format!("{base}/intercept"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        204
+    );
+
+    // 3. Restart with the persisted pair supplied INLINE — no filesystem mount.
+    let restarted = c
+        .post(format!("{base}/intercept"))
+        .json(&serde_json::json!({"caCertPem": ca_cert, "caKeyPem": ca_key}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(restarted.status(), 201);
+    let intercept_url = restarted.json::<serde_json::Value>().await.unwrap()["interceptUrl"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // 4. GET /intercept/ca.pem returns the SAME anchor we bootstrapped.
+    let served_ca = c
+        .get(format!("{base}/intercept/ca.pem"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert_eq!(
+        served_ca, ca_cert,
+        "the restarted listener uses the supplied CA"
+    );
+
+    // 5. The bootstrapped CA actually terminates a proxied TLS handshake: add a serve rule and
+    //    dial an HTTPS host through the intercept proxy, trusting only the returned cert.
+    assert_eq!(
+        c.post(format!("{base}/intercept/rules"))
+            .body(r#"{"host":"svc.internal","action":{"serve":{"statusCode":204}}}"#)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        201
+    );
+    let proxied = trusting_client(&intercept_url, &ca_cert);
+    let resp = proxied
+        .get("https://svc.internal/")
+        .send()
+        .await
+        .expect("handshake terminates with the bootstrapped CA");
+    assert_eq!(resp.status(), 204);
+
+    admin.shutdown().await;
+}

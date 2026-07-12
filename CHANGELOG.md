@@ -13,6 +13,20 @@ record.
 
 ### Added
 
+- **Intercept CA: inline PEM input and a generate-and-return bootstrap mode.** `POST /intercept`
+  (and the FFI `rift_start_intercept`) now accept the CA as inline PEM bytes — `caCertPem` /
+  `caKeyPem` — in addition to the existing `caCertPath` / `caKeyPath` file pair, so an SDK can hand a
+  containerized engine its CA over the admin API without a filesystem mount. The two source pairs are
+  each both-or-neither and mutually exclusive. Setting `"returnCaKey": true` (valid only when no CA
+  source is supplied) has Rift mint a fresh CA and return **both** its cert and key once in the `201`
+  response, so a caller can persist and redistribute a shareable trust anchor instead of pre-making
+  one with `openssl`. The CLI/env gains inline `RIFT_INTERCEPT_CA_CERT_PEM` / `RIFT_INTERCEPT_CA_KEY_PEM`
+  (mutually exclusive with the file flags). **Security:** the returned `caKeyPem` is CA private-key
+  material — it is returned once (never by `GET /intercept`), only when Rift generated the CA
+  (combining `returnCaKey` with a supplied CA is a `400`, closing a filesystem-exfiltration path),
+  and should be transported over the `--apikey`-gated admin plane and treated as a secret. Additive
+  and feature-detectable (an older engine's `deny_unknown_fields` rejects the new fields with a
+  `400`); the C-ABI contract version is unchanged.
 - **`rift_abi_version()` — a queryable C-ABI contract version for SDK compatibility gating.** The
   new FFI symbol returns the C-ABI contract version (`uint32_t`, currently `2`), bumped only on a
   breaking ABI change and never on additive or bugfix releases. SDKs can now gate on the ABI

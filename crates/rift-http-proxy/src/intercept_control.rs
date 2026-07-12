@@ -9,12 +9,12 @@
 //! CLI flag or FFI call started.
 
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use crate::intercept::InterceptListener;
 use crate::intercept_rules::{InterceptRules, InterceptState};
-use rift_mock_core::proxy::intercept_ca::{CertificateAuthority, SniCertResolver};
+use rift_mock_core::proxy::intercept_ca::{CaSource, CertificateAuthority, SniCertResolver};
 use serde::Serialize;
 
 /// A running intercept plane: the listener plus the control-plane [`InterceptState`] (rule store +
@@ -33,8 +33,10 @@ pub struct InterceptControl(Arc<Mutex<Option<InterceptPlane>>>);
 /// Start options — the exact shape (and serde attributes) of the FFI's former `InterceptOptions`,
 /// so the admin `POST /intercept` body and `rift_start_intercept` parse identically.
 /// `deny_unknown_fields` so a misspelled `caCertpath` is a hard error, not a silent fresh-CA
-/// fallback that would defeat the caller's intended CA reuse.
-#[derive(serde::Deserialize, Default, Debug)]
+/// fallback that would defeat the caller's intended CA reuse. A pre-#593 engine's
+/// `deny_unknown_fields` also gives SDKs deterministic feature detection: an unknown `caCertPem`
+/// or `returnCaKey` is a hard 400 naming the field, not a silent ignore.
+#[derive(serde::Deserialize, Default)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct InterceptStartOptions {
     /// Bind host, default `127.0.0.1`.
@@ -44,25 +46,90 @@ pub struct InterceptStartOptions {
     pub ca_cert_path: Option<String>,
     /// Both-or-neither with `ca_cert_path`.
     pub ca_key_path: Option<String>,
+    /// Inline CA certificate PEM (issue #593) — both-or-neither with `ca_key_pem`, mutually
+    /// exclusive with the path pair. Lets a containerized engine be handed a CA over the admin
+    /// API without a filesystem mount.
+    pub ca_cert_pem: Option<String>,
+    /// Inline CA private-key PEM (issue #593). Secret material — never logged (see the `Debug` impl).
+    pub ca_key_pem: Option<String>,
+    /// Generate a fresh CA and return its cert **and** key in the start response (issue #593).
+    /// Only valid when no CA source is supplied — combining it with a path/PEM pair is a `400`.
+    pub return_ca_key: Option<bool>,
+}
+
+impl std::fmt::Debug for InterceptStartOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Redact the inline key PEM — it is secret material (issue #593). Paths and the cert are safe.
+        f.debug_struct("InterceptStartOptions")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("ca_cert_path", &self.ca_cert_path)
+            .field("ca_key_path", &self.ca_key_path)
+            .field("ca_cert_pem", &self.ca_cert_pem.as_ref().map(|_| "<pem>"))
+            .field(
+                "ca_key_pem",
+                &self.ca_key_pem.as_ref().map(|_| "<redacted>"),
+            )
+            .field("return_ca_key", &self.return_ca_key)
+            .finish()
+    }
+}
+
+/// Outcome of a successful [`InterceptControl::start`]: the bound address plus, when the caller set
+/// `return_ca_key` on a generated CA, the CA's `(cert_pem, key_pem)` to hand back exactly once.
+pub struct StartedIntercept {
+    pub(crate) addr: SocketAddr,
+    pub(crate) ca_export: Option<(String, String)>,
+}
+
+impl std::fmt::Debug for StartedIntercept {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Show only whether a CA was exported, never the key material (issue #593).
+        f.debug_struct("StartedIntercept")
+            .field("addr", &self.addr)
+            .field(
+                "ca_export",
+                &self.ca_export.as_ref().map(|_| "<ca cert+key>"),
+            )
+            .finish()
+    }
 }
 
 /// The running-listener status shared by `POST`/`GET /intercept` and `rift_start_intercept` — the
-/// same field names and derivation so every surface returns a byte-compatible body.
+/// same field names and derivation so every surface returns a byte-compatible body. The `caCertPem`
+/// /`caKeyPem` fields are populated **only** by `POST /intercept` with `returnCaKey` (issue #593);
+/// `GET /intercept` never carries key material.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InterceptStatus {
     pub intercept_port: u16,
     pub intercept_url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ca_cert_pem: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ca_key_pem: Option<String>,
 }
 
 impl InterceptStatus {
-    /// Derive both fields from the *real* bound address (OS-assigned port resolved). A `0.0.0.0`
-    /// bind surfaces verbatim — dial a concrete interface.
+    /// Derive the address fields from the *real* bound address (OS-assigned port resolved), with no
+    /// CA export. A `0.0.0.0` bind surfaces verbatim — dial a concrete interface.
     pub fn from_addr(addr: SocketAddr) -> Self {
         Self {
             intercept_port: addr.port(),
             intercept_url: format!("http://{addr}"),
+            ca_cert_pem: None,
+            ca_key_pem: None,
         }
+    }
+
+    /// Build the start-response status, attaching the CA export when the start produced one.
+    pub fn from_started(started: StartedIntercept) -> Self {
+        let mut status = Self::from_addr(started.addr);
+        if let Some((cert, key)) = started.ca_export {
+            status.ca_cert_pem = Some(cert);
+            status.ca_key_pem = Some(key);
+        }
+        status
     }
 }
 
@@ -113,7 +180,7 @@ impl InterceptControl {
     pub async fn start(
         &self,
         opts: InterceptStartOptions,
-    ) -> Result<SocketAddr, InterceptStartError> {
+    ) -> Result<StartedIntercept, InterceptStartError> {
         if self.is_occupied() {
             return Err(InterceptStartError::AlreadyRunning);
         }
@@ -122,18 +189,38 @@ impl InterceptControl {
         let addr: SocketAddr = format!("{host}:{}", opts.port.unwrap_or(0))
             .parse()
             .map_err(|e| InterceptStartError::InvalidAddr(format!("{e}")))?;
-        // Log CA/bind failures here so every surface (FFI, admin `POST /intercept`, CLI flag) gets a
-        // server-side trail — not just the FFI, which used to `warn!` these on its own.
-        let ca = Arc::new(
-            CertificateAuthority::load_or_generate(
-                opts.ca_cert_path.as_deref().map(Path::new),
-                opts.ca_key_path.as_deref().map(Path::new),
-            )
-            .map_err(|e| {
-                tracing::warn!(error = %e, "intercept start: CA setup failed");
-                InterceptStartError::Ca(e)
-            })?,
-        );
+
+        // Resolve the single CA source (validating both-or-neither + pair exclusion) before binding.
+        // Log CA/option failures here so every surface (FFI, admin `POST /intercept`, CLI flag) gets
+        // a server-side trail — not just the FFI, which used to `warn!` these on its own. The map to
+        // `Ca` keeps these validation failures on the existing 400 path.
+        let source = CaSource::resolve(
+            opts.ca_cert_path.map(PathBuf::from),
+            opts.ca_key_path.map(PathBuf::from),
+            opts.ca_cert_pem,
+            opts.ca_key_pem,
+        )
+        .map_err(|e| {
+            tracing::warn!(error = %e, "intercept start: invalid CA options");
+            InterceptStartError::Ca(e)
+        })?;
+
+        // `returnCaKey` hands the CA private key back to the caller, so it is only allowed against a
+        // CA this call generates (issue #593, D4). Allowing it with a supplied path/PEM source would
+        // turn the admin API into a file-exfiltration primitive (echo back any keypair on disk).
+        let return_ca_key = opts.return_ca_key.unwrap_or(false);
+        if return_ca_key && !source.is_generate() {
+            return Err(InterceptStartError::Ca(anyhow::anyhow!(
+                "returnCaKey requires the CA to be generated by this call (omit caCert*/caKey*)"
+            )));
+        }
+
+        let ca = Arc::new(CertificateAuthority::from_source(&source).map_err(|e| {
+            tracing::warn!(error = %e, "intercept start: CA setup failed");
+            InterceptStartError::Ca(e)
+        })?);
+        let ca_export = return_ca_key.then(|| (ca.ca_cert_pem().to_string(), ca.ca_key_pem()));
+
         let rules = InterceptRules::new();
         let resolver = Arc::new(SniCertResolver::new(ca.clone()));
         let listener = InterceptListener::bind(addr, resolver, rules.clone())
@@ -148,7 +235,10 @@ impl InterceptControl {
             listener,
             state: InterceptState { rules, ca },
         }) {
-            Ok(()) => Ok(bound),
+            Ok(()) => Ok(StartedIntercept {
+                addr: bound,
+                ca_export,
+            }),
             Err(listener) => {
                 listener.shutdown().await;
                 Err(InterceptStartError::AlreadyRunning)
@@ -196,9 +286,13 @@ mod tests {
         assert!(control.status().is_none());
         assert!(control.state().is_none());
 
-        let addr = control.start(defaults()).await.expect("start");
-        assert_eq!(control.status(), Some(addr));
-        assert!(addr.port() > 0, "OS assigned a real port");
+        let started = control.start(defaults()).await.expect("start");
+        assert_eq!(control.status(), Some(started.addr));
+        assert!(started.addr.port() > 0, "OS assigned a real port");
+        assert!(
+            started.ca_export.is_none(),
+            "no CA export unless returnCaKey was requested"
+        );
         assert!(control.state().is_some());
 
         assert!(control.stop().await, "stop reports it was running");
@@ -283,7 +377,139 @@ mod tests {
         // The winner's port is the one installed; the loser's listener was shut down, not leaked.
         let installed = control.status().expect("a listener is installed");
         let won = a.or(b).expect("the Ok addr");
-        assert_eq!(installed, won, "the installed listener is the winner's");
+        assert_eq!(
+            installed, won.addr,
+            "the installed listener is the winner's"
+        );
         control.stop().await;
+    }
+
+    // Issue #593: the manual Debug impls must never render CA key material — guard against a future
+    // field being added without updating the redaction.
+    #[test]
+    fn debug_impls_redact_ca_key_material() {
+        let secret = "supersecret-key-bytes";
+        let opts = InterceptStartOptions {
+            ca_cert_pem: Some("cert".to_string()),
+            ca_key_pem: Some(secret.to_string()),
+            ..Default::default()
+        };
+        assert!(
+            !format!("{opts:?}").contains(secret),
+            "InterceptStartOptions Debug must redact the inline key PEM"
+        );
+        let started = StartedIntercept {
+            addr: "127.0.0.1:0".parse().unwrap(),
+            ca_export: Some(("cert".to_string(), secret.to_string())),
+        };
+        assert!(
+            !format!("{started:?}").contains(secret),
+            "StartedIntercept Debug must redact the exported CA key"
+        );
+    }
+
+    // Issue #593: a CA pair for inline-PEM tests, minted out of band.
+    fn ca_pem_pair() -> (String, String) {
+        let ca = CertificateAuthority::generate().expect("generate CA out of band");
+        (ca.ca_cert_pem().to_string(), ca.ca_key_pem())
+    }
+
+    #[tokio::test]
+    async fn start_with_inline_pem_loads_ca() {
+        let (cert_pem, key_pem) = ca_pem_pair();
+        let control = InterceptControl::default();
+        let opts = InterceptStartOptions {
+            ca_cert_pem: Some(cert_pem.clone()),
+            ca_key_pem: Some(key_pem),
+            ..Default::default()
+        };
+        control.start(opts).await.expect("start with inline PEM");
+        let state = control.state().expect("running");
+        assert_eq!(
+            state.ca.ca_cert_pem(),
+            cert_pem,
+            "the running listener uses the supplied CA as its trust anchor"
+        );
+        control.stop().await;
+    }
+
+    #[tokio::test]
+    async fn return_ca_key_exports_generated_pair() {
+        let control = InterceptControl::default();
+        let opts = InterceptStartOptions {
+            return_ca_key: Some(true),
+            ..Default::default()
+        };
+        let started = control.start(opts).await.expect("start with returnCaKey");
+        let (cert, key) = started.ca_export.expect("CA pair returned");
+        assert!(cert.contains("CERTIFICATE") && key.contains("PRIVATE KEY"));
+        // The returned pair reconstructs the same running CA.
+        assert_eq!(control.state().unwrap().ca.ca_cert_pem(), cert);
+        let reloaded = CertificateAuthority::load_pem(&cert, &key).expect("reload returned pair");
+        assert_eq!(
+            reloaded.ca_cert_pem(),
+            cert,
+            "returned pair is a usable anchor"
+        );
+        control.stop().await;
+    }
+
+    #[tokio::test]
+    async fn return_ca_key_with_supplied_source_is_error() {
+        // With inline PEM.
+        let (cert_pem, key_pem) = ca_pem_pair();
+        let control = InterceptControl::default();
+        let err = control
+            .start(InterceptStartOptions {
+                ca_cert_pem: Some(cert_pem),
+                ca_key_pem: Some(key_pem),
+                return_ca_key: Some(true),
+                ..Default::default()
+            })
+            .await
+            .expect_err("returnCaKey with a supplied CA must be rejected");
+        assert!(matches!(err, InterceptStartError::Ca(_)));
+        assert!(control.status().is_none(), "no listener left behind");
+
+        // With CA paths.
+        let err = control
+            .start(InterceptStartOptions {
+                ca_cert_path: Some("cert.pem".to_string()),
+                ca_key_path: Some("key.pem".to_string()),
+                return_ca_key: Some(true),
+                ..Default::default()
+            })
+            .await
+            .expect_err("returnCaKey with CA paths must be rejected");
+        assert!(matches!(err, InterceptStartError::Ca(_)));
+    }
+
+    #[tokio::test]
+    async fn inline_pem_half_pair_and_mutual_exclusion_are_errors() {
+        let control = InterceptControl::default();
+        // Half a PEM pair.
+        let err = control
+            .start(InterceptStartOptions {
+                ca_cert_pem: Some("cert".to_string()),
+                ..Default::default()
+            })
+            .await
+            .expect_err("half PEM pair");
+        assert!(matches!(err, InterceptStartError::Ca(_)));
+
+        // PEM pair AND path pair.
+        let (cert_pem, key_pem) = ca_pem_pair();
+        let err = control
+            .start(InterceptStartOptions {
+                ca_cert_path: Some("cert.pem".to_string()),
+                ca_key_path: Some("key.pem".to_string()),
+                ca_cert_pem: Some(cert_pem),
+                ca_key_pem: Some(key_pem),
+                ..Default::default()
+            })
+            .await
+            .expect_err("path and PEM are mutually exclusive");
+        assert!(matches!(err, InterceptStartError::Ca(_)));
+        assert!(control.status().is_none());
     }
 }

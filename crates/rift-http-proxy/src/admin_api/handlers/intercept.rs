@@ -105,7 +105,7 @@ async fn start_from_bytes(body: &[u8], control: &InterceptControl) -> Response<F
         }
     };
     match control.start(opts).await {
-        Ok(addr) => json_response(StatusCode::CREATED, &InterceptStatus::from_addr(addr)),
+        Ok(started) => json_response(StatusCode::CREATED, &InterceptStatus::from_started(started)),
         Err(e) => {
             let status = match e {
                 InterceptStartError::AlreadyRunning => StatusCode::CONFLICT,
@@ -546,6 +546,69 @@ mod tests {
         assert!(json.contains("interceptPort"));
         assert!(json.contains("interceptUrl"));
         control.stop().await;
+    }
+
+    // Issue #593 AC4: a start without returnCaKey omits the CA fields entirely (byte-compat), and
+    // GET /intercept never carries them either.
+    #[tokio::test]
+    async fn start_without_return_ca_key_omits_ca_fields() {
+        let control = InterceptControl::default();
+        let json = read_body(start_from_bytes(b"{}", &control).await).await;
+        assert!(!json.contains("caCertPem"), "no CA cert unless requested");
+        assert!(!json.contains("caKeyPem"), "no CA key unless requested");
+        let status_json = read_body(handle_status(&control)).await;
+        assert!(
+            !status_json.contains("caKeyPem") && !status_json.contains("caCertPem"),
+            "GET /intercept never carries CA material"
+        );
+        control.stop().await;
+    }
+
+    // Issue #593 AC2: POST {"returnCaKey":true} → 201 carrying the generated CA cert+key.
+    #[tokio::test]
+    async fn start_returns_ca_pair_when_requested() {
+        let control = InterceptControl::default();
+        let resp = start_from_bytes(br#"{"returnCaKey":true}"#, &control).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let v: serde_json::Value = serde_json::from_str(&read_body(resp).await).unwrap();
+        let cert = v["caCertPem"].as_str().expect("caCertPem present");
+        let key = v["caKeyPem"].as_str().expect("caKeyPem present");
+        assert!(cert.contains("BEGIN CERTIFICATE") && key.contains("PRIVATE KEY"));
+        // The running listener uses exactly the returned CA.
+        assert_eq!(control.state().unwrap().ca.ca_cert_pem(), cert);
+        control.stop().await;
+    }
+
+    // Issue #593 AC3: returnCaKey combined with a supplied CA source is a 400 that starts nothing.
+    #[tokio::test]
+    async fn start_return_ca_key_with_supplied_ca_is_400() {
+        let control = InterceptControl::default();
+        let body = br#"{"returnCaKey":true,"caCertPath":"c.pem","caKeyPath":"k.pem"}"#;
+        assert_eq!(
+            start_from_bytes(body, &control).await.status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert!(control.status().is_none(), "no listener left behind");
+    }
+
+    // Issue #593 AC1/AC3: inline PEM loads a CA; a half PEM pair is a 400.
+    #[tokio::test]
+    async fn start_inline_pem_loads_ca_and_half_pair_is_400() {
+        let ca = CertificateAuthority::generate().expect("ca");
+        let cert_pem = ca.ca_cert_pem();
+        let key_pem = ca.ca_key_pem();
+        let control = InterceptControl::default();
+        let body = serde_json::json!({"caCertPem": cert_pem, "caKeyPem": key_pem}).to_string();
+        let resp = start_from_bytes(body.as_bytes(), &control).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        assert_eq!(control.state().unwrap().ca.ca_cert_pem(), cert_pem);
+        control.stop().await;
+
+        let half = serde_json::json!({"caCertPem": cert_pem}).to_string();
+        assert_eq!(
+            start_from_bytes(half.as_bytes(), &control).await.status(),
+            StatusCode::BAD_REQUEST
+        );
     }
 
     fn body_bytes(resp: Response<Full<Bytes>>) -> Vec<u8> {

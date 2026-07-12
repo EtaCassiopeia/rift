@@ -127,7 +127,7 @@ per handle; `rift_stop_intercept` stops it, and `rift_stop` shuts it down with t
 
 | Function | Signature | Returns |
 |---|---|---|
-| `rift_start_intercept` | `char* rift_start_intercept(RiftHandle* h, const char* options_json)` | JSON `{"interceptPort","interceptUrl"}` (**caller frees**), or `NULL` on error (bad JSON, bind failure, half-configured CA pair, CA load failure, already started). `options_json`: `{"host":"127.0.0.1","port":0,"caCertPath":null,"caKeyPath":null}` (port 0 = OS-assigned); `NULL`/`{}` for defaults. |
+| `rift_start_intercept` | `char* rift_start_intercept(RiftHandle* h, const char* options_json)` | JSON `{"interceptPort","interceptUrl"}` (**caller frees**), or `NULL` on error (bad JSON, bind failure, half-configured CA pair, both CA pairs supplied, CA load failure, already started). `options_json`: `{"host":"127.0.0.1","port":0,"caCertPath":null,"caKeyPath":null,"caCertPem":null,"caKeyPem":null,"returnCaKey":false}` (port 0 = OS-assigned); `NULL`/`{}` for defaults. Supply the CA as files (`caCertPath`/`caKeyPath`) **or** inline PEM bytes (`caCertPem`/`caKeyPem`, issue #593 — each pair both-or-neither, mutually exclusive). `"returnCaKey":true` (only with no CA source) mints a fresh CA and adds `"caCertPem"`/`"caKeyPem"` to the response once — CA private-key material, treat as secret. |
 | `rift_stop_intercept` | `int rift_stop_intercept(RiftHandle* h)` | `0` on success (**including** the idempotent nothing-running case), `-1` only on a null handle / caught panic. Stops the listener, releases its port, and drops its rules + CA — RFC-003 parity with `DELETE /intercept`. A later `rift_start_intercept` without CA paths mints a fresh CA. |
 | `rift_intercept_add_rules` | `int rift_intercept_add_rules(RiftHandle* h, const char* rules_json)` | `0`/`-1`. One rule (object) or many (array), same shape as `/intercept/rules`. |
 | `rift_intercept_list_rules` | `char* rift_intercept_list_rules(RiftHandle* h)` | The current rules as a JSON array (**caller frees**), or `NULL` on error. |
@@ -147,11 +147,20 @@ drive. `rift_start_intercept` then `GET /intercept` reports it; `POST /intercept
 `rift_intercept_add_rules`; and a double-start across the two surfaces conflicts consistently
 (`409` / `-1`). (Previously `rift_serve_admin` served no `/intercept` routes at all.)
 
-By default (no `caCertPath`/`caKeyPath`) `rift_start_intercept` generates a fresh ephemeral intercept
-CA, unchanged from earlier releases. As of v0.11.3 (#429), passing both `caCertPath` and `caKeyPath`
-(PEM file paths) loads that committed CA instead — letting independent embedded instances share one
-trust anchor rather than each minting its own. Passing only one of the pair is a hard error (both or
+By default (no CA source) `rift_start_intercept` generates a fresh ephemeral intercept CA, unchanged
+from earlier releases. As of v0.11.3 (#429), passing both `caCertPath` and `caKeyPath` (PEM file
+paths) loads that committed CA instead — letting independent embedded instances share one trust
+anchor rather than each minting its own. Passing only one of the pair is a hard error (both or
 neither).
+
+Since issue #593 the CA may instead be supplied **inline** as `caCertPem`/`caKeyPem` (the PEM bytes,
+not paths) — the same both-or-neither rule, and mutually exclusive with the path pair — so a remote
+or containerized engine can be handed a CA over the C-ABI without staging a file. And
+`"returnCaKey":true` (valid only when no CA source is given) has the engine mint a fresh CA and
+return its cert **and** key once in the response (`caCertPem`/`caKeyPem`), for a bootstrap flow:
+start with `returnCaKey`, persist the pair, then supply it back via `caCertPem`/`caKeyPem` on later
+starts. The returned `caKeyPem` is CA private-key material — treat it as secret. Combining
+`returnCaKey` with any supplied CA source is a hard error.
 
 `interceptUrl`/`interceptPort` in the response are derived from the listener's **actual bound
 address** (v0.11.2, #425/#426) — not hardcoded to `127.0.0.1`. A loopback `host` (the default)
