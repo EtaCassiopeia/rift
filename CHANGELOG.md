@@ -11,6 +11,19 @@ record.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Deleting an imposter now fully tears it down before the call returns.** `DELETE /imposters[/{port}]`
+  (and the FFI `rift_delete_imposter`/`rift_delete_all`, `PUT /imposters` reload, and `apply_config`
+  deletes) previously signalled shutdown fire-and-forget and returned immediately, so the old
+  imposter's listener could linger and its established keep-alive connections keep answering from the
+  previous generation's state. Combined with `SO_REUSEPORT` (Linux) and client connection pools, an
+  immediate same-port re-create could be served the deleted imposter's mid-cycle response (observed as
+  a flaky first-request status on embedded conformance runs). Delete now awaits full teardown — the
+  accept loop ends (listener unbound) and in-flight connections drain within a bounded window — so
+  once it returns the old generation can no longer serve a byte and a re-create on the same port is
+  race-free.
+
 ## [0.13.4] - 2026-07-12
 
 ### Added

@@ -143,6 +143,14 @@ pub struct Imposter {
     pub created_at: chrono::DateTime<chrono::Utc>,
     /// Shutdown signal sender (for future graceful shutdown)
     pub shutdown_tx: Option<broadcast::Sender<()>>,
+    /// Accept-loop task handle (issue #596). The manager stores it here after spawning the loop so
+    /// `delete` can `await` it — guaranteeing the listener socket is dropped (bind released) before
+    /// delete returns, instead of the old fire-and-forget teardown. `Mutex` because it is set after
+    /// the imposter is already `Arc`-wrapped, and taken (to be awaited) on teardown.
+    pub(crate) serve_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Tracks this generation's live per-connection tasks (issue #596) so `delete` can drain them
+    /// (each already reacts to `shutdown_tx` with a hyper graceful shutdown, #207) within a bound.
+    pub(crate) conn_tracker: tokio_util::task::TaskTracker,
     /// Flow store for Rift extensions (stateful scripting)
     pub flow_store: Arc<dyn FlowStore>,
     /// Pluggable response-cursor backend (issue #313); None = embedded per-stub cycler.
@@ -221,6 +229,8 @@ impl Imposter {
             enabled: AtomicBool::new(true),
             created_at: chrono::Utc::now(),
             shutdown_tx: None,
+            serve_handle: Mutex::new(None),
+            conn_tracker: tokio_util::task::TaskTracker::new(),
             flow_store,
             sequencer,
             stub_warnings: ArcSwapOption::empty(),
