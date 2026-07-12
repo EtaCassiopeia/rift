@@ -212,6 +212,12 @@ curl "http://localhost:2525/imposters/4545?replayable=true"
 
 Delete an imposter.
 
+The response is returned only **after the imposter is fully torn down** (issue #596): its listener
+socket is unbound and its established (keep-alive) connections are closed — bounded by a short drain
+for any in-flight response. So once `DELETE` returns you can immediately re-`POST` an imposter on the
+same port without racing the old one: a pooled client connection gets a clean close and reconnects to
+the new imposter, never the deleted one's state.
+
 **Query Parameters:**
 - `replayable` (boolean) - Return imposter config before deletion
 

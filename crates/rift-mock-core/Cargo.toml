@@ -17,6 +17,8 @@ workspace = true
 [dependencies]
 # Async runtime
 tokio = { workspace = true, features = ["full"] }
+# TaskTracker for bounded connection-drain on imposter teardown (issue #596)
+tokio-util = { workspace = true, features = ["rt"] }
 futures.workspace = true
 
 # HTTP
