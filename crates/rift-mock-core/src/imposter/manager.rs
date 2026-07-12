@@ -2060,6 +2060,52 @@ mod tests {
         }
     }
 
+    // Issue #559: under concurrency, a mixed-type response array must never fall through to a
+    // bogus `x-rift-no-match` 200. The old peek-classify-then-advance split let a concurrent
+    // request move the cursor between the peek and the advance, so a request that classified index
+    // 0 (`is`) advanced from index 1 (`proxy`), got a Proxy it wasn't handling, and served an empty
+    // no-match 200. With single-advance dispatch every request serves either the `is` or a proxy
+    // attempt — never the no-match marker.
+    #[tokio::test]
+    async fn concurrent_mixed_array_never_serves_bogus_no_match() {
+        let manager = ImposterManager::new();
+        manager
+            .create_imposter(imposter_cfg(json!({
+                "protocol": "http", "port": 19560,
+                "stubs": [{
+                    "predicates": [{"equals": {"path": "/m"}}],
+                    "responses": [
+                        {"is": {"statusCode": 200, "body": "OK"}},
+                        {"proxy": {"to": "http://127.0.0.1:1", "mode": "proxyOnce"}}
+                    ]
+                }]
+            })))
+            .await
+            .expect("create");
+
+        let mut handles = Vec::new();
+        for _ in 0..100 {
+            handles.push(tokio::spawn(async {
+                let resp = reqwest::get("http://127.0.0.1:19560/m")
+                    .await
+                    .expect("request");
+                resp.headers().contains_key("x-rift-no-match")
+            }));
+        }
+        let mut bogus = 0;
+        for h in handles {
+            if h.await.expect("join") {
+                bogus += 1;
+            }
+        }
+        assert_eq!(
+            bogus, 0,
+            "no concurrent request may fall through to a bogus x-rift-no-match 200 (issue #559)"
+        );
+
+        manager.delete_all().await;
+    }
+
     // =========================================================================
     // Issue #313: pluggable ResponseSequencer
     // =========================================================================
@@ -2193,10 +2239,14 @@ mod tests {
                 nexts.iter().all(|(_, s, ..)| *s == slot),
                 "slot token stable across requests"
             );
+            // Issue #559: response-type dispatch advances the cycler exactly once and dispatches on
+            // the returned response — it no longer peeks to classify and then advances separately,
+            // which is what created the TOCTOU. So the request path consults the sequencer only via
+            // `next` (recorded above), never `peek`.
             let peeks = recorder.peeks.lock().clone();
             assert!(
-                !peeks.is_empty() && peeks.iter().all(|(_, s, ..)| *s == slot),
-                "response-type dispatch peeks route through the sequencer with the same slot"
+                peeks.is_empty(),
+                "dispatch must not peek the cycler — it advances once and dispatches on the result"
             );
 
             manager.delete_all().await;
