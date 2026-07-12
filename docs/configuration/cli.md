@@ -56,6 +56,8 @@ Options:
       --intercept-port <PORT>      Start the TLS-MITM intercept/redirect proxy on this port (epic #394); off when unset
       --intercept-ca-cert <FILE>   PEM CA certificate for interception (with --intercept-ca-key); a CA is generated if omitted
       --intercept-ca-key <FILE>    PEM CA private key for interception (required with --intercept-ca-cert)
+      --intercept-ca-cert-pem <PEM>  Inline PEM CA certificate for interception (with --intercept-ca-key-pem); mutually exclusive with file paths
+      --intercept-ca-key-pem <PEM>   Inline PEM CA private key for interception (required with --intercept-ca-cert-pem)
       --no-parse                   Disable EJS preprocessing of --configfile (alias: --noParse)
       --formatter <NAME>           Custom config formatter module (no-op; Rift auto-detects JSON/YAML)
       --protofile <FILE>           Custom protocol definitions file (no-op; custom protocols unsupported)
