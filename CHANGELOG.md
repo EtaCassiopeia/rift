@@ -13,11 +13,24 @@ record.
 
 ### Fixed
 
+- **`rift lint --fix` no longer corrupts valid multi-value header arrays.** The fixer rewrote every
+  array-valued response header into a single comma-joined string and silently dropped any non-string
+  element, so a valid `"Set-Cookie": ["a=1", "b=2"]` (a legitimate multi-value header since #238)
+  was clobbered into one header with different runtime semantics — and a fully valid file could be
+  rewritten just because a *different* file in the run had errors. `--fix` now leaves string-only
+  arrays untouched and, for an array that genuinely contains a non-string element, stringifies the
+  offending elements in place (preserving the array) instead of joining and dropping.
 - **The TUI no longer panics on imposter names or paths containing multibyte UTF-8.** Several
   truncation sites guarded on byte length but sliced at a byte index, so a name/scenario/recorded
   path with multibyte characters (e.g. `日本語サービス` from imported JSON or proxy recordings)
   panicked with "byte index is not a char boundary" inside the render loop, tearing down the
   terminal (often leaving it in raw mode). Truncation is now char-based via a single shared helper.
+- **Creating an imposter no longer silently succeeds when it can't be persisted to `--datadir`.** The
+  create path wrote the config in a fire-and-forget task that only logged failures, so a datadir
+  write error returned `201 Created` to the caller and the imposter then vanished on restart. Create
+  now persists synchronously and, on failure, rolls back the in-memory imposter and returns a
+  `503` (`ImposterError::PersistError`) — matching the durability contract already used by stub
+  mutations (#173).
 - **`rift lint` no longer executes JavaScript while syntax-checking it.** The `javascript`-feature
   validator ran scripts via the JS engine, so an inject/decorate body containing a loop (e.g.
   `while (true) {}`) hung the linter, and any engine error whose message lacked `SyntaxError`/
