@@ -9,7 +9,7 @@
 //! `rift-http-proxy` crate.
 
 use std::num::NonZeroUsize;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use lru::LruCache;
@@ -42,6 +42,75 @@ impl std::fmt::Debug for CertificateAuthority {
         f.debug_struct("CertificateAuthority")
             .field("cert_pem", &self.cert_pem)
             .finish_non_exhaustive()
+    }
+}
+
+/// Where a [`CertificateAuthority`] comes from, resolved once from the three mutually-exclusive
+/// input pairs an intercept start accepts (issue #593). Building it via [`CaSource::resolve`] keeps
+/// the "both-or-neither per pair, at most one pair" validation in a single place shared by the
+/// admin API, the FFI, and the CLI/env launch path.
+pub enum CaSource {
+    /// Mint a fresh in-memory CA (the default when no CA input is supplied).
+    Generate,
+    /// Load the CA from PEM files on the engine's filesystem.
+    Paths { cert: PathBuf, key: PathBuf },
+    /// Load the CA from inline PEM bytes carried in the request/env.
+    Pem { cert: String, key: String },
+}
+
+impl std::fmt::Debug for CaSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never render inline PEM — the `Pem` key is secret material. Paths are safe to show.
+        match self {
+            CaSource::Generate => f.write_str("Generate"),
+            CaSource::Paths { cert, key } => f
+                .debug_struct("Paths")
+                .field("cert", cert)
+                .field("key", key)
+                .finish(),
+            CaSource::Pem { .. } => f.write_str("Pem { .. }"),
+        }
+    }
+}
+
+impl CaSource {
+    /// Reduce the three optional pairs to a single source, rejecting a half-supplied pair or more
+    /// than one pair. Both path fields empty and both PEM fields empty → [`CaSource::Generate`].
+    /// Error messages never include PEM contents.
+    pub fn resolve(
+        cert_path: Option<PathBuf>,
+        key_path: Option<PathBuf>,
+        cert_pem: Option<String>,
+        key_pem: Option<String>,
+    ) -> anyhow::Result<Self> {
+        let paths = match (cert_path, key_path) {
+            (Some(cert), Some(key)) => Some((cert, key)),
+            (None, None) => None,
+            _ => anyhow::bail!(
+                "intercept CA cert and key paths must be provided together (or both omitted)"
+            ),
+        };
+        let pem = match (cert_pem, key_pem) {
+            (Some(cert), Some(key)) => Some((cert, key)),
+            (None, None) => None,
+            _ => anyhow::bail!(
+                "intercept CA cert and key PEM must be provided together (or both omitted)"
+            ),
+        };
+        match (paths, pem) {
+            (Some((cert, key)), None) => Ok(CaSource::Paths { cert, key }),
+            (None, Some((cert, key))) => Ok(CaSource::Pem { cert, key }),
+            (None, None) => Ok(CaSource::Generate),
+            (Some(_), Some(_)) => anyhow::bail!(
+                "intercept CA path and inline PEM are mutually exclusive — supply only one"
+            ),
+        }
+    }
+
+    /// True when this source mints a fresh CA (nothing was supplied). `returnCaKey` is only valid
+    /// against a generated CA, so callers gate the key-return on this (issue #593, D4).
+    pub fn is_generate(&self) -> bool {
+        matches!(self, CaSource::Generate)
     }
 }
 
@@ -96,33 +165,49 @@ impl CertificateAuthority {
         })
     }
 
-    /// Load the CA from PEM files when both paths are supplied, generate a fresh one when neither
-    /// is, and reject a half-configured pair (both-or-neither). This is the single implementation
-    /// shared by the container adapter (`--intercept-ca-cert`/`--intercept-ca-key`) and the
-    /// embedded FFI (`caCertPath`/`caKeyPath`), so both surfaces agree on load-or-generate
-    /// semantics and error.
-    pub fn load_or_generate(
-        cert_path: Option<&Path>,
-        key_path: Option<&Path>,
-    ) -> anyhow::Result<Self> {
-        match (cert_path, key_path) {
-            (Some(cert), Some(key)) => {
+    /// Load or generate the CA per a resolved [`CaSource`] — the single implementation shared by
+    /// the admin `POST /intercept`, the FFI `rift_start_intercept`, and the CLI/env launch path
+    /// (issue #593), so every surface agrees on load-or-generate semantics and error. Errors never
+    /// include PEM contents.
+    pub fn from_source(source: &CaSource) -> anyhow::Result<Self> {
+        match source {
+            CaSource::Generate => Self::generate(),
+            CaSource::Paths { cert, key } => {
                 let cert_pem = std::fs::read_to_string(cert)
                     .with_context(|| format!("reading intercept CA cert {}", cert.display()))?;
                 let key_pem = std::fs::read_to_string(key)
                     .with_context(|| format!("reading intercept CA key {}", key.display()))?;
                 Self::load_pem(&cert_pem, &key_pem)
             }
-            (None, None) => Self::generate(),
-            _ => anyhow::bail!(
-                "intercept CA cert and key must be provided together (or both omitted to generate a CA)"
-            ),
+            CaSource::Pem { cert, key } => Self::load_pem(cert, key),
         }
+    }
+
+    /// Load the CA from PEM files when both paths are supplied, generate a fresh one when neither
+    /// is, and reject a half-configured pair (both-or-neither). Thin compat shim over
+    /// [`CaSource::resolve`] + [`from_source`](Self::from_source) for existing path-only callers.
+    pub fn load_or_generate(
+        cert_path: Option<&Path>,
+        key_path: Option<&Path>,
+    ) -> anyhow::Result<Self> {
+        let source = CaSource::resolve(
+            cert_path.map(Path::to_path_buf),
+            key_path.map(Path::to_path_buf),
+            None,
+            None,
+        )?;
+        Self::from_source(&source)
     }
 
     /// The CA certificate as PEM.
     pub fn ca_cert_pem(&self) -> &str {
         &self.cert_pem
+    }
+
+    /// The CA private key as PKCS#8 PEM. Secret material — only returned when a caller explicitly
+    /// asks to bootstrap a fresh CA (issue #593); never logged and never exposed by `GET /intercept`.
+    pub fn ca_key_pem(&self) -> String {
+        self.key.serialize_pem()
     }
 
     /// The CA certificate in DER form (the trust anchor).
@@ -400,6 +485,84 @@ mod tests {
             CertificateAuthority::load_pem("not a pem", "also not a pem").is_err(),
             "malformed PEM input must be a typed error, not a panic or silent success"
         );
+    }
+
+    // Issue #593: CaSource::resolve encodes the whole validation matrix in one place.
+    #[test]
+    fn ca_source_resolve_matrix() {
+        use std::path::PathBuf;
+        let p = || Some(PathBuf::from("x"));
+        let s = || Some("pem".to_string());
+
+        assert!(matches!(
+            CaSource::resolve(None, None, None, None).unwrap(),
+            CaSource::Generate
+        ));
+        assert!(matches!(
+            CaSource::resolve(p(), p(), None, None).unwrap(),
+            CaSource::Paths { .. }
+        ));
+        assert!(matches!(
+            CaSource::resolve(None, None, s(), s()).unwrap(),
+            CaSource::Pem { .. }
+        ));
+        // Half a path pair, half a PEM pair, and both pairs together are all rejected.
+        assert!(
+            CaSource::resolve(p(), None, None, None).is_err(),
+            "half path pair"
+        );
+        assert!(
+            CaSource::resolve(None, None, s(), None).is_err(),
+            "half PEM pair"
+        );
+        assert!(
+            CaSource::resolve(p(), p(), s(), s()).is_err(),
+            "path and PEM are mutually exclusive"
+        );
+    }
+
+    #[test]
+    fn ca_source_debug_never_prints_inline_pem() {
+        let src = CaSource::Pem {
+            cert: "-----BEGIN CERTIFICATE-----secret".to_string(),
+            key: "-----BEGIN PRIVATE KEY-----supersecret".to_string(),
+        };
+        let rendered = format!("{src:?}");
+        assert!(
+            !rendered.contains("secret"),
+            "inline PEM must never appear in Debug output"
+        );
+    }
+
+    #[test]
+    fn from_source_pem_round_trips() {
+        // Generate a CA, export its PEM pair, and reload it through CaSource::Pem — the loaded CA
+        // must expose the same trust anchor and mint leaves that chain to it.
+        let original = CertificateAuthority::generate().expect("generate CA");
+        let cert_pem = original.ca_cert_pem().to_string();
+        let key_pem = original.ca_key_pem();
+
+        let source = CaSource::resolve(None, None, Some(cert_pem.clone()), Some(key_pem))
+            .expect("resolve inline PEM");
+        let loaded = CertificateAuthority::from_source(&source).expect("load from inline PEM");
+        assert_eq!(loaded.ca_cert_pem(), cert_pem, "same trust anchor");
+        let ck = loaded
+            .mint_leaf("svc.internal")
+            .expect("mint via loaded CA");
+        assert_chains_to_ca(&loaded, &ck.cert[0], &[], "svc.internal");
+    }
+
+    #[test]
+    fn ca_key_pem_is_loadable_pkcs8() {
+        let ca = CertificateAuthority::generate().expect("generate CA");
+        let key_pem = ca.ca_key_pem();
+        assert!(
+            key_pem.contains("PRIVATE KEY"),
+            "serialized as PEM private key"
+        );
+        // The exported key must reload as the same CA (cert PEM equality).
+        let reloaded = CertificateAuthority::load_pem(ca.ca_cert_pem(), &key_pem).expect("reload");
+        assert_eq!(reloaded.ca_cert_pem(), ca.ca_cert_pem());
     }
 
     #[test]

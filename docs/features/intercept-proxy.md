@@ -72,11 +72,17 @@ CA are automatically shared with the admin API, so the `/intercept/*` routes bel
 ```bash
 # Generate a CA in-memory:
 rift --intercept-port 8443
-# Or load an existing CA:
+# Or load an existing CA from files:
 rift --intercept-port 8443 --intercept-ca-cert ca.pem --intercept-ca-key ca.key
+# Or pass the CA inline as PEM (issue #593) — env is the intended vehicle:
+RIFT_INTERCEPT_CA_CERT_PEM="$(cat ca.pem)" RIFT_INTERCEPT_CA_KEY_PEM="$(cat ca.key)" \
+  rift --intercept-port 8443
 ```
 
-(Equivalently `RIFT_INTERCEPT_PORT` / `RIFT_INTERCEPT_CA_CERT` / `RIFT_INTERCEPT_CA_KEY`.)
+(Equivalently `RIFT_INTERCEPT_PORT` / `RIFT_INTERCEPT_CA_CERT` / `RIFT_INTERCEPT_CA_KEY`, or the
+inline `RIFT_INTERCEPT_CA_CERT_PEM` / `RIFT_INTERCEPT_CA_KEY_PEM`. The file pair and the PEM pair are
+mutually exclusive — passing both is a startup error. There is no `returnCaKey` at launch; bootstrap
+a CA over the admin API instead, so the key is never printed to logs.)
 
 `--intercept-port` is just an *eager* start of the same listener the admin API can start at runtime
 — it is no longer the only way to enable intercept. A server started **without** the flag still
@@ -90,7 +96,9 @@ it merely *connected* to.
 
 ```
 POST   /intercept   body (optional): { "host"?: "127.0.0.1", "port"?: 0,
-                                        "caCertPath"?: "...", "caKeyPath"?: "..." }
+                                        "caCertPath"?: "...",  "caKeyPath"?: "...",
+                                        "caCertPem"?: "...",   "caKeyPem"?: "...",
+                                        "returnCaKey"?: false }
                     → 201 { "interceptPort": N, "interceptUrl": "http://127.0.0.1:N" }
                     → 409 if a listener is already running (flag, FFI, or a prior POST)
 GET    /intercept   → 200 { "interceptPort": N, "interceptUrl": "..." }  |  404 when not running
@@ -102,10 +110,29 @@ DELETE /intercept   → 204 always (idempotent); stops the listener and drops it
 - The default bind host is `127.0.0.1` — **not** the admin server's host. A containerized,
   connect-transport caller that needs the proxy reachable off-box must pass `"host": "0.0.0.0"`
   explicitly.
-- CA paths are both-or-neither. A half-supplied pair, an unknown field, a bad CA file, or an
-  occupied port is a `400` with the standard error envelope; the private key is never echoed.
-- `DELETE` discards the CA along with the listener, so a later `POST` without CA paths mints a
-  **fresh** CA — re-export `/intercept/ca.pem` (below) after any restart.
+- **Supplying a CA.** Three mutually-exclusive options: none (a fresh CA is generated),
+  `caCertPath`/`caKeyPath` (PEM **files** on the engine's filesystem), or `caCertPem`/`caKeyPem`
+  (inline PEM **bytes** in the request body — issue #593). Inline PEM lets an SDK hand a
+  containerized engine its CA over the admin API with no volume mount. Each pair is
+  both-or-neither, and the path pair and PEM pair cannot be combined. A half-supplied pair, both
+  pairs together, an unknown field, a bad CA, or an occupied port is a `400` with the standard error
+  envelope; a supplied private key is never echoed back.
+- **Bootstrapping a CA (`returnCaKey`).** Set `"returnCaKey": true` (only when **no** CA source is
+  supplied) to have Rift mint a fresh CA and return **both** its cert and key in the `201` response,
+  so you can persist and redistribute a shareable anchor instead of pre-making one with `openssl`:
+  ```json
+  { "interceptPort": N, "interceptUrl": "...", "caCertPem": "-----BEGIN CERTIFICATE-----…",
+    "caKeyPem": "-----BEGIN PRIVATE KEY-----…" }
+  ```
+  The key is returned **once**, in this response only — `GET /intercept` never carries it. Combining
+  `returnCaKey` with any supplied `caCert*`/`caKey*` is a `400` (it would otherwise let a caller echo
+  back an arbitrary keypair from the engine's filesystem). Absent `returnCaKey`, the response carries
+  no CA fields, exactly as before. **Security:** `caKeyPem` is CA private-key material — treat the
+  response as a secret, transport it over the `--apikey`-gated admin plane only, and prefer a
+  pre-provisioned CA where policy requires the key never transit the API.
+- `DELETE` discards the CA along with the listener, so a later `POST` without a CA source mints a
+  **fresh** CA — re-export `/intercept/ca.pem` (below), or bootstrap with `returnCaKey` and supply
+  the pair back via `caCertPem`/`caKeyPem`, after any restart.
 - All three verbs are gated by `--apikey` like every other admin route.
 
 ```bash

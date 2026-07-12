@@ -56,6 +56,8 @@ Options:
       --intercept-port <PORT>      Start the TLS-MITM intercept/redirect proxy on this port (epic #394); off when unset
       --intercept-ca-cert <FILE>   PEM CA certificate for interception (with --intercept-ca-key); a CA is generated if omitted
       --intercept-ca-key <FILE>    PEM CA private key for interception (required with --intercept-ca-cert)
+      --intercept-ca-cert-pem <PEM>  Inline PEM CA certificate for interception (with --intercept-ca-key-pem); mutually exclusive with file paths
+      --intercept-ca-key-pem <PEM>   Inline PEM CA private key for interception (required with --intercept-ca-cert-pem)
       --no-parse                   Disable EJS preprocessing of --configfile (alias: --noParse)
       --formatter <NAME>           Custom config formatter module (no-op; Rift auto-detects JSON/YAML)
       --protofile <FILE>           Custom protocol definitions file (no-op; custom protocols unsupported)
@@ -140,8 +142,10 @@ Environment variables override CLI defaults:
 | `RIFT_DEFAULT_TLS_KEY` | Default TLS private key (PEM) | |
 | `RIFT_NO_SELF_SIGNED_TLS` | Disable self-signed TLS fallback (`true`/`false`) | `false` |
 | `RIFT_INTERCEPT_PORT` | Start the intercept/TLS-MITM proxy on this port (epic #394) | |
-| `RIFT_INTERCEPT_CA_CERT` | PEM CA certificate for interception (with `RIFT_INTERCEPT_CA_KEY`) | |
-| `RIFT_INTERCEPT_CA_KEY` | PEM CA private key for interception | |
+| `RIFT_INTERCEPT_CA_CERT` | PEM CA certificate **file** for interception (with `RIFT_INTERCEPT_CA_KEY`) | |
+| `RIFT_INTERCEPT_CA_KEY` | PEM CA private key **file** for interception | |
+| `RIFT_INTERCEPT_CA_CERT_PEM` | Inline PEM CA certificate (the bytes, not a path; with `RIFT_INTERCEPT_CA_KEY_PEM`) — mutually exclusive with the `_CA_CERT`/`_CA_KEY` file pair | |
+| `RIFT_INTERCEPT_CA_KEY_PEM` | Inline PEM CA private key for interception | |
 | `RIFT_DISABLE_HTTP2` | Force HTTP/1-only listeners, disabling HTTP/2 & h2c auto-negotiation (truthy: `1`/`true`/`yes`/`on`) | off |
 | `RIFT_TCP_BACKLOG` | Listen backlog for the accept loop (positive integer) | `1024` |
 | `RIFT_TCP_NODELAY` | `TCP_NODELAY` on accepted sockets; set `false`/`0`/`off` to disable | on |

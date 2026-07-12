@@ -152,6 +152,29 @@ pub struct Cli {
     /// PEM CA private key for interception. Required together with `--intercept-ca-cert`.
     #[arg(long, value_name = "FILE", env = "RIFT_INTERCEPT_CA_KEY")]
     pub intercept_ca_key: Option<PathBuf>,
+
+    /// Inline CA certificate PEM for interception (issue #593) — the PEM text itself, not a path.
+    /// Used with `--intercept-ca-key-pem`; conflicts with the `--intercept-ca-cert`/`-key` file
+    /// pair. Env is the intended vehicle (`RIFT_INTERCEPT_CA_CERT_PEM`).
+    #[arg(
+        long,
+        value_name = "PEM",
+        env = "RIFT_INTERCEPT_CA_CERT_PEM",
+        conflicts_with = "intercept_ca_cert",
+        conflicts_with = "intercept_ca_key"
+    )]
+    pub intercept_ca_cert_pem: Option<String>,
+
+    /// Inline CA private-key PEM for interception (issue #593). Required together with
+    /// `--intercept-ca-cert-pem`; conflicts with the CA file pair.
+    #[arg(
+        long,
+        value_name = "PEM",
+        env = "RIFT_INTERCEPT_CA_KEY_PEM",
+        conflicts_with = "intercept_ca_cert",
+        conflicts_with = "intercept_ca_key"
+    )]
+    pub intercept_ca_key_pem: Option<String>,
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -394,6 +417,10 @@ impl ServerBuilder {
                         .intercept_ca_key
                         .as_deref()
                         .map(|p| p.to_string_lossy().into_owned()),
+                    ca_cert_pem: cli.intercept_ca_cert_pem.clone(),
+                    ca_key_pem: cli.intercept_ca_key_pem.clone(),
+                    // Cloned (not moved) because `cli` is borrowed for the rest of startup.
+                    ..Default::default()
                 })
                 .await
                 .map_err(|e| anyhow::anyhow!("intercept: {e}"))?;
@@ -903,6 +930,34 @@ mod tests {
         assert_eq!(cli.intercept_port, Some(9000));
         let none = Cli::try_parse_from(["rift"]).expect("parse");
         assert_eq!(none.intercept_port, None);
+    }
+
+    // Issue #593 AC5: inline CA PEM flags parse, and conflict with the CA file flags at parse time.
+    #[test]
+    fn intercept_ca_pem_flags_parse_and_conflict_with_paths() {
+        let cli = Cli::try_parse_from([
+            "rift",
+            "--intercept-ca-cert-pem",
+            "CERT",
+            "--intercept-ca-key-pem",
+            "KEY",
+        ])
+        .expect("inline PEM flags parse");
+        assert_eq!(cli.intercept_ca_cert_pem.as_deref(), Some("CERT"));
+        assert_eq!(cli.intercept_ca_key_pem.as_deref(), Some("KEY"));
+
+        // A PEM flag alongside a CA file flag is a hard parse error (D6 conflicts_with).
+        assert!(
+            Cli::try_parse_from([
+                "rift",
+                "--intercept-ca-cert",
+                "ca.pem",
+                "--intercept-ca-cert-pem",
+                "CERT",
+            ])
+            .is_err(),
+            "path and inline-PEM CA flags must conflict at parse"
+        );
     }
 
     // Issue #356: `--scripts-dir` is the admin-API `file:` script resolution root.

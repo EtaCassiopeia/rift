@@ -1260,6 +1260,52 @@ fn ffi_intercept_serve_and_forward() {
     }
 }
 
+/// Issue #593: over FFI, `rift_start_intercept` with `returnCaKey` hands back a generated CA pair,
+/// and that pair, supplied inline on a later start, reconstructs the same trust anchor.
+#[test]
+fn ffi_intercept_return_ca_key_round_trip() {
+    unsafe {
+        let h = rift_start();
+
+        // Generate-and-return the CA.
+        let started: serde_json::Value = serde_json::from_str(&take_json(rift_start_intercept(
+            h,
+            cstr(r#"{"returnCaKey":true}"#).as_ptr(),
+        )))
+        .unwrap();
+        let ca_cert = started["caCertPem"]
+            .as_str()
+            .expect("caCertPem")
+            .to_string();
+        let ca_key = started["caKeyPem"].as_str().expect("caKeyPem").to_string();
+        assert!(ca_cert.contains("BEGIN CERTIFICATE") && ca_key.contains("PRIVATE KEY"));
+
+        // Stop, then restart with the persisted pair supplied inline.
+        assert_eq!(rift_stop_intercept(h), 0);
+        let opts = serde_json::json!({"caCertPem": ca_cert, "caKeyPem": ca_key}).to_string();
+        let restarted = take_json(rift_start_intercept(h, cstr(&opts).as_ptr()));
+        assert!(!restarted.is_empty(), "restart with inline PEM succeeds");
+
+        // The listener now serves the SAME anchor we bootstrapped.
+        let served_ca = take_json(rift_intercept_ca_pem(h));
+        assert_eq!(
+            served_ca, ca_cert,
+            "restarted listener uses the supplied CA"
+        );
+
+        // returnCaKey combined with a supplied source is rejected (null + last_error).
+        let bad = rift_stop_intercept(h);
+        assert_eq!(bad, 0);
+        let rejected = rift_start_intercept(
+            h,
+            cstr(r#"{"returnCaKey":true,"caCertPath":"x","caKeyPath":"y"}"#).as_ptr(),
+        );
+        assert!(rejected.is_null(), "returnCaKey with a CA source must fail");
+
+        rift_stop(h);
+    }
+}
+
 /// Export a truststore over FFI to a temp path, assert success, and return the written bytes.
 unsafe fn export_truststore_bytes(
     h: *mut RiftHandle,
