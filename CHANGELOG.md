@@ -13,16 +13,37 @@ record.
 
 ### Fixed
 
+- **`rift lint --fix` no longer corrupts valid multi-value header arrays.** The fixer rewrote every
+  array-valued response header into a single comma-joined string and silently dropped any non-string
+  element, so a valid `"Set-Cookie": ["a=1", "b=2"]` (a legitimate multi-value header since #238)
+  was clobbered into one header with different runtime semantics — and a fully valid file could be
+  rewritten just because a *different* file in the run had errors. `--fix` now leaves string-only
+  arrays untouched and, for an array that genuinely contains a non-string element, stringifies the
+  offending elements in place (preserving the array) instead of joining and dropping.
 - **The TUI no longer panics on imposter names or paths containing multibyte UTF-8.** Several
   truncation sites guarded on byte length but sliced at a byte index, so a name/scenario/recorded
   path with multibyte characters (e.g. `日本語サービス` from imported JSON or proxy recordings)
   panicked with "byte index is not a char boundary" inside the render loop, tearing down the
   terminal (often leaving it in raw mode). Truncation is now char-based via a single shared helper.
+- **Creating an imposter no longer silently succeeds when it can't be persisted to `--datadir`.** The
+  create path wrote the config in a fire-and-forget task that only logged failures, so a datadir
+  write error returned `201 Created` to the caller and the imposter then vanished on restart. Create
+  now persists synchronously and, on failure, rolls back the in-memory imposter and returns a
+  `503` (`ImposterError::PersistError`) — matching the durability contract already used by stub
+  mutations (#173).
 - **`rift lint` no longer executes JavaScript while syntax-checking it.** The `javascript`-feature
   validator ran scripts via the JS engine, so an inject/decorate body containing a loop (e.g.
   `while (true) {}`) hung the linter, and any engine error whose message lacked `SyntaxError`/
   `unexpected` was silently treated as valid. It now parses without executing and reports every
   syntax error.
+- **Concurrent requests to a mixed-type response array no longer serve the wrong branch or a bogus
+  empty 200.** Dispatch classified the response with a non-advancing peek and then advanced the
+  cycler in a separate step, so under load a concurrent request could move the shared cursor between
+  the two and, e.g., serve an empty `x-rift-no-match` 200 where a `proxy` or `is` response was
+  intended. The cycler is now advanced exactly once per request and dispatched on the returned
+  response. (Behavior note: the cursor now advances even when proxy/inject/script handling fails —
+  a shared cursor can't be safely un-advanced under concurrency — where a failed handling previously
+  left the cursor for the next request to retry.)
 - **Flow-level `ctx.state.ttl(seconds)` no longer revives expired keys on the in-memory backend.**
   The positive-TTL branch re-stamped every entry in the flow — including entries already past their
   expiry that the amortized sweeper hadn't reaped yet — resurrecting them so a later `get`/`exists`
