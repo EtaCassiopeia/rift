@@ -13,6 +13,11 @@ record.
 
 ### Fixed
 
+- **`GET /imposters` list summaries now report `recordRequests`.** The abbreviated summary omitted
+  the field entirely, so any client that reads it — including the TUI's per-imposter recording
+  indicator — always saw `false` regardless of the imposter's actual `recordRequests` config. The
+  summary now carries `recordRequests` (from `config.record_requests`), so the indicator reflects
+  the real recording state.
 - **`PUT /imposters` no longer loses imposters on a partial failure.** The handler deleted every
   running imposter and then recreated the payload's set, merely logging any create failure — so a
   single bad imposter (or a transiently-held port) returned `200` with a silently smaller set, the

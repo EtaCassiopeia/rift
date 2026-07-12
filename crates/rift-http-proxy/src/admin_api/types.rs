@@ -39,6 +39,7 @@ pub struct ImposterSummary {
     pub name: Option<String>,
     pub number_of_requests: u64,
     pub enabled: bool,
+    pub record_requests: bool,
     #[serde(rename = "_links")]
     pub links: ImposterLinks,
 }

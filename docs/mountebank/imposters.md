@@ -243,11 +243,14 @@ curl http://localhost:2525/imposters
 # Response:
 {
   "imposters": [
-    { "port": 4545, "protocol": "http", "name": "User Service" },
-    { "port": 4546, "protocol": "https", "name": "Payment Service" }
+    { "port": 4545, "protocol": "http", "name": "User Service", "recordRequests": true },
+    { "port": 4546, "protocol": "https", "name": "Payment Service", "recordRequests": false }
   ]
 }
 ```
+
+Each summary carries `recordRequests` (alongside `numberOfRequests` and `enabled`), so tooling can
+show whether an imposter is recording without fetching its full detail.
 
 ### Get Imposter Details
 

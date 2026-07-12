@@ -267,6 +267,7 @@ pub async fn handle_list(
                     name: i.config.name.clone(),
                     number_of_requests: i.get_request_count(),
                     enabled: i.is_enabled(),
+                    record_requests: i.config.record_requests,
                     links: make_imposter_links(base_url, port),
                 })
             })
@@ -1363,6 +1364,55 @@ mod verify_tests {
         let m = Arc::new(ImposterManager::new());
         let resp = verify_response(19755, br#"{"predicates":[]}"#, &m, false);
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+}
+
+#[cfg(test)]
+mod list_summary_tests {
+    use super::*;
+    use http_body_util::BodyExt;
+
+    async fn manager_with(port: u16, record_requests: bool) -> Arc<ImposterManager> {
+        let manager = Arc::new(ImposterManager::new());
+        let cfg = serde_json::json!({
+            "port": port, "protocol": "http", "recordRequests": record_requests, "stubs": []
+        });
+        let config = serde_json::from_value(cfg).expect("config");
+        manager.create_imposter(config).await.expect("create");
+        manager
+    }
+
+    async fn summaries(resp: Response<Full<Bytes>>) -> serde_json::Value {
+        let bytes = resp.into_body().collect().await.expect("body").to_bytes();
+        serde_json::from_slice(&bytes).expect("json")
+    }
+
+    /// The default `GET /imposters` summary must expose `recordRequests` so the TUI
+    /// recording indicator reflects each imposter's configured state (issue #584).
+    #[tokio::test]
+    async fn handle_list_summary_includes_record_requests() {
+        let recording = manager_with(19771, true).await;
+        let resp = handle_list(recording.clone(), None, "http://localhost:2525").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = summaries(resp).await;
+        let entry = &json["imposters"][0];
+        assert_eq!(
+            entry["recordRequests"],
+            serde_json::Value::Bool(true),
+            "recording imposter must report recordRequests=true in the list summary"
+        );
+        let _ = recording.delete_imposter(19771).await;
+
+        let not_recording = manager_with(19772, false).await;
+        let resp = handle_list(not_recording.clone(), None, "http://localhost:2525").await;
+        let json = summaries(resp).await;
+        let entry = &json["imposters"][0];
+        assert_eq!(
+            entry["recordRequests"],
+            serde_json::Value::Bool(false),
+            "non-recording imposter must report recordRequests=false in the list summary"
+        );
+        let _ = not_recording.delete_imposter(19772).await;
     }
 }
 
