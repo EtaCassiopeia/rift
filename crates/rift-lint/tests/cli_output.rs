@@ -72,6 +72,65 @@ fn lint_json_empty_dir_still_emits_json() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn lint_json_directory_attributes_parse_and_validation_errors() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let valid_json = dir.path().join("valid-json.json");
+    let invalid_json = dir.path().join("invalid-json.json");
+    // Valid JSON that intentionally reaches pass-two validation with one missing field.
+    std::fs::write(&valid_json, r#"{"protocol":"http","stubs":[]}"#).expect("write valid JSON");
+    std::fs::write(&invalid_json, r#"{"port":8001"#).expect("write invalid JSON");
+
+    let out = Command::new(BIN)
+        .args([dir.path().to_str().unwrap(), "-o", "json"])
+        .output()
+        .expect("run rift-lint");
+    assert!(
+        !out.status.success(),
+        "lint errors must produce a failure exit"
+    );
+
+    let report: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("stdout parses as JSON");
+    let issues = report["issues"].as_array().expect("issues is an array");
+    assert_eq!(report["files_checked"].as_u64(), Some(2));
+    assert_eq!(report["errors"].as_u64(), Some(2));
+    assert_eq!(issues.len(), 2, "expected one issue per file: {issues:?}");
+
+    let parse_errors: Vec<_> = issues
+        .iter()
+        .filter(|issue| {
+            issue["code"] == "E001"
+                && issue["message"]
+                    .as_str()
+                    .is_some_and(|message| message.starts_with("Failed to parse JSON:"))
+        })
+        .collect();
+    assert_eq!(
+        parse_errors.len(),
+        1,
+        "expected one parse error: {issues:?}"
+    );
+    assert_eq!(
+        parse_errors[0]["file"],
+        invalid_json.to_string_lossy().as_ref()
+    );
+
+    let validation_issues: Vec<_> = issues
+        .iter()
+        .filter(|issue| issue["code"] == "E003")
+        .collect();
+    assert_eq!(
+        validation_issues.len(),
+        1,
+        "valid JSON should produce one validation issue: {issues:?}"
+    );
+    assert_eq!(
+        validation_issues[0]["file"],
+        valid_json.to_string_lossy().as_ref()
+    );
+}
+
 // AC1: NO_COLOR is honored regardless of TTY.
 #[test]
 fn lint_no_color_env_disables_ansi() {

@@ -7,7 +7,7 @@
 //!   rift-lint <directory_or_file> [OPTIONS]
 
 use clap::Parser;
-use rift_lint::{LintIssue, LintOptions, LintResult, Severity, lint_file};
+use rift_lint::{LintIssue, LintOptions, LintResult, Severity, lint_value};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::io::IsTerminal;
@@ -179,9 +179,9 @@ fn main() {
     // Check for port conflicts
     check_port_conflicts(&port_map, &mut result);
 
-    // Second pass: Validate each imposter using the library
-    for (file, _) in &imposters {
-        let file_result = lint_file(file, &options);
+    // Second pass: Validate each parsed imposter using the library
+    for (file, value) in &imposters {
+        let file_result = lint_value(value, &file.to_string_lossy(), &options);
         // Merge without double-counting files_checked (we already counted)
         result.issues.extend(file_result.issues);
         result.errors += file_result.errors;
