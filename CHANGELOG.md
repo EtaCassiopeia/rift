@@ -11,6 +11,23 @@ record.
 
 ## [Unreleased]
 
+### Security
+
+- **`POST /intercept/rules` now obeys `--allowInjection`.** An intercept rule's predicates are
+  evaluated on every intercepted request, so an `inject` predicate is executable JavaScript — but
+  this door never asked the `--allowInjection` gate. The identical predicate was refused with `400`
+  by `POST /imposters` and executed by `POST /intercept/rules`, on a server started without the
+  flag and on an admin port that is unauthenticated unless `--apikey` is set. Since admin access is
+  deliberately *not* supposed to grant code execution — that is precisely what the flag gates —
+  this was a privilege escalation past rift's own stated boundary. Issue #612 swept every door that
+  admits config through one classifier; this is the door it missed. All rule doors now ask it:
+  `POST /intercept/rules`, the `rules` array on `POST /intercept`, and the `--configfile`
+  `intercept` block. The refusal is atomic and sees through `not`/`or`/`and` nesting — a batch
+  containing one gated rule stores none of it, and a refused start binds no listener.
+  **Behaviour change:** a rule with an `inject` predicate now needs `--allowInjection`, and gets the
+  same `400` and remedy message every other door gives. `serve`/`forward` actions carry no script
+  and are unaffected.
+
 ### Added
 
 - **The intercept listener and its rules can be declared in `--configfile`.** Imposters were

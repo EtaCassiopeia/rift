@@ -228,6 +228,14 @@ the predicate against the base64 string, e.g.
 `{ "equals": { "body": "H4sIAAAAAAAA/w==" } }`. A valid-UTF-8 (text or JSON) body is matched
 as-is, unchanged. Forwarding always relays the raw bytes regardless of classification.
 
+> **`inject` predicates require `--allowInjection`.** A rule's predicates are evaluated on every
+> intercepted request, so an `inject` predicate is executable JavaScript — the same surface
+> `--allowInjection` gates on imposter stubs. Without the flag, a rule carrying one (however deeply
+> nested under `not`/`or`/`and`) is refused with `400` and the whole request is rejected: a batch
+> containing one such rule stores none of it. This holds on every door that admits a rule —
+> `POST /intercept/rules`, the `rules` array on `POST /intercept`, and the `--configfile`
+> `intercept` block. `serve` and `forward` actions carry no script and are never gated.
+
 ### Serve an inline stub
 
 ```bash
