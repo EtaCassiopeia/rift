@@ -20,7 +20,6 @@ pub use extensions::fault;
 pub use extensions::flow_state;
 pub use extensions::matcher;
 pub use extensions::routing;
-pub use extensions::rule_index;
 pub use extensions::stub_analysis;
 pub use extensions::template;
 

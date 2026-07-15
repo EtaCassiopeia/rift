@@ -2264,12 +2264,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "matchit"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9ea5f97102eb9e54ab99fb70bb175589073f554bdadfb74d9bd656482ea73e2a"
-
-[[package]]
 name = "memchr"
 version = "2.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3318,14 +3312,12 @@ dependencies = [
 name = "rift-http-proxy"
 version = "0.1.0"
 dependencies = [
- "aho-corasick",
  "anyhow",
  "assert-json-diff",
  "base64 0.22.1",
  "bytes",
  "chrono",
  "clap",
- "criterion",
  "crossbeam",
  "futures",
  "http-body-util",
@@ -3334,7 +3326,6 @@ dependencies = [
  "hyper-util",
  "lazy_static",
  "libc",
- "matchit",
  "mimalloc",
  "num_cpus",
  "parking_lot",
@@ -3393,7 +3384,6 @@ dependencies = [
 name = "rift-mock-core"
 version = "0.1.0"
 dependencies = [
- "aho-corasick",
  "anyhow",
  "arc-swap",
  "base64 0.22.1",
@@ -3410,7 +3400,6 @@ dependencies = [
  "lazy_static",
  "libc",
  "lru",
- "matchit",
  "num_cpus",
  "p12",
  "parking_lot",

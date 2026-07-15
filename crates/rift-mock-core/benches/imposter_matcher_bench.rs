@@ -1,9 +1,8 @@
 //! Criterion benches for the Mountebank imposter matcher hot path.
 //!
-//! Complements `rift-http-proxy/benches/matcher_bench.rs` (which covers the proxy
-//! `RuleIndex`/`CompiledRule` engine). These target the paths most imposter requests actually
-//! hit — `stub_matches` (predicate evaluation) and `Imposter::find_matching_stub_with_client`
-//! (per-request stub scan) — so the Tier 1/2 perf work (#286–#294) has a baseline to measure.
+//! These target the paths most imposter requests actually hit — `stub_matches` (predicate
+//! evaluation) and `Imposter::find_matching_stub_with_client` (per-request stub scan) — so the
+//! Tier 1/2 perf work (#286–#294) has a baseline to measure.
 
 use std::collections::HashMap;
 

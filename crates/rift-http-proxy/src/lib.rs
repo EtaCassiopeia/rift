@@ -7,7 +7,7 @@
 // resolving unchanged — the server is a thin consumer of the core.
 pub use rift_mock_core::{
     backends, behaviors, config, extensions, fault, flow_state, imposter, matcher, predicate,
-    proxy, recording, response, routing, rule_index, scripting, stub_analysis, template, util,
+    proxy, recording, response, routing, scripting, stub_analysis, template, util,
 };
 
 /// Install the process-wide rustls `ring` crypto provider, idempotently (issue #343).

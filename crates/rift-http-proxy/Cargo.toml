@@ -74,8 +74,6 @@ regex = "1.11"
 rand.workspace = true
 urlencoding = "2.1"
 similar = "2.6"
-matchit = "0.9"
-aho-corasick = "1.1"
 anyhow.workspace = true
 thiserror.workspace = true
 socket2 = "0.5"
@@ -103,7 +101,6 @@ rift-mock-core = { path = "../rift-mock-core", version = "0.1.0", default-featur
 rift-lint = { path = "../rift-lint", version = "0.1.0" }
 tempfile = "3.8"
 rcgen = "0.13"
-criterion = { version = "0.5", features = ["html_reports"] }
 
 # Integration testing
 reqwest = { workspace = true, features = ["http2"] }
@@ -126,7 +123,3 @@ mimalloc = ["dep:mimalloc"]
 [[bin]]
 name = "rift-verify"
 path = "src/bin/verify.rs"
-
-[[bench]]
-name = "matcher_bench"
-harness = false
