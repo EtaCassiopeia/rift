@@ -1,0 +1,84 @@
+name: Demo Compose
+
+# Issue #669: boot every docs/demo/docker-compose*.yml and prove it still works. These files are
+# the copy-paste starting point for new users and nothing ran them — the docs-examples gate boots
+# the binary without docker, and the only `docker compose up --wait` job targets
+# tests/compatibility/docker-compose.yml. So a wrong tag, a stale flag, a renamed env var or a
+# broken probe reached users unnoticed. Issue #664 had to hand-edit the healthcheck in five of
+# these; it missed the sixth (retry-proxy had no healthcheck at all) and CI had nothing to say.
+#
+# Lives outside ci.yml deliberately: ci.yml ignores pushes to master, has no schedule, and GitHub
+# path filters are workflow-level rather than per-job — none of the three triggers below can be
+# expressed there. perf.yml is the same shape for the same reason.
+
+on:
+  pull_request:
+    # Demo-only blast radius, but a full docker boot per demo — too expensive for every PR, so
+    # gate the things that can actually break one: the demos, the image they run, and this gate.
+    paths:
+      - "docs/demo/**"
+      - "crates/rift-http-proxy/Dockerfile*"
+      - "scripts/verify-demo-compose.sh"
+      - ".github/workflows/demo-compose.yml"
+  push:
+    branches: [master]
+    # Same filter as the PR trigger, deliberately: an unfiltered full docker gate on every merge
+    # would cost about what gating every PR costs, which the filter above exists to avoid. This
+    # catches a demo change that reached master without a PR run (a direct or admin push); the
+    # cron below, not this, is what catches engine drift.
+    paths:
+      - "docs/demo/**"
+      - "crates/rift-http-proxy/Dockerfile*"
+      - "scripts/verify-demo-compose.sh"
+      - ".github/workflows/demo-compose.yml"
+  schedule:
+    # The path filter above cannot see engine drift: a renamed flag or env var lands in a PR that
+    # touches none of those paths and rots the demos silently. The weekly run bounds that to a
+    # week instead of "until a user reports it". Mondays 04:17 UTC (off the hour: shared runners
+    # are contended on the hour).
+    - cron: "17 4 * * 1"
+
+concurrency:
+  group: demo-compose-${{ github.ref }}
+  # Superseding a PR's own earlier run is free; cancelling a master/cron run is not. Both of those
+  # share the group (github.ref is refs/heads/master for each), so an unconditional cancel would
+  # let a merge kill the weekly rot check that had just started.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  demo-compose:
+    name: Demo compose boots
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Build once; every demo but retry-proxy pins this tag.
+      - name: Build rift image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: crates/rift-http-proxy/Dockerfile
+          tags: rift-proxy:local
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # docker-compose-retry-proxy.yml pins the PUBLISHED image, so without this the gate would
+      # test whatever is on Docker Hub instead of the code under review — green on a broken PR,
+      # red on an unrelated bad publish. Retagging keeps the demo file copy-paste-able (a user
+      # really does get the published image) while CI exercises the build under test.
+      - name: Point the published tag at the image under test
+        run: docker tag rift-proxy:local zainalpour/rift-proxy:latest
+
+      # --self-test first proves the gate rejects what it claims to; a boot gate that silently
+      # asserts nothing is worse than no gate, since it reads as coverage.
+      - name: Verify demo compose files
+        run: |
+          ./scripts/verify-demo-compose.sh --self-test
+          ./scripts/verify-demo-compose.sh
