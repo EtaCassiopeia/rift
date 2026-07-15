@@ -1,14 +1,17 @@
 name: Performance
 
-# Issue #298: run the criterion matcher benches on PRs and flag regressions, so a perf regression
-# can't land silently. Compares the PR head against the base by running the same benches on both
-# and diffing criterion's own mean estimates. Microbenchmarks on shared CI runners are noisy, so
-# the hard-fail threshold is deliberately generous (relative, per-benchmark); the full comparison
-# is always posted to the job summary for review.
+# Issue #298: run the criterion benches on PRs and flag regressions, so a perf regression can't
+# land silently. Compares the PR head against the base by running the same benches on both and
+# diffing criterion's own mean estimates. Microbenchmarks on shared CI runners are noisy, so the
+# hard-fail threshold is deliberately generous (relative, per-benchmark); the full comparison is
+# always posted to the job summary for review.
+#
+# Gated benches (BENCH_TARGETS below): the imposter matcher, the scripting decision cache, and the
+# proxy rule scan.
 
 on:
   pull_request:
-    # Only when code that can affect matcher performance changes (keeps the job off doc/CI-only PRs).
+    # Only when code that can affect benched performance changes (keeps the job off doc/CI-only PRs).
     paths:
       - "crates/rift-mock-core/**"
       - "crates/rift-http-proxy/**"
@@ -29,13 +32,23 @@ env:
   # The matcher benches run in ~150 ns and a shared runner swings ±20-25% run-to-run at that scale,
   # which produced false +50-67% "regressions" (issue #446). Best-of-N sampling below collapses that
   # jitter, so this threshold now cleanly separates real large regressions from residual noise.
+  # The cheapest gated benches are far below that scale (`rule_applies_to_upstream/no_filter` is
+  # sub-nanosecond, `rule_scan_no_match/exact/1` a few ns), where the same absolute jitter is a much
+  # larger relative swing — watch those first if this gate starts crying wolf again.
   REGRESSION_THRESHOLD: "1.5"
   # How many independent bench runs to record per side; the gate compares the fastest (min) of each.
-  BENCH_SAMPLES: "3"
+  # Dropped 3 -> 2 when the decision-cache and proxy benches joined BENCH_TARGETS: the full set is
+  # ~5.5 min per run, and a third sample per side cost ~11 min of wall clock for a shrinking return
+  # (min-of-N's jitter cancellation is strongest going 1 -> 2). If the gate turns flaky again, this
+  # is the first knob to turn back up before touching REGRESSION_THRESHOLD.
+  BENCH_SAMPLES: "2"
+  # Bench targets to gate, by workspace-unique target name (see run_benches.sh for why not `-p`).
+  # A target missing from the PR base is skipped with a notice, so adding one here lands cleanly.
+  BENCH_TARGETS: "imposter_matcher_bench decision_cache_bench proxy_rules_bench"
 
 jobs:
   bench-regression:
-    name: Matcher benchmark regression gate
+    name: Benchmark regression gate
     runs-on: ubuntu-latest
     steps:
       - name: Checkout (full history for base/head)
@@ -56,25 +69,27 @@ jobs:
       - name: Install LuaJIT (needed to build a pre-#450 base)
         run: sudo apt-get update && sudo apt-get install -y libluajit-5.1-dev
 
+      # Both sides must run the *same* runner script, and `git checkout` of the base replaces the
+      # working tree — including the script itself, which a PR that adds or edits it would then lose
+      # (and a PR that adds it would fail outright: the base has no such file). Stage head's copy
+      # outside the tree first and invoke that for both sides.
+      - name: Stage the bench runner outside the work tree
+        run: |
+          cp .github/scripts/run_benches.sh "$RUNNER_TEMP/run_benches.sh"
+          chmod +x "$RUNNER_TEMP/run_benches.sh"
+
       # Record BENCH_SAMPLES independent runs per side (baselines base-1..N / pr-1..N). The gate
       # compares the fastest run of each side (issue #446): noise only ever makes a run slower, so
       # min-of-N is the least-contended, most-representative measurement and cancels cross-run jitter.
-      # Select the bench by its workspace-unique target name, NOT `-p <crate>`: the base checkout
-      # may predate a crate rename (e.g. rift-core -> rift-mock-core), so a hardcoded package name
-      # would not exist on the base and would fail the gate. The bench target name is stable.
       - name: Benchmark base (${{ github.base_ref }})
         run: |
           git checkout --force ${{ github.event.pull_request.base.sha }}
-          for i in $(seq 1 "$BENCH_SAMPLES"); do
-            cargo bench --bench imposter_matcher_bench -- --save-baseline "base-$i"
-          done
+          "$RUNNER_TEMP/run_benches.sh" base
 
       - name: Benchmark PR head
         run: |
           git checkout --force ${{ github.event.pull_request.head.sha }}
-          for i in $(seq 1 "$BENCH_SAMPLES"); do
-            cargo bench --bench imposter_matcher_bench -- --save-baseline "pr-$i"
-          done
+          "$RUNNER_TEMP/run_benches.sh" pr
 
       - name: Compare and gate
         run: python3 .github/scripts/bench_regression.py
