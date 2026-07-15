@@ -315,7 +315,7 @@ async fn explicit_port_zero_auto_assigns() {
         .expect("explicit port 0 should auto-assign an available port");
 
     assert_ne!(port, 0);
-    assert!(manager.get_imposter(port).is_some());
+    assert!(manager.get_imposter(port).is_ok());
     assert_eq!(manager.count(), 1);
 }
 
