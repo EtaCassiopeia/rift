@@ -3,8 +3,43 @@
 //! running state is touched), so a parse error is returned rather than applied.
 
 use crate::imposter::{ImposterConfig, ScriptBaseDir, resolve_scripts};
+use regex::Regex;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 use tracing::warn;
+
+// Fixed EJS tag patterns (issue #560): compile once at first use rather than on every
+// `preprocess_ejs` call — that runs per config file at startup, on every `POST /admin/reload`, and
+// from the script CLI. All are compile-time-constant patterns, so a compile failure is a
+// programming error caught immediately by tests, not a data-dependent runtime error.
+
+/// `<% include 'path' %>` — quoted or bare path.
+static EJS_INCLUDE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"<%\s*include\s+['"]?([^'">\s]+)['"]?\s*%>"#)
+        .expect("EJS include pattern is a valid constant regex")
+});
+
+/// `<%- stringify('relative/path') %>` (issue #355 Item 7).
+static EJS_STRINGIFY_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"<%-\s*stringify\(\s*['"]([^'"]+)['"]\s*\)\s*%>"#)
+        .expect("EJS stringify pattern is a valid constant regex")
+});
+
+/// `<%= expr %>` expression tag.
+static EJS_EXPR_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"<%=\s*(.*?)\s*%>").expect("EJS expression pattern is a valid constant regex")
+});
+
+/// The only supported expression body: `process.env.VAR` with an optional `|| 'default'`.
+static EJS_ENV_VAR_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"^process\.env\.([A-Za-z_][A-Za-z0-9_]*)(?:\s*\|\|\s*['"]([^'"]*)['"]\s*)?$"#)
+        .expect("EJS env-var pattern is a valid constant regex")
+});
+
+/// Remaining `<% ... %>` control blocks (non-expression tags); `(?s)` enables dotall.
+static EJS_STMT_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?s)<%[^=].*?%>").expect("EJS statement pattern is a valid constant regex")
+});
 
 /// Where the running imposters were loaded from, retained so reload can re-read the same source.
 #[derive(Debug, Clone)]
@@ -100,10 +135,9 @@ fn preprocess_ejs(content: &str, config_path: &Path) -> anyhow::Result<String> {
 
     // Process include directives first:
     // `<% include 'path' %>`, `<% include "path" %>`, or `<% include path %>`
-    let include_re = regex::Regex::new(r#"<%\s*include\s+['"]?([^'">\s]+)['"]?\s*%>"#).unwrap();
     let mut result = String::new();
     let mut last = 0;
-    for cap in include_re.captures_iter(content) {
+    for cap in EJS_INCLUDE_RE.captures_iter(content) {
         let full = cap.get(0).unwrap();
         let include_path = cap.get(1).unwrap().as_str();
         result.push_str(&content[last..full.start()]);
@@ -131,11 +165,9 @@ fn preprocess_ejs(content: &str, config_path: &Path) -> anyhow::Result<String> {
     // quotes (e.g. `"inject": "<%- stringify('inject.js') %>"`), so only the escaped INNER
     // content is substituted — `serde_json::to_string` then stripping its own wrapping quotes —
     // keeping the surrounding JSON valid.
-    let stringify_re =
-        regex::Regex::new(r#"<%-\s*stringify\(\s*['"]([^'"]+)['"]\s*\)\s*%>"#).unwrap();
     let mut result = String::new();
     let mut last = 0;
-    for cap in stringify_re.captures_iter(&content) {
+    for cap in EJS_STRINGIFY_RE.captures_iter(&content) {
         let full = cap.get(0).unwrap();
         let rel_path = cap.get(1).unwrap().as_str();
         result.push_str(&content[last..full.start()]);
@@ -160,20 +192,14 @@ fn preprocess_ejs(content: &str, config_path: &Path) -> anyhow::Result<String> {
     let content = result;
 
     // Process expression tags: `<%= expr %>`
-    let expr_re = regex::Regex::new(r"<%=\s*(.*?)\s*%>").unwrap();
-    let env_var_re = regex::Regex::new(
-        r#"^process\.env\.([A-Za-z_][A-Za-z0-9_]*)(?:\s*\|\|\s*['"]([^'"]*)['"]\s*)?$"#,
-    )
-    .unwrap();
-
     let mut result = String::new();
     let mut last = 0;
-    for cap in expr_re.captures_iter(&content) {
+    for cap in EJS_EXPR_RE.captures_iter(&content) {
         let full = cap.get(0).unwrap();
         let expr = cap.get(1).unwrap().as_str().trim();
         result.push_str(&content[last..full.start()]);
 
-        if let Some(env_cap) = env_var_re.captures(expr) {
+        if let Some(env_cap) = EJS_ENV_VAR_RE.captures(expr) {
             let var_name = env_cap.get(1).unwrap().as_str();
             let default_val = env_cap.get(2).map(|m| m.as_str()).unwrap_or("");
             let value = std::env::var(var_name).unwrap_or_else(|_| default_val.to_string());
@@ -189,12 +215,11 @@ fn preprocess_ejs(content: &str, config_path: &Path) -> anyhow::Result<String> {
     result.push_str(&content[last..]);
     let content = result;
 
-    // Strip remaining `<% ... %>` control blocks (non-expression tags); (?s) enables dotall
-    let stmt_re = regex::Regex::new(r"(?s)<%[^=].*?%>").unwrap();
-    if stmt_re.is_match(&content) {
+    // Strip remaining `<% ... %>` control blocks (non-expression tags).
+    if EJS_STMT_RE.is_match(&content) {
         warn!("EJS statement blocks (<% ... %>) are not supported and will be removed");
     }
-    Ok(stmt_re.replace_all(&content, "").to_string())
+    Ok(EJS_STMT_RE.replace_all(&content, "").to_string())
 }
 
 #[cfg(test)]
@@ -428,5 +453,83 @@ mod tests {
             result.unwrap_err().to_string().contains("nope-355.js"),
             "error message should name the missing file"
         );
+    }
+
+    /// Pins the ordering invariant documented at the `<%- stringify %>` step: it must run BEFORE
+    /// the `EJS_STMT_RE` catch-all, which also matches `<%- ... %>` and would otherwise silently
+    /// eat the tag — wrong output, no error. Neither tag type alone catches a reordering.
+    #[test]
+    fn ejs_stringify_survives_when_statement_blocks_present() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("inject.js"), "hi").unwrap();
+        let content = r#"{"a": "<%- stringify('inject.js') %>"}<% if (x) { %><% } %>"#;
+        let config_path = dir.path().join("config.ejs");
+        assert_eq!(
+            preprocess_ejs(content, &config_path).unwrap(),
+            r#"{"a": "hi"}"#
+        );
+    }
+
+    #[test]
+    fn ejs_statement_blocks_are_stripped() {
+        let content = r#"{"a": 1<% for (var i=0;i<3;i++) { %><% } %>}"#;
+        let path = PathBuf::from("config.json");
+        assert_eq!(preprocess_ejs(content, &path).unwrap(), r#"{"a": 1}"#);
+    }
+
+    #[test]
+    fn ejs_statement_strip_spans_newlines() {
+        let content = "{\"a\": 1<% if (x) {\n  y();\n} %>}";
+        let path = PathBuf::from("config.json");
+        assert_eq!(preprocess_ejs(content, &path).unwrap(), r#"{"a": 1}"#);
+    }
+
+    #[test]
+    fn ejs_statics_match_their_tags() {
+        use super::{EJS_ENV_VAR_RE, EJS_EXPR_RE, EJS_INCLUDE_RE, EJS_STMT_RE, EJS_STRINGIFY_RE};
+
+        assert_eq!(
+            EJS_INCLUDE_RE
+                .captures(r#"<% include 'a/b.json' %>"#)
+                .unwrap()[1]
+                .to_string(),
+            "a/b.json"
+        );
+        assert_eq!(
+            EJS_INCLUDE_RE.captures("<% include bare.json %>").unwrap()[1].to_string(),
+            "bare.json"
+        );
+
+        assert_eq!(
+            EJS_STRINGIFY_RE
+                .captures(r#"<%- stringify('inject.js') %>"#)
+                .unwrap()[1]
+                .to_string(),
+            "inject.js"
+        );
+
+        assert_eq!(
+            EJS_EXPR_RE.captures("<%= process.env.HOST %>").unwrap()[1].to_string(),
+            "process.env.HOST"
+        );
+
+        let env_cap = EJS_ENV_VAR_RE
+            .captures("process.env.PORT || '4545'")
+            .unwrap();
+        assert_eq!(env_cap[1].to_string(), "PORT");
+        assert_eq!(env_cap[2].to_string(), "4545");
+        assert!(
+            EJS_ENV_VAR_RE
+                .captures("process.env.HOST")
+                .unwrap()
+                .get(2)
+                .is_none()
+        );
+        assert!(EJS_ENV_VAR_RE.captures("someOtherExpr()").is_none());
+
+        // (?s) dotall: a statement block spanning newlines is one match.
+        assert!(EJS_STMT_RE.is_match("<% if (x) {\n y();\n} %>"));
+        // `<%=` is an expression tag, not a statement — the catch-all must not eat it.
+        assert!(!EJS_STMT_RE.is_match("<%= process.env.HOST %>"));
     }
 }

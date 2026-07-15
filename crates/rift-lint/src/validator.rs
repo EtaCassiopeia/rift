@@ -5,6 +5,21 @@ use regex::Regex;
 use serde_json::Value;
 use std::collections::HashSet;
 use std::path::Path;
+use std::sync::LazyLock;
+
+// Fixed lint patterns (issue #560): compile once at first use rather than on every call. The TUI
+// stub editor lints on every keystroke, so these run far more often than a CLI lint pass suggests.
+// Both are compile-time-constant patterns, so a compile failure is a programming error caught
+// immediately by tests, not a data-dependent runtime error.
+
+/// Mountebank slice notation `[:N]` in a JSONPath selector (lint rule I001).
+static JSONPATH_SLICE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\[:(\d+)\]").expect("jsonpath slice pattern is a valid constant regex")
+});
+
+/// Port suffix in a proxy `to` URL, e.g. `localhost:15000` (lint rule I002).
+static PROXY_PORT_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r":(\d+)").expect("proxy port pattern is a valid constant regex"));
 
 /// A JavaScript syntax error surfaced by the embedded validator.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -678,8 +693,7 @@ pub fn validate_predicate(
 /// Validate JSONPath selector.
 fn validate_jsonpath(file: &Path, jsonpath: &Value, location: &str, result: &mut LintResult) {
     if let Some(selector) = jsonpath.get("selector").and_then(|v| v.as_str()) {
-        let slice_re = Regex::new(r"\[:(\d+)\]").unwrap();
-        if slice_re.is_match(selector) {
+        if JSONPATH_SLICE_RE.is_match(selector) {
             result.add_issue(
                 LintIssue::info(
                     "I001",
@@ -1028,22 +1042,20 @@ pub fn validate_proxy_response(
                 );
             }
 
-            if url.contains("localhost:") || url.contains("127.0.0.1:") {
-                let port_re = Regex::new(r":(\d+)").unwrap();
-                if let Some(captures) = port_re.captures(url)
-                    && let Ok(port) = captures[1].parse::<u16>()
-                    && port > 10000
-                {
-                    result.add_issue(
-                        LintIssue::info(
-                            "I002",
-                            format!("Proxy targets localhost:{port}"),
-                            file.to_path_buf(),
-                        )
-                        .with_location(format!("{location}.to"))
-                        .with_suggestion("Ensure upstream service is running on this port"),
-                    );
-                }
+            if (url.contains("localhost:") || url.contains("127.0.0.1:"))
+                && let Some(captures) = PROXY_PORT_RE.captures(url)
+                && let Ok(port) = captures[1].parse::<u16>()
+                && port > 10000
+            {
+                result.add_issue(
+                    LintIssue::info(
+                        "I002",
+                        format!("Proxy targets localhost:{port}"),
+                        file.to_path_buf(),
+                    )
+                    .with_location(format!("{location}.to"))
+                    .with_suggestion("Ensure upstream service is running on this port"),
+                );
             }
         } else {
             result.add_issue(
@@ -1669,5 +1681,30 @@ mod js_syntax_tests {
                 "invalid JS must be reported: {bad}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod regex_static_tests {
+    use super::{JSONPATH_SLICE_RE, PROXY_PORT_RE};
+
+    #[test]
+    fn jsonpath_slice_re_matches_mountebank_slice() {
+        assert!(JSONPATH_SLICE_RE.is_match("$.items[:3]"));
+        assert_eq!(
+            JSONPATH_SLICE_RE.captures("$.items[:12]").unwrap()[1].to_string(),
+            "12"
+        );
+        assert!(!JSONPATH_SLICE_RE.is_match("$.items[0]"));
+        assert!(!JSONPATH_SLICE_RE.is_match("$.items[*]"));
+    }
+
+    #[test]
+    fn proxy_port_re_captures_port() {
+        assert_eq!(
+            PROXY_PORT_RE.captures("http://localhost:15000").unwrap()[1].to_string(),
+            "15000"
+        );
+        assert!(!PROXY_PORT_RE.is_match("http://localhost/path"));
     }
 }
