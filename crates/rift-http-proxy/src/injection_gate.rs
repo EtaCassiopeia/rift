@@ -48,6 +48,17 @@ pub fn gated_offender_ports(configs: &[ImposterConfig]) -> Vec<String> {
         .collect()
 }
 
+/// True if `rule` carries a scripting surface gated by `--allowInjection` (issue #655).
+///
+/// An intercept rule's only executable surface is a predicate `inject`: its `serve` action is a
+/// fixed status/headers/body stub and `forward` is a port number, so neither can carry script — a
+/// serve body that merely looks like JavaScript is inert data. Config-file rules therefore ask this
+/// the same question `--configfile` imposters answer via [`config_uses_script_surface`], so one
+/// document cannot be refused as an imposter stub and executed as an intercept predicate.
+pub fn intercept_rule_uses_script_surface(rule: &crate::intercept_rules::InterceptRule) -> bool {
+    rule.predicates.iter().any(predicate_has_inject)
+}
+
 /// True if any stub in `stubs` uses a Mountebank scripting surface gated by `--allowInjection`
 /// (issue #355 Item 4): an inject response, a decorate behavior (`_behaviors.decorate` / a
 /// proxy's `addDecorateBehavior`), a `_behaviors.shellTransform` (runs a host shell command),

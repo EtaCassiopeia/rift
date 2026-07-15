@@ -11,6 +11,30 @@ record.
 
 ## [Unreleased]
 
+### Added
+
+- **The intercept listener and its rules can be declared in `--configfile`.** Imposters were
+  declarative but intercept rules were not: they could only be installed at runtime over
+  `POST /intercept/rules`, so every containerized intercept deployment needed a second "bootstrap"
+  container to `curl` the admin API after boot. That sidecar exits `0` once it has posted the rule,
+  which Kubernetes' `restartPolicy: Always` treats as a crash — the usual workaround is keeping a
+  whole pod alive with `sleep` — and because `depends_on` ordering can't be gated on it, the system
+  under test could start *before* the rule existed and hit the unmatched-host default. A config file
+  may now carry an optional top-level `intercept` block (`{host?, port?, ca?, rules[]}`) alongside
+  its `imposters`, so one declarative file brings up the listener with its rules already installed:
+  `rift --configfile config.json`, no admin call and no sidecar. The rules are seeded *before* the
+  listener binds, so there is no window in which it accepts traffic without them. The block reuses
+  the `POST /intercept` body shape and the existing rule schema verbatim; `POST /intercept` and the
+  FFI `rift_start_intercept` gain the same optional `rules` array, so any surface can start-and-seed
+  in one call. Optional and additive: a config without the block, and any existing payload without
+  `rules`, behave exactly as before. Supplying the block together with `--intercept-*` flags is a
+  startup error rather than a silent precedence guess, and a rule using an `inject` predicate
+  requires `--allowInjection` just as a config-file imposter's scripting surface does. The block is
+  read from the `{"imposters": [...]}` wrapper form; writing one into a single-imposter document is
+  a startup error naming the fix, never a block that silently does nothing. `POST /admin/reload`
+  continues to apply imposters only, and now returns a `warnings` entry (and logs one) when the
+  reloaded file carries an `intercept` block, so an edit to it never looks applied when it wasn't.
+
 ## [0.13.6] - 2026-07-15
 
 ### Fixed
