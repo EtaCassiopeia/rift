@@ -41,7 +41,6 @@ RUN mkdir -p crates/rift-http-proxy/src/bin crates/rift-http-proxy/benches \
     echo "" > crates/rift-ffi/src/lib.rs && \
     echo "fn main() {}" > crates/rift-http-proxy/src/main.rs && \
     echo "fn main() {}" > crates/rift-http-proxy/src/bin/verify.rs && \
-    echo "fn main() {}" > crates/rift-http-proxy/benches/matcher_bench.rs && \
     echo "fn main() {}" > crates/rift-mock-core/benches/imposter_matcher_bench.rs && \
     echo "pub fn lint() {}" > crates/rift-lint/src/lib.rs && \
     echo "fn main() {}" > crates/rift-lint/src/main.rs && \

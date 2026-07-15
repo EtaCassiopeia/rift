@@ -34,7 +34,6 @@ RUN mkdir -p crates/rift-lint/src crates/rift-http-proxy/src/bin crates/rift-htt
     echo "fn main() {}" > crates/rift-lint/src/main.rs && \
     echo "fn main() {}" > crates/rift-http-proxy/src/main.rs && \
     echo "fn main() {}" > crates/rift-http-proxy/src/bin/verify.rs && \
-    echo "fn main() {}" > crates/rift-http-proxy/benches/matcher_bench.rs && \
     echo "fn main() {}" > crates/rift-tui/src/main.rs && \
     cargo build --release --locked --package rift-lint && \
     rm -rf crates/*/src crates/*/benches

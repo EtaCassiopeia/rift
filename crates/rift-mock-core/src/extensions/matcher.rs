@@ -218,15 +218,6 @@ impl CompiledRule {
     }
 }
 
-pub fn find_matching_rule<'a>(
-    rules: &'a [CompiledRule],
-    method: &Method,
-    uri: &Uri,
-    headers: &HeaderMap,
-) -> Option<&'a CompiledRule> {
-    rules.iter().find(|rule| rule.matches(method, uri, headers))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -626,50 +617,6 @@ mod tests {
         let result = CompiledRule::compile(rule);
         // This actually succeeds because hyper allows custom methods
         assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_find_matching_rule_helper() {
-        let rules = vec![
-            create_test_rule(
-                "rule-1",
-                vec!["GET"],
-                PathMatch::Prefix {
-                    prefix: "/api".to_string(),
-                },
-            ),
-            create_test_rule(
-                "rule-2",
-                vec!["POST"],
-                PathMatch::Exact {
-                    exact: "/submit".to_string(),
-                },
-            ),
-        ];
-
-        let compiled_rules: Vec<CompiledRule> = rules
-            .into_iter()
-            .map(|r| CompiledRule::compile(r).unwrap())
-            .collect();
-
-        let headers = HeaderMap::new();
-
-        // Should match rule-1
-        let uri1 = "http://localhost/api/users".parse().unwrap();
-        let matched1 = find_matching_rule(&compiled_rules, &Method::GET, &uri1, &headers);
-        assert!(matched1.is_some());
-        assert_eq!(matched1.unwrap().id, "rule-1");
-
-        // Should match rule-2
-        let uri2 = "http://localhost/submit".parse().unwrap();
-        let matched2 = find_matching_rule(&compiled_rules, &Method::POST, &uri2, &headers);
-        assert!(matched2.is_some());
-        assert_eq!(matched2.unwrap().id, "rule-2");
-
-        // Should not match any rule
-        let uri3 = "http://localhost/other".parse().unwrap();
-        let matched3 = find_matching_rule(&compiled_rules, &Method::GET, &uri3, &headers);
-        assert!(matched3.is_none());
     }
 
     #[test]
