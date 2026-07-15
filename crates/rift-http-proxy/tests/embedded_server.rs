@@ -92,6 +92,12 @@ async fn server_builder_with_injected_manager_serves_admin_api() {
 // the caller no way to learn the assigned port.
 #[tokio::test]
 async fn run_metrics_server_serves_metrics() {
+    // Issue #617: record the metric this test asserts on. The `rift_*` families are lazily
+    // registered on first touch, so in a process running only this test the registry is empty
+    // and /metrics returns an empty body. Without this the test passes only on a sibling test
+    // having already recorded one — order-dependent, and it fails under `--exact`.
+    rift_http_proxy::extensions::metrics::record_request("GET", 200);
+
     let addr: std::net::SocketAddr = "127.0.0.1:19482".parse().expect("addr");
     tokio::spawn(run_metrics_server(addr));
     wait_for_http("http://127.0.0.1:19482/metrics").await;
@@ -102,8 +108,8 @@ async fn run_metrics_server_serves_metrics() {
     assert_eq!(resp.status(), 200);
     let body = resp.text().await.expect("body");
     assert!(
-        body.contains("rift_"),
-        "expected rift metrics in body, got: {body:.200}"
+        body.contains("rift_requests_total"),
+        "expected the rift_requests_total this test recorded, got: {body:.200}"
     );
 
     let not_found = reqwest::get("http://127.0.0.1:19482/other")
