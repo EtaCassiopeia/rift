@@ -215,6 +215,7 @@ fn bench_insert(c: &mut Criterion) {
 
 /// A script doing something ordinary — read a body field, decide a fault — per issue #665: a
 /// no-op would flatter the memo, an elaborate one would flatter the cache.
+#[allow(dead_code)]
 const PAYOFF_JS_SCRIPT: &str = r#"
 function respond(ctx) {
     var body = ctx.request.json;
