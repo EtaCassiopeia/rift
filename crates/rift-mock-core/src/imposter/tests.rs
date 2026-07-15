@@ -300,6 +300,25 @@ async fn test_imposter_manager_create_delete() {
     }
 }
 
+#[tokio::test]
+async fn explicit_port_zero_auto_assigns() {
+    let manager = ImposterManager::new();
+    let config = ImposterConfig {
+        port: Some(0),
+        protocol: "http".to_string(),
+        ..Default::default()
+    };
+
+    let port = manager
+        .create_imposter(config)
+        .await
+        .expect("explicit port 0 should auto-assign an available port");
+
+    assert_ne!(port, 0);
+    assert!(manager.get_imposter(port).is_ok());
+    assert_eq!(manager.count(), 1);
+}
+
 #[test]
 fn test_add_decorate_behavior_serde() {
     let json = r#"{"to":"http://localhost:4546","mode":"proxyOnce","addDecorateBehavior":"function(request, response) { response.headers['X-Proxied'] = 'true'; }"}"#;

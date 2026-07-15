@@ -365,26 +365,29 @@ impl ImposterManager {
 
         let bind_host: &str = config.host.as_deref().unwrap_or("0.0.0.0");
         // Determine port - either from config or auto-assign
-        let (port, listener) = if let Some(p) = config.port {
-            // Check if specified port is already in use
-            if self.imposters.read().contains_key(&p) {
-                return Err(ImposterError::PortInUse(p));
+        let (port, listener) = match config.port {
+            Some(p) if p != 0 => {
+                // Check if specified port is already in use
+                if self.imposters.read().contains_key(&p) {
+                    return Err(ImposterError::PortInUse(p));
+                }
+                // Bind with SO_REUSEADDR/REUSEPORT so a hot-reload (#197) can re-bind the same port
+                // immediately after the previous imposter's listener is torn down.
+                let addr = (bind_host, p)
+                    .to_socket_addrs()
+                    .map_err(|e| ImposterError::BindError(p, e.to_string()))?
+                    .next()
+                    .ok_or_else(|| ImposterError::BindError(p, "no socket address".to_string()))?;
+                (
+                    p,
+                    crate::proxy::network::create_reusable_listener(addr)
+                        .map_err(|e| ImposterError::BindError(p, e.to_string()))?,
+                )
             }
-            // Bind with SO_REUSEADDR/REUSEPORT so a hot-reload (#197) can re-bind the same port
-            // immediately after the previous imposter's listener is torn down.
-            let addr = (bind_host, p)
-                .to_socket_addrs()
-                .map_err(|e| ImposterError::BindError(p, e.to_string()))?
-                .next()
-                .ok_or_else(|| ImposterError::BindError(p, "no socket address".to_string()))?;
-            (
-                p,
-                crate::proxy::network::create_reusable_listener(addr)
-                    .map_err(|e| ImposterError::BindError(p, e.to_string()))?,
-            )
-        } else {
-            // Auto-assign port: find an available port starting from a base
-            self.find_available_port(bind_host).await?
+            _ => {
+                // Auto-assign port: find an available port starting from a base
+                self.find_available_port(bind_host).await?
+            }
         };
 
         config.port = Some(port);
@@ -1535,7 +1538,6 @@ mod tests {
         let port = manager
             .create_imposter(imposter_cfg(json!({
                 "protocol": "http",
-                "port": 0,
                 "stubs": [
                     {"predicates": [{"equals": {"path": "/dup"}}],
                      "responses": [{"is": {"statusCode": 200, "body": "x"}}]},
