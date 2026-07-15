@@ -231,6 +231,7 @@ pub fn find_matching_rule<'a>(
 mod tests {
     use super::*;
     use crate::config::{FaultConfig, LatencyFault, MatchConfig};
+    use crate::predicate::QueryMatcher;
 
     fn create_test_rule(id: &str, methods: Vec<&str>, path: PathMatch) -> Rule {
         Rule {
@@ -255,6 +256,26 @@ mod tests {
             },
             upstream: None, // No upstream filter for tests
         }
+    }
+
+    // Issue #614: end-to-end pin through the matcher's own `parse_query_string` (deep_equals'),
+    // which left keys raw — so a rule keyed on a decoded parameter *name* never matched a request
+    // that percent-encoded it, while the imposter path matched the same request.
+    #[test]
+    fn test_query_matcher_matches_percent_encoded_key_name() {
+        let mut rule = create_test_rule("test", vec!["GET"], PathMatch::Any);
+        rule.match_config.query = vec![QueryMatcher::Simple {
+            name: "first name".to_string(),
+            value: "bob".to_string(),
+        }];
+        let compiled = CompiledRule::compile(rule).unwrap();
+        let headers = HeaderMap::new();
+
+        let uri = "http://localhost/?first%20name=bob".parse().unwrap();
+        assert!(
+            compiled.matches(&Method::GET, &uri, &headers),
+            "a rule on the decoded key name must match a request that percent-encodes it"
+        );
     }
 
     #[test]
