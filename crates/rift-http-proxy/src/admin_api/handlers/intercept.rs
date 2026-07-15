@@ -109,6 +109,9 @@ async fn start_from_bytes(body: &[u8], control: &InterceptControl) -> Response<F
         Err(e) => {
             let status = match e {
                 InterceptStartError::AlreadyRunning => StatusCode::CONFLICT,
+                // Same code the runtime rule route returns for a full store, so one condition has
+                // one status whichever door reports it (issue #655).
+                InterceptStartError::Rules(_) => StatusCode::TOO_MANY_REQUESTS,
                 _ => StatusCode::BAD_REQUEST,
             };
             error_response(status, &e.to_string())
