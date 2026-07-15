@@ -134,9 +134,12 @@ pub fn parse_query_string(query: Option<&str>) -> HashMap<String, String> {
     if let Some(q) = query {
         for pair in q.split('&') {
             if let Some((key, value)) = pair.split_once('=') {
-                params.insert(key.to_string(), crate::util::decode_or_raw(value));
+                params.insert(
+                    crate::util::decode_or_raw(key),
+                    crate::util::decode_or_raw(value),
+                );
             } else if !pair.is_empty() {
-                params.insert(pair.to_string(), String::new());
+                params.insert(crate::util::decode_or_raw(pair), String::new());
             }
         }
     }
@@ -265,6 +268,36 @@ mod tests {
             params.get("k"),
             Some(&"%FF".to_string()),
             "an undecodable value must pass through raw, not become empty"
+        );
+    }
+
+    // Issue #614: this helper decoded only the value, leaving the key raw, so a predicate on an
+    // encoded parameter *name* matched or not depending on which helper evaluated it. Mountebank
+    // decodes both (Node's `querystring.parse` unescapes keys).
+    #[test]
+    fn test_query_string_decodes_encoded_key() {
+        let params = parse_query_string(Some("first%20name=bob"));
+        assert_eq!(
+            params.get("first name"),
+            Some(&"bob".to_string()),
+            "an encoded key must be decoded, matching imposter::parse_query_string"
+        );
+
+        let undecodable = parse_query_string(Some("%FF=v"));
+        assert_eq!(
+            undecodable.get("%FF"),
+            Some(&"v".to_string()),
+            "an undecodable key must pass through raw, not collapse to an empty key"
+        );
+    }
+
+    #[test]
+    fn test_query_string_decodes_bare_param_key() {
+        let params = parse_query_string(Some("first%20name"));
+        assert_eq!(
+            params.get("first name"),
+            Some(&String::new()),
+            "a bare param's key must be decoded on the same terms as a valued one"
         );
     }
 }

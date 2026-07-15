@@ -13,6 +13,20 @@ record.
 
 ### Fixed
 
+- **Query-parameter *names* are now percent-decoded everywhere, so `?first%20name=bob` matches a
+  predicate on `first name` on every path.** Rift has four query/form parsers, and two of them
+  decoded only the value, leaving the key raw — so the same request got a different answer
+  depending on which path evaluated it: the imposter's predicate matching saw the key `first name`
+  while `deepEquals` predicates, rule matching (`_rift.match.query`), response templates, and the
+  request context handed to behaviors all saw `first%20name` and failed to find it. Mountebank
+  decodes both key and value (Node's `querystring.parse` unescapes keys), so the raw-key paths were
+  also a compatibility divergence. An undecodable key (e.g. `%FF`) passes through raw, consistent
+  with Rift's decode contract for values. **Behavior change:** a config that relied on matching the
+  raw encoded key name (e.g. a matcher literally named `first%20name`) will no longer match; name
+  the matcher with the decoded key instead. Two parameters whose names differ only by encoding
+  (e.g. `a%2Bb` and `a+b`) now decode to the same key and merge under each path's existing
+  duplicate-key rule, as they already did on the imposter's matching path.
+
 - **`"wait": {"inject": "function(){...}"}` now works — it was silently doing nothing.** The
   object spelling of a function wait is what `docs/features/fault-injection.md`, the shipped
   `examples/latency-testing.json`, and the SDKs all use, but the engine's `WaitBehavior` had no

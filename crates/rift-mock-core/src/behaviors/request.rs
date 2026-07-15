@@ -42,7 +42,7 @@ impl RequestContext {
                     Some((k, v)) => (k, v),
                     None => (pair, ""),
                 };
-                let decoded_key = key.to_string();
+                let decoded_key = crate::util::decode_or_raw(key);
                 let decoded_value = crate::util::decode_or_raw(value);
                 query_map
                     .entry(decoded_key)
@@ -96,6 +96,30 @@ mod tests {
         let uri: hyper::Uri = "/p?k=hello%20world".parse().unwrap();
         let ctx = RequestContext::from_request("GET", &uri, &hyper::HeaderMap::new(), None);
         assert_eq!(ctx.query.get("k").map(String::as_str), Some("hello world"));
+    }
+
+    // Issue #614: the key was left raw while the value was decoded, so a behavior reading the
+    // request context saw a different parameter name than predicate matching did.
+    #[test]
+    fn from_request_decodes_an_encoded_query_key() {
+        let uri: hyper::Uri = "/p?a%20b=1".parse().unwrap();
+        let ctx = RequestContext::from_request("GET", &uri, &hyper::HeaderMap::new(), None);
+        assert_eq!(
+            ctx.query.get("a b").map(String::as_str),
+            Some("1"),
+            "an encoded key must be decoded, matching imposter::parse_query_string"
+        );
+    }
+
+    #[test]
+    fn from_request_passes_through_an_undecodable_query_key() {
+        let uri: hyper::Uri = "/p?%FF=v".parse().unwrap();
+        let ctx = RequestContext::from_request("GET", &uri, &hyper::HeaderMap::new(), None);
+        assert_eq!(
+            ctx.query.get("%FF").map(String::as_str),
+            Some("v"),
+            "an undecodable key must pass through raw, not collapse to an empty key"
+        );
     }
 
     // Issue #480 — the request context is now built from `req.headers().clone()`, whose names are
