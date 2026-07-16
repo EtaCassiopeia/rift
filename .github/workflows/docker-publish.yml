@@ -147,13 +147,16 @@ jobs:
           # pipefail matters here: without it a failing `imagetools inspect` yields an empty digest
           # list, the loop signs nothing, and the step still exits 0 — a publish that reports
           # success having signed nothing. The signed-count assertion is the backstop.
+          # `{{println}}` (not bare `{{.Manifest.Digest}}`) matters just as much: `--format` emits no
+          # trailing newline, so two tags resolving to the same digest concatenated into one
+          # `sha256:X...sha256:X...` line that `sort -u` could not dedupe and cosign could not parse.
           set -euo pipefail
           VERSION="${{ steps.vars.outputs.VERSION }}"
           REPO="${{ secrets.DOCKERHUB_USERNAME }}/rift-proxy"
 
           DIGESTS=$(for TAG in "${VERSION}" latest; do
             docker buildx imagetools inspect "${{ env.REGISTRY }}/${REPO}:${TAG}" \
-              --format '{{.Manifest.Digest}}'
+              --format '{{println .Manifest.Digest}}'
           done | sort -u)
 
           [ -n "$DIGESTS" ] || { echo "::error::resolved no digests to sign for ${REPO}"; exit 1; }
@@ -297,13 +300,16 @@ jobs:
           # pipefail matters here: without it a failing `imagetools inspect` yields an empty digest
           # list, the loop signs nothing, and the step still exits 0 — a publish that reports
           # success having signed nothing. The signed-count assertion is the backstop.
+          # `{{println}}` (not bare `{{.Manifest.Digest}}`) matters just as much: `--format` emits no
+          # trailing newline, so two tags resolving to the same digest concatenated into one
+          # `sha256:X...sha256:X...` line that `sort -u` could not dedupe and cosign could not parse.
           set -euo pipefail
           VERSION="${{ steps.vars.outputs.VERSION }}"
           REPO="${{ secrets.DOCKERHUB_USERNAME }}/rift-proxy"
 
           DIGESTS=$(for TAG in "${VERSION}-static" latest-static; do
             docker buildx imagetools inspect "${{ env.REGISTRY }}/${REPO}:${TAG}" \
-              --format '{{.Manifest.Digest}}'
+              --format '{{println .Manifest.Digest}}'
           done | sort -u)
 
           [ -n "$DIGESTS" ] || { echo "::error::resolved no digests to sign for ${REPO}"; exit 1; }
@@ -448,13 +454,16 @@ jobs:
           # pipefail matters here: without it a failing `imagetools inspect` yields an empty digest
           # list, the loop signs nothing, and the step still exits 0 — a publish that reports
           # success having signed nothing. The signed-count assertion is the backstop.
+          # `{{println}}` (not bare `{{.Manifest.Digest}}`) matters just as much: `--format` emits no
+          # trailing newline, so two tags resolving to the same digest concatenated into one
+          # `sha256:X...sha256:X...` line that `sort -u` could not dedupe and cosign could not parse.
           set -euo pipefail
           VERSION="${{ steps.vars.outputs.VERSION }}"
           REPO="${{ secrets.DOCKERHUB_USERNAME }}/rift-lint"
 
           DIGESTS=$(for TAG in "${VERSION}" latest; do
             docker buildx imagetools inspect "${{ env.REGISTRY }}/${REPO}:${TAG}" \
-              --format '{{.Manifest.Digest}}'
+              --format '{{println .Manifest.Digest}}'
           done | sort -u)
 
           [ -n "$DIGESTS" ] || { echo "::error::resolved no digests to sign for ${REPO}"; exit 1; }
