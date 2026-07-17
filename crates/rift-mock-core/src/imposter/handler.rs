@@ -33,6 +33,7 @@ use http_body_util::{BodyExt, Full, Limited};
 use hyper::body::Incoming;
 use hyper::{Request, Response, StatusCode};
 
+use crate::util::FastMap;
 use rand::Rng;
 use std::cell::OnceCell;
 use std::collections::HashMap;
@@ -397,7 +398,9 @@ async fn handle_request_inner(
     let method = parts.method.to_string();
     let uri = parts.uri;
     let headers_for_context = parts.headers;
-    let headers_clone: HashMap<String, String> = headers_for_context
+    // Request-scoped, built from a single request and dropped at response — a `FastMap` (issue
+    // #704); see `crate::util::fastmap` for the HashDoS policy.
+    let headers_clone: FastMap<String, String> = headers_for_context
         .iter()
         .map(|(k, v)| {
             (
@@ -408,15 +411,17 @@ async fn handle_request_inner(
         .collect();
     // Capture ALL values per header for the recorded request (issue #238) — hyper's HeaderMap
     // yields one entry per value, so a header sent twice is preserved here (headers_clone above
-    // collapses to one value and stays the single-value view used for matching/context).
+    // collapses to one value and stays the single-value view used for matching/context). The
+    // building loop uses `FastMap` (issue #704); `RecordedRequest.headers` is the fixed std-hasher
+    // journal/serde boundary, so the finished map is converted at the end.
     let headers_multi: HashMap<String, Vec<String>> = if imposter.config.record_requests {
-        let mut map: HashMap<String, Vec<String>> = HashMap::new();
+        let mut map: FastMap<String, Vec<String>> = FastMap::default();
         for (k, v) in headers_for_context.iter() {
             map.entry(header_to_title_case(k.as_str()))
                 .or_default()
                 .push(v.to_str().unwrap_or("").to_string());
         }
-        map
+        map.into_iter().collect()
     } else {
         HashMap::new()
     };
@@ -491,7 +496,9 @@ async fn handle_request_inner(
             request_from: client_addr.to_string(),
             method: method.clone(),
             path: path.clone(),
-            query: parse_query_string(&query_str),
+            // `RecordedRequest.query` is the fixed std-hasher journal/serde boundary (out of scope
+            // for #704); `parse_query_string` returns `FastMap`, so convert at this edge.
+            query: parse_query_string(&query_str).into_iter().collect(),
             headers: headers_multi,
             body: body_string.as_deref().map(str::to_string),
             mode: body_mode.clone(),
@@ -677,8 +684,13 @@ async fn handle_request_inner(
             let mb_request = MountebankRequest {
                 method: method.clone(),
                 path: path.clone(),
-                query: parse_query_string(&query_str),
-                headers: headers_clone.clone(),
+                // `MountebankRequest`'s fields are the fixed std-hasher scripting boundary (out of
+                // scope for #704), so the `FastMap`-backed maps are copied across here.
+                query: parse_query_string(&query_str).into_iter().collect(),
+                headers: headers_clone
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
                 // Owned boundary (issue #561): the inject job is submitted to a `'static` worker
                 // closure, so `body_string`'s borrow can't cross it.
                 body: body_string.as_deref().map(str::to_string),
@@ -791,13 +803,19 @@ async fn handle_request_inner(
                     .as_deref()
                     .and_then(|s| serde_json::from_str(s).ok())
                     .unwrap_or(serde_json::Value::Null),
-                query: parse_query_string(&query_str),
+                // `ScriptRequest`'s fields are the fixed std-hasher scripting boundary (out of
+                // scope for #704), so the `FastMap`-backed maps are copied across here.
+                query: parse_query_string(&query_str).into_iter().collect(),
                 // Issue #433: populate path params from the matched stub's route pattern, if any.
                 path_params: stub_state
                     .stub
                     .route_pattern
                     .as_deref()
-                    .map(|pattern| crate::extensions::template::extract_path_params(pattern, &path))
+                    .map(|pattern| {
+                        crate::extensions::template::extract_path_params(pattern, &path)
+                            .into_iter()
+                            .collect()
+                    })
                     .unwrap_or_default(),
             };
 
@@ -1511,7 +1529,9 @@ fn handle_debug_request(
     method: &str,
     path: &str,
     query_str: &str,
-    headers_clone: &HashMap<String, String>,
+    // Private helper, single call site (the debug-mode `spawn_blocking` job below), which always
+    // passes the request-scoped `FastMap` header view (issue #704).
+    headers_clone: &FastMap<String, String>,
     body_string: &Option<String>,
     client_addr: SocketAddr,
 ) -> Result<Response<Full<Bytes>>, Infallible> {

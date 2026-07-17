@@ -25,6 +25,8 @@ pub use extensions::template;
 
 // Shared utilities
 pub mod util;
+// Embedded-Rust consumers name the aliases as `rift_mock_core::FastMap` (issue #704).
+pub use util::{FastMap, FastSet};
 
 // Backends (pub for integration tests)
 pub mod backends;

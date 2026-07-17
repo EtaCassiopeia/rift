@@ -1,7 +1,9 @@
 //! JSON-shaped predicate helpers: value stringification, recursive `exists` checks,
 //! and recursive JSON comparison used by the `equals`/`deepEquals`/`matches` operators.
 
+use crate::util::FastMap;
 use std::collections::HashMap;
+use std::hash::BuildHasher;
 
 /// Convert a JSON value to its string representation for predicate comparison.
 /// Strings are unwrapped (no quotes), other primitives use their natural representation.
@@ -75,18 +77,23 @@ fn check_exists_json_recursive(expected: &serde_json::Value, actual_str: &str) -
 /// When a field's value is an object (not a boolean), parse the actual value as JSON
 /// and recursively check field existence within it (Mountebank compatible).
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn check_exists_predicate(
+pub(crate) fn check_exists_predicate<SH>(
     obj: &HashMap<String, serde_json::Value>,
     method: &str,
     path: &str,
-    query: &HashMap<String, String>,
-    headers: &HashMap<String, String>,
+    // Concretely `FastMap` — always sourced from `parse_query`/`parse_query_string` (issue #704).
+    query: &FastMap<String, String>,
+    headers: &HashMap<String, String, SH>,
     body: &str,
     request_from: Option<&str>,
     client_ip: Option<&str>,
-    form: Option<&HashMap<String, String>>,
+    // Concretely `FastMap` — see `check_predicate_fields`.
+    form: Option<&FastMap<String, String>>,
     key_case_sensitive: bool,
-) -> bool {
+) -> bool
+where
+    SH: BuildHasher,
+{
     // Helper for key comparison based on keyCaseSensitive
     let key_matches = |expected_key: &str, actual_key: &str| -> bool {
         if key_case_sensitive {
