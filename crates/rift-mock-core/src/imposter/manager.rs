@@ -50,6 +50,7 @@ impl Default for TlsDefaults {
 /// completes or the imposter is torn down. Auto-negotiates HTTP/1 and HTTP/2 (issue #295), except
 /// for imposters that can fire a connection-level TCP fault, which are served HTTP/1-only. Shared
 /// by the plain and HTTPS serve paths (issue #206). (Name kept for history.)
+#[allow(clippy::too_many_arguments)]
 async fn run_http1<I>(
     io: I,
     imposter: Arc<Imposter>,
@@ -58,6 +59,7 @@ async fn run_http1<I>(
     mut conn_shutdown_rx: broadcast::Receiver<()>,
     port: u16,
     decorator: Option<Arc<dyn ResponseDecorator>>,
+    http_tuning: crate::proxy::network::HttpTuning,
 ) where
     I: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
 {
@@ -105,10 +107,22 @@ async fn run_http1<I>(
     }
 
     if http1_only {
-        drive_conn!(hyper::server::conn::http1::Builder::new().serve_connection(io, service));
+        let mut builder = hyper::server::conn::http1::Builder::new();
+        builder
+            // A timer is required for `header_read_timeout` to take effect (hyper panics on
+            // serve_connection otherwise) — always paired with it below.
+            .timer(hyper_util::rt::TokioTimer::new())
+            .header_read_timeout(http_tuning.header_read_timeout)
+            .max_buf_size(http_tuning.max_buf_size);
+        drive_conn!(builder.serve_connection(io, service));
     } else {
-        let builder =
+        let mut builder =
             hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new());
+        builder
+            .http1()
+            .timer(hyper_util::rt::TokioTimer::new())
+            .header_read_timeout(http_tuning.header_read_timeout)
+            .max_buf_size(http_tuning.max_buf_size);
         drive_conn!(builder.serve_connection(io, service));
     }
 }
@@ -424,11 +438,41 @@ impl ImposterManager {
         let conn_shutdown_tx = shutdown_tx.clone();
         let mut shutdown_rx = shutdown_tx.subscribe();
         let response_decorator = self.response_decorator.clone();
-        // Read socket tuning once per listener, not per accepted connection.
+        // Read socket/HTTP tuning once per listener, not per accepted connection.
         let socket_tuning = crate::proxy::network::SocketTuning::from_env();
+        let http_tuning = crate::proxy::network::HttpTuning::from_env();
+        // `None` (the default) preserves today's behavior exactly: no semaphore, no permit,
+        // accept as fast as the kernel hands connections over.
+        let connection_semaphore = http_tuning
+            .max_connections
+            .map(|n| Arc::new(tokio::sync::Semaphore::new(n)));
 
         let serve_handle = tokio::spawn(async move {
             loop {
+                // Acquire a permit *before* accepting so a cap holds connections back in the
+                // listener backlog/kernel SYN queue rather than accepting them and then failing
+                // downstream (issue #716). Raced against shutdown (not just `select!`-dropped)
+                // because `delete_imposter_inner` awaits this task with no timeout — without the
+                // race, a cap saturated by long-lived connections would make delete hang until one
+                // freed up, instead of tearing down promptly.
+                let permit = match &connection_semaphore {
+                    Some(sem) => {
+                        let acquire = sem.clone().acquire_owned();
+                        tokio::select! {
+                            acquired = acquire => match acquired {
+                                Ok(permit) => Some(permit),
+                                // Only closes on Drop, which never happens here — but if it ever
+                                // does, stop accepting rather than panic.
+                                Err(_) => break,
+                            },
+                            _ = shutdown_rx.recv() => {
+                                info!("Imposter on port {} shutting down", port);
+                                break;
+                            }
+                        }
+                    }
+                    None => None,
+                };
                 tokio::select! {
                     result = listener.accept() => {
                         match result {
@@ -444,6 +488,9 @@ impl ImposterManager {
                                 let decorator = response_decorator.clone();
                                 // Track the connection task so `delete` can drain it (issue #596).
                                 imposter_clone.conn_tracker.spawn(async move {
+                                    // Held for the connection's lifetime; released back to the
+                                    // semaphore when this task ends (issue #716).
+                                    let _permit = permit;
                                     // Per-connection slot for a real transport fault (issue #239);
                                     // armed by the handler, applied by FaultIo on the response write.
                                     let fault_cell: FaultCell = Arc::new(Mutex::new(None));
@@ -468,6 +515,7 @@ impl ImposterManager {
                                                     conn_shutdown_rx,
                                                     port,
                                                     decorator,
+                                                    http_tuning,
                                                 )
                                                 .await
                                             }
@@ -487,6 +535,7 @@ impl ImposterManager {
                                                 conn_shutdown_rx,
                                                 port,
                                                 decorator,
+                                                http_tuning,
                                             )
                                             .await
                                         }

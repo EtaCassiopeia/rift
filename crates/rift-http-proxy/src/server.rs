@@ -642,9 +642,36 @@ async fn metrics_accept_loop(
     use hyper::service::service_fn;
     use hyper::{Request, Response, body::Incoming};
     use hyper_util::rt::TokioIo;
+    use rift_mock_core::proxy::HttpTuning;
     use std::convert::Infallible;
 
+    // Read HTTP tuning once per listener, not per accepted connection.
+    let http_tuning = HttpTuning::from_env();
+    // `None` (the default) preserves today's behavior exactly: no semaphore, no permit, accept as
+    // fast as the kernel hands connections over (issue #716).
+    let connection_semaphore = http_tuning
+        .max_connections
+        .map(|n| std::sync::Arc::new(tokio::sync::Semaphore::new(n)));
+
     loop {
+        // Acquire a permit *before* accepting so a cap holds connections back in the listener
+        // backlog/kernel SYN queue rather than accepting them and then failing downstream. Raced
+        // against `cancel` (like the accept below) so a saturated cap never delays shutdown.
+        let permit = match &connection_semaphore {
+            Some(sem) => {
+                let acquire = sem.clone().acquire_owned();
+                tokio::select! {
+                    _ = cancel.cancelled() => break,
+                    acquired = acquire => match acquired {
+                        Ok(permit) => Some(permit),
+                        // Only closes on Drop, which never happens here — but if it ever does,
+                        // stop accepting rather than panic.
+                        Err(_) => break,
+                    },
+                }
+            }
+            None => None,
+        };
         let (stream, _) = tokio::select! {
             _ = cancel.cancelled() => break,
             accepted = listener.accept() => accepted?,
@@ -653,6 +680,9 @@ async fn metrics_accept_loop(
         let conn_cancel = cancel.clone();
 
         tracker.spawn(async move {
+            // Held for the connection's lifetime; released back to the semaphore when this task
+            // ends (issue #716).
+            let _permit = permit;
             let service = service_fn(move |req: Request<Incoming>| async move {
                 if req.uri().path() == "/metrics" {
                     let metrics = metrics::collect_metrics();
@@ -688,13 +718,23 @@ async fn metrics_accept_loop(
             }
 
             if rift_mock_core::util::http2_disabled() {
-                drive_conn!(
-                    hyper::server::conn::http1::Builder::new().serve_connection(io, service)
-                );
+                let mut builder = hyper::server::conn::http1::Builder::new();
+                // A timer is required for `header_read_timeout` to take effect (hyper panics on
+                // serve_connection otherwise) — always paired with it below.
+                builder
+                    .timer(hyper_util::rt::TokioTimer::new())
+                    .header_read_timeout(http_tuning.header_read_timeout)
+                    .max_buf_size(http_tuning.max_buf_size);
+                drive_conn!(builder.serve_connection(io, service));
             } else {
-                let builder = hyper_util::server::conn::auto::Builder::new(
+                let mut builder = hyper_util::server::conn::auto::Builder::new(
                     hyper_util::rt::TokioExecutor::new(),
                 );
+                builder
+                    .http1()
+                    .timer(hyper_util::rt::TokioTimer::new())
+                    .header_read_timeout(http_tuning.header_read_timeout)
+                    .max_buf_size(http_tuning.max_buf_size);
                 drive_conn!(builder.serve_connection(io, service));
             }
         });

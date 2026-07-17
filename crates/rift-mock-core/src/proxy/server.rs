@@ -5,7 +5,7 @@
 
 use super::client::{HttpClient, create_http_client, should_skip_tls_verify};
 use super::handler::handle_request;
-use super::network::create_reusable_listener;
+use super::network::{HttpTuning, create_reusable_listener};
 use super::tls::create_tls_acceptor;
 use crate::behaviors::{CsvCache, ResponseCycler};
 use crate::config::{Config, Protocol as RiftProtocol, Upstream};
@@ -278,16 +278,37 @@ impl ProxyServer {
         }
 
         let server = Arc::new(self);
-        // Read socket tuning once per listener, not per accepted connection.
+        // Read socket/HTTP tuning once per listener, not per accepted connection.
         let socket_tuning = super::network::SocketTuning::from_env();
+        let http_tuning = HttpTuning::from_env();
+        // `None` (the default) preserves today's behavior exactly: no semaphore, no permit,
+        // accept as fast as the kernel hands connections over. This loop has no shutdown signal
+        // to race against, so a plain acquire-then-accept is enough (issue #716).
+        let connection_semaphore = http_tuning
+            .max_connections
+            .map(|n| Arc::new(tokio::sync::Semaphore::new(n)));
 
         loop {
+            // Acquire a permit *before* accepting so a cap holds connections back in the listener
+            // backlog/kernel SYN queue rather than accepting them and then failing downstream.
+            let permit = match &connection_semaphore {
+                Some(sem) => match sem.clone().acquire_owned().await {
+                    Ok(permit) => Some(permit),
+                    // Only closes on Drop, which never happens here — but if it ever does, stop
+                    // accepting rather than panic.
+                    Err(_) => break,
+                },
+                None => None,
+            };
             let (stream, remote_addr) = listener.accept().await?;
             super::network::apply_stream_tuning(&stream, &socket_tuning);
             let server = Arc::clone(&server);
             let tls_acceptor = tls_acceptor.clone();
 
             tokio::spawn(async move {
+                // Held for the connection's lifetime; released back to the semaphore when this
+                // task ends (issue #716).
+                let _permit = permit;
                 match protocol {
                     RiftProtocol::Https => {
                         // HTTPS: perform TLS handshake first
@@ -309,19 +330,29 @@ impl ProxyServer {
                                 // Issue #378: force-disable HTTP/2 auto-negotiation as an
                                 // operational escape hatch when a client misbehaves over h2.
                                 if crate::util::http2_disabled() {
-                                    if let Err(err) = hyper::server::conn::http1::Builder::new()
-                                        .serve_connection(io, service)
-                                        .await
-                                    {
+                                    let mut builder = hyper::server::conn::http1::Builder::new();
+                                    // A timer is required for `header_read_timeout` to take effect
+                                    // (hyper panics on serve_connection otherwise) — always paired
+                                    // with it below.
+                                    builder
+                                        .timer(hyper_util::rt::TokioTimer::new())
+                                        .header_read_timeout(http_tuning.header_read_timeout)
+                                        .max_buf_size(http_tuning.max_buf_size);
+                                    if let Err(err) = builder.serve_connection(io, service).await {
                                         error!(
                                             "Error serving HTTPS connection from {}: {}",
                                             remote_addr, err
                                         );
                                     }
                                 } else {
-                                    let builder = hyper_util::server::conn::auto::Builder::new(
+                                    let mut builder = hyper_util::server::conn::auto::Builder::new(
                                         hyper_util::rt::TokioExecutor::new(),
                                     );
+                                    builder
+                                        .http1()
+                                        .timer(hyper_util::rt::TokioTimer::new())
+                                        .header_read_timeout(http_tuning.header_read_timeout)
+                                        .max_buf_size(http_tuning.max_buf_size);
                                     if let Err(err) = builder.serve_connection(io, service).await {
                                         error!(
                                             "Error serving HTTPS connection from {}: {}",
@@ -346,19 +377,26 @@ impl ProxyServer {
                         // Issue #378: force-disable HTTP/2 auto-negotiation as an operational
                         // escape hatch when a client misbehaves over h2.
                         if crate::util::http2_disabled() {
-                            if let Err(err) = hyper::server::conn::http1::Builder::new()
-                                .serve_connection(io, service)
-                                .await
-                            {
+                            let mut builder = hyper::server::conn::http1::Builder::new();
+                            builder
+                                .timer(hyper_util::rt::TokioTimer::new())
+                                .header_read_timeout(http_tuning.header_read_timeout)
+                                .max_buf_size(http_tuning.max_buf_size);
+                            if let Err(err) = builder.serve_connection(io, service).await {
                                 error!(
                                     "Error serving HTTP connection from {}: {}",
                                     remote_addr, err
                                 );
                             }
                         } else {
-                            let builder = hyper_util::server::conn::auto::Builder::new(
+                            let mut builder = hyper_util::server::conn::auto::Builder::new(
                                 hyper_util::rt::TokioExecutor::new(),
                             );
+                            builder
+                                .http1()
+                                .timer(hyper_util::rt::TokioTimer::new())
+                                .header_read_timeout(http_tuning.header_read_timeout)
+                                .max_buf_size(http_tuning.max_buf_size);
                             if let Err(err) = builder.serve_connection(io, service).await {
                                 error!(
                                     "Error serving HTTP connection from {}: {}",
@@ -373,6 +411,7 @@ impl ProxyServer {
                 }
             });
         }
+        Ok(())
     }
 
     /// Internal request handler that builds the context and delegates to handler module.
