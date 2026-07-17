@@ -87,8 +87,8 @@ impl Imposter {
 
     /// Get a clone of the stub with `id`, if present.
     pub fn get_stub_by_id(&self, id: &str) -> Option<Stub> {
-        self.stubs
-            .load()
+        self.snapshot()
+            .stubs()
             .iter()
             .find(|s| s.stub.id.as_deref() == Some(id))
             .map(|s| s.stub.clone())
@@ -119,8 +119,8 @@ impl Imposter {
 
     /// Get all stubs
     pub fn get_stubs(&self) -> Vec<Stub> {
-        self.stubs
-            .load()
+        self.snapshot()
+            .stubs()
             .iter()
             .map(|stub_state| stub_state.stub.clone())
             .collect()
@@ -128,12 +128,13 @@ impl Imposter {
 
     /// Number of stubs, without cloning them (list/summary endpoints poll this on a tick).
     pub fn stub_count(&self) -> usize {
-        self.stubs.load().len()
+        self.snapshot().stubs().len()
     }
 
     /// Get a specific stub by index
     pub fn get_stub(&self, index: usize) -> Option<Stub> {
-        let stubs = self.stubs.load();
+        let snapshot = self.snapshot();
+        let stubs = snapshot.stubs();
         stubs.get(index).map(|stub_state| stub_state.stub.clone())
     }
 

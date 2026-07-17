@@ -116,16 +116,17 @@ impl StubState {
 /// Runtime state of an imposter
 pub struct Imposter {
     pub config: ImposterConfig,
-    /// Mutable stubs (can be modified at runtime). Stored behind `Arc` so a matched request
-    /// takes a refcount bump instead of deep-cloning the whole `StubState` (issue #287), and
-    /// behind `ArcSwap` so the match hot path reads wait-free (`load()`, no lock) while a
-    /// mutation atomically swaps in a fresh snapshot (issue #291). Serialize *writers* through
-    /// [`Self::mutate_stubs`] / `stubs_write`; never `store()` this field directly.
-    pub stubs: ArcSwap<Vec<Arc<StubState>>>,
-    /// Stage-1 path-anchor prefilter over the current `stubs` snapshot (issue #292). Rebuilt in
-    /// [`Self::mutate_stubs`] alongside `stubs`; the match hot path loads it wait-free and uses the
-    /// snapshot it embeds for both candidate selection and evaluation (so no torn read).
-    stub_index: ArcSwap<StubIndex>,
+    /// The stubs, the Stage-1 candidate index over those exact stubs, and the snapshot-wide
+    /// matching gates — one unit (issue #707).
+    ///
+    /// Each `StubState` sits behind `Arc` so a matched request takes a refcount bump instead of
+    /// deep-cloning it (issue #287), and the whole snapshot behind `ArcSwap` so the match hot path
+    /// reads wait-free (one `load()`, no lock) while a mutation atomically swaps in a fresh
+    /// snapshot (issue #291). Bundling the stubs with their index (previously two `ArcSwap`s kept
+    /// in sync by convention) makes a torn (stubs N, index N+1) read unrepresentable and halves the
+    /// hot path's atomic loads. Serialize *writers* through [`Self::mutate_stubs`] /
+    /// `stubs_write`; never `store()` this field directly.
+    stubs_snapshot: ArcSwap<StubSnapshot>,
     /// Serializes stub *writers* so a read-copy-update (clone snapshot → mutate → store) can't
     /// lose a concurrent update (issue #291). Off the request hot path — held only by admin /
     /// reload / proxy-record mutations, never by readers.
@@ -209,11 +210,6 @@ impl Imposter {
             .iter()
             .map(|stub| Arc::new(StubState::new(stub.clone())))
             .collect();
-        // Share the exact snapshot with the Stage-1 index so a reader that loads the index gets a
-        // self-consistent (stubs, candidates) pair (issue #292).
-        let stubs_arc = Arc::new(stubs);
-        let stub_index = ArcSwap::from_pointee(StubIndex::build(Arc::clone(&stubs_arc)));
-
         // Extract proxy mode from stubs (use first proxy response's mode)
         let proxy_mode = Self::extract_proxy_mode(&config.stubs);
 
@@ -223,8 +219,7 @@ impl Imposter {
 
         Ok(Self {
             config,
-            stubs: ArcSwap::new(stubs_arc),
-            stub_index,
+            stubs_snapshot: ArcSwap::from_pointee(StubSnapshot::build(stubs)),
             stubs_write: Mutex::new(()),
             proxy_store: Arc::new(LocalProxyStore::new(proxy_mode)),
             event_bus: None,
@@ -241,7 +236,13 @@ impl Imposter {
         })
     }
 
-    /// Read-copy-update the stub vector (issue #291). Reads stay wait-free (`self.stubs.load()`);
+    /// The current stub snapshot: stubs, the index over them, and the matching gates, from a single
+    /// wait-free load (issue #707). The match hot path calls this exactly once per request.
+    pub(crate) fn snapshot(&self) -> arc_swap::Guard<Arc<StubSnapshot>> {
+        self.stubs_snapshot.load()
+    }
+
+    /// Read-copy-update the stub vector (issue #291). Reads stay wait-free (`self.snapshot()`);
     /// a mutation takes the `stubs_write` mutex (serializing writers so no update is lost), clones
     /// the current snapshot, applies `f`, then atomically swaps the new snapshot in. `f`'s return
     /// value is passed back to the caller. Mutations are off the request hot path.
@@ -253,13 +254,12 @@ impl Imposter {
     /// vector and then return an error/no-op, or the partial change would be committed silently.
     pub(crate) fn mutate_stubs<R>(&self, f: impl FnOnce(&mut Vec<Arc<StubState>>) -> R) -> R {
         let _writer = self.stubs_write.lock();
-        let mut next: Vec<Arc<StubState>> = self.stubs.load_full().as_ref().clone();
+        let mut next: Vec<Arc<StubState>> = self.stubs_snapshot.load().stubs().to_vec();
         let result = f(&mut next);
-        // Store the snapshot and rebuild the Stage-1 index from the *same* Arc, under the write
-        // lock, so the two never diverge (issue #292).
-        let next_arc = Arc::new(next);
-        self.stubs.store(Arc::clone(&next_arc));
-        self.stub_index.store(Arc::new(StubIndex::build(next_arc)));
+        // One store of stubs+index together (issue #707): the index is built from the very vector
+        // it is stored with, so the two cannot diverge by construction.
+        self.stubs_snapshot
+            .store(Arc::new(StubSnapshot::build(next)));
         // Invalidate the cached stub-analysis warnings (issue #423). This is O(1) — the actual
         // O(n) recompute is deferred to the next `stub_warnings()` read — so high-frequency
         // mutations (e.g. proxy recording) don't pay analysis cost on every recorded stub.
@@ -441,8 +441,8 @@ impl Imposter {
                 .and_then(|f| f.tcp.as_ref())
                 .is_some_and(|t| TcpFaultKind::parse(t.kind()).is_some())
         };
-        self.stubs
-            .load()
+        self.snapshot()
+            .stubs()
             .iter()
             .flat_map(|s| &s.stub.responses)
             .any(|resp| match resp {
@@ -534,10 +534,11 @@ impl Imposter {
     }
 }
 
+mod bitset;
 mod lifecycle;
 mod matching;
 mod stub_index;
-use stub_index::StubIndex;
+use stub_index::StubSnapshot;
 mod proxy;
 mod recording;
 mod responses;
@@ -665,7 +666,7 @@ mod tests {
             .find_matching_stub_with_client("GET", "/shared", &headers, None, None, None, None)
             .expect("store is infallible")
             .expect("request must match");
-        let stored = std::sync::Arc::clone(&imp.stubs.load()[index]);
+        let stored = std::sync::Arc::clone(&imp.snapshot().stubs()[index]);
         assert!(
             std::sync::Arc::ptr_eq(&matched, &stored),
             "matched stub must be the shared Arc, not a deep clone"
@@ -868,7 +869,7 @@ mod tests {
         }))
         .unwrap();
         let imp = Imposter::new(cfg).expect("test imposter");
-        assert_eq!(served_body(&imp.stubs.load()[0]), "A"); // cursor now at index 1
+        assert_eq!(served_body(&imp.snapshot().stubs()[0]), "A"); // cursor now at index 1
         let new = serde_json::from_value(json!({
             "predicates": [{ "equals": { "path": "/c" } }],
             "responses": [
@@ -879,7 +880,7 @@ mod tests {
         .unwrap();
         imp.replace_stub(0, new).expect("index in bounds");
         assert_eq!(
-            served_body(&imp.stubs.load()[0]),
+            served_body(&imp.snapshot().stubs()[0]),
             "D",
             "cursor (index 1) preserved and content swapped"
         );
@@ -901,7 +902,7 @@ mod tests {
         }))
         .unwrap();
         let imp = Imposter::new(cfg).expect("test imposter");
-        assert_eq!(served_body(&imp.stubs.load()[0]), "A"); // cursor now at index 1
+        assert_eq!(served_body(&imp.snapshot().stubs()[0]), "A"); // cursor now at index 1
         let new = serde_json::from_value(json!({
             "predicates": [{ "equals": { "path": "/c" } }],
             "responses": [
@@ -912,7 +913,7 @@ mod tests {
         .unwrap();
         assert!(imp.replace_stub_by_id("s1", new), "id exists");
         assert_eq!(
-            served_body(&imp.stubs.load()[0]),
+            served_body(&imp.snapshot().stubs()[0]),
             "D",
             "cursor (index 1) preserved and content swapped"
         );
@@ -942,13 +943,13 @@ mod tests {
         imp.insert_or_append_proxy_stub(rec, "http://upstream", "proxyAlways");
 
         let rec_index = imp
-            .stubs
-            .load()
+            .snapshot()
+            .stubs()
             .iter()
             .position(|s| !s.stub.predicates.is_empty())
             .expect("recorded stub present");
-        let slot_before = imp.stubs.load()[rec_index].slot;
-        assert_eq!(served_body(&imp.stubs.load()[rec_index]), "R1"); // cursor now at index 1
+        let slot_before = imp.snapshot().stubs()[rec_index].slot;
+        assert_eq!(served_body(&imp.snapshot().stubs()[rec_index]), "R1"); // cursor now at index 1
 
         // Second record with identical predicates → append branch: responses become [R1, R2, R3].
         let rec2 = serde_json::from_value(json!({
@@ -959,12 +960,12 @@ mod tests {
         imp.insert_or_append_proxy_stub(rec2, "http://upstream", "proxyAlways");
 
         assert_eq!(
-            imp.stubs.load()[rec_index].slot,
+            imp.snapshot().stubs()[rec_index].slot,
             slot_before,
             "append must reuse the slot token, not mint a fresh StubState"
         );
         assert_eq!(
-            served_body(&imp.stubs.load()[rec_index]),
+            served_body(&imp.snapshot().stubs()[rec_index]),
             "R2",
             "cursor (index 1) preserved across the append"
         );
@@ -1019,7 +1020,7 @@ mod tests {
         }))
         .unwrap();
         let imp = Imposter::new(cfg).expect("test imposter");
-        assert_eq!(served_body(&imp.stubs.load()[0]), "A"); // cursor now at index 1
+        assert_eq!(served_body(&imp.snapshot().stubs()[0]), "A"); // cursor now at index 1
         let other: Stub = serde_json::from_value(json!({
             "predicates": [{ "equals": { "path": "/other" } }],
             "responses": [{ "is": { "statusCode": 200, "body": "Z" } }]
@@ -1027,7 +1028,7 @@ mod tests {
         .unwrap();
         imp.add_stub(other, None);
         assert_eq!(
-            served_body(&imp.stubs.load()[0]),
+            served_body(&imp.snapshot().stubs()[0]),
             "B",
             "cursor preserved across an unrelated structural snapshot swap (Arc identity carried)"
         );
