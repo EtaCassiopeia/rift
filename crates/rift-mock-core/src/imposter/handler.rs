@@ -996,6 +996,20 @@ async fn handle_request_inner(
             }
         }
 
+        // Issue #703 fast path: a fully static `is` response was materialized at construction, so
+        // serve it as a status copy + refcounted `HeaderMap`/`Bytes` clones — skipping the execute()
+        // header/body clone, per-request header re-parsing, and all template/behavior/date scanning
+        // below. `prepared` is `Some` only when nothing about the response depends on the request
+        // (see `PreparedResponse::try_build`); request recording and the scenario FSM already ran
+        // above, so nothing request-visible is skipped.
+        if let Some(StubResponse::Is {
+            prepared: Some(prepared),
+            ..
+        }) = response
+        {
+            return Ok(prepared.serve());
+        }
+
         if let Some((
             mut status,
             mut headers,

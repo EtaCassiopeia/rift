@@ -76,5 +76,6 @@ pub use reconcile::{ApplyReport, ImposterEvent, ImposterEventListener, stub_key}
 pub use predicates::{parse_query_string, predicate_matches, stub_matches};
 
 // Re-export response utilities
+pub use response::PreparedResponse;
 #[allow(unused_imports)]
 pub use response::create_response_preview;

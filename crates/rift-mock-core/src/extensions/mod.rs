@@ -40,6 +40,6 @@ pub use stub_analysis::{
     StubAnalysisResult, StubWarning, WarningType, analyze_new_stub, analyze_stubs,
 };
 #[allow(unused_imports)]
-pub use template::{RequestData, apply_date_templates, process_template};
+pub use template::{RequestData, apply_date_templates, contains_date_templates, process_template};
 #[allow(unused_imports)]
 pub use template_fn::{TemplateContext, render_templated};

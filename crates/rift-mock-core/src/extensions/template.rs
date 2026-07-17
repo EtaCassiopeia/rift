@@ -159,6 +159,29 @@ static DAYS_REGEX: OnceLock<Regex> = OnceLock::new();
 static MONTHS_REGEX: OnceLock<Regex> = OnceLock::new();
 static NOW_REGEX: OnceLock<Regex> = OnceLock::new();
 
+fn days_regex() -> &'static Regex {
+    DAYS_REGEX.get_or_init(|| Regex::new(r"\{\{DAYS([+-])(\d+)\}\}").unwrap())
+}
+fn months_regex() -> &'static Regex {
+    MONTHS_REGEX.get_or_init(|| Regex::new(r"\{\{MONTHS([+-])(\d+)\}\}").unwrap())
+}
+fn now_regex() -> &'static Regex {
+    NOW_REGEX.get_or_init(|| Regex::new(r"\{\{NOW\}\}").unwrap())
+}
+
+/// True if `body` contains any serve-time date token that [`apply_date_templates`] would expand
+/// (`{{NOW}}` / `{{DAYS±N}}` / `{{MONTHS±N}}`). Shares the exact regexes with the applier so the
+/// two cannot drift — the prepared-response fast path (issue #703) uses this at construction to
+/// decide whether a body needs the per-request date pass. The leading `{{` check is a cheap reject
+/// that skips the three regex scans for the overwhelmingly common token-free body.
+#[must_use]
+pub fn contains_date_templates(body: &str) -> bool {
+    body.contains("{{")
+        && (days_regex().is_match(body)
+            || months_regex().is_match(body)
+            || now_regex().is_match(body))
+}
+
 /// Expand legacy-recorder relative-date templates in a response body (issue #195):
 /// `{{DAYS+N}}` / `{{DAYS-N}}` / `{{MONTHS+N}}` / `{{MONTHS-N}}` → an RFC3339 timestamp `N`
 /// days/months in the future (`+`) or past (`-`, issue #270) from now, and `{{NOW}}` → the current
@@ -166,9 +189,9 @@ static NOW_REGEX: OnceLock<Regex> = OnceLock::new();
 /// rather than panicking. These are a legacy extension, not standard Mountebank/WireMock.
 pub fn apply_date_templates(body: &str) -> String {
     let now = chrono::Utc::now();
-    let days_re = DAYS_REGEX.get_or_init(|| Regex::new(r"\{\{DAYS([+-])(\d+)\}\}").unwrap());
-    let months_re = MONTHS_REGEX.get_or_init(|| Regex::new(r"\{\{MONTHS([+-])(\d+)\}\}").unwrap());
-    let now_re = NOW_REGEX.get_or_init(|| Regex::new(r"\{\{NOW\}\}").unwrap());
+    let days_re = days_regex();
+    let months_re = months_regex();
+    let now_re = now_regex();
 
     let with_days = days_re.replace_all(body, |caps: &regex::Captures| {
         match caps[2].parse::<i64>() {
@@ -364,6 +387,42 @@ mod tests {
         ));
         assert!(!has_template_variables("no variables here"));
         assert!(!has_template_variables("${invalid}"));
+    }
+
+    #[test]
+    fn contains_date_templates_agrees_with_applier() {
+        // Detector fires exactly for the tokens the applier rewrites (issue #703) — otherwise a body
+        // the applier would change could be wrongly fast-pathed, or vice versa.
+        for tok in [
+            "{{NOW}}",
+            "x {{DAYS+7}} y",
+            "{{DAYS-3}}",
+            "{{MONTHS+2}}",
+            "{{MONTHS-1}}",
+        ] {
+            assert!(contains_date_templates(tok), "should detect {tok}");
+            assert_ne!(
+                apply_date_templates(tok),
+                tok,
+                "applier should rewrite {tok}"
+            );
+        }
+        // No date token: detector is quiet and the applier is identity — including a literal `{{` and
+        // handlebars-style tokens that are not date tokens.
+        for s in [
+            "no tokens",
+            "a literal {{ brace",
+            "{{ helper arg }}",
+            "${request.path}",
+            "{{DAYS}}",
+        ] {
+            assert!(!contains_date_templates(s), "should not detect {s}");
+            assert_eq!(
+                apply_date_templates(s),
+                s,
+                "applier should leave {s} unchanged"
+            );
+        }
     }
 
     // Issue #195: relative-date template expansion.

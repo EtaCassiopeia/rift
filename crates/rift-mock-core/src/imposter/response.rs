@@ -191,6 +191,119 @@ pub fn execute_stub_response_with_rift(
     }
 }
 
+/// A fully static `is` response materialized once at stub construction (issue #703): the status,
+/// the header names/values parsed & validated into an `http::HeaderMap`, and the body as `Bytes`.
+///
+/// Serving it is a status copy plus a refcounted `HeaderMap` clone (`HeaderValue` is `Bytes`-backed)
+/// and a refcounted `Bytes` clone — zero per-request `String` allocation, header re-parsing, or
+/// template scanning. It is built (`Some`) only when *nothing* about the response depends on the
+/// request; anything request-dependent stores `None` and serves through the existing slow path
+/// unchanged. This is a derived, serving-only artifact — the Mountebank-shaped
+/// `HashMap<String, Vec<String>>` on `IsResponse` stays the source of truth for admin-API JSON.
+#[derive(Debug)]
+pub struct PreparedResponse {
+    status: hyper::StatusCode,
+    headers: hyper::HeaderMap,
+    body: bytes::Bytes,
+}
+
+impl PreparedResponse {
+    /// Build the prepared form for a static `is` response, or `None` when any request-dependent
+    /// aspect (templates, date tokens, `_behaviors`, a `_rift` serving effect, binary mode) or an
+    /// invalid header/status forces the slow path. Called once at construction (`new_is`) with the
+    /// already-computed `rendered_body` (#479) so body serialization is not repeated here. `pub` so
+    /// the serve-path bench (issue #703) can construct it, mirroring the `decision_cache` benches.
+    #[must_use]
+    pub fn try_build(
+        is: &IsResponse,
+        rendered_body: Option<&std::sync::Arc<str>>,
+        rift: Option<&RiftResponseExtension>,
+        behaviors_present: bool,
+    ) -> Option<PreparedResponse> {
+        // Binary mode (base64 decode + its failure signaling) and every `_rift` serving effect and
+        // `_behaviors` block stay on the slow path — the fast path serves only inert `is` bodies.
+        if is.mode != ResponseMode::Text || behaviors_present {
+            return None;
+        }
+        if let Some(r) = rift
+            && (r.fault.is_some() || r.templated || r.script.is_some())
+        {
+            return None;
+        }
+
+        // The served body, resolved exactly as `execute_stub_response_with_rift` does: the
+        // pre-rendered JSON for a non-string body, else the string body (or empty).
+        let body_string: String = match rendered_body {
+            Some(rb) => rb.to_string(),
+            None => is
+                .body
+                .as_ref()
+                .and_then(|b| b.as_str())
+                .unwrap_or_default()
+                .to_string(),
+        };
+
+        // Any `${request.*}` reflection (body or a header value) or serve-time date token means the
+        // output depends on the request/clock — slow path.
+        if crate::extensions::template::has_template_variables(&body_string)
+            || is
+                .headers
+                .values()
+                .flatten()
+                .any(|v| crate::extensions::template::has_template_variables(v))
+            || crate::extensions::contains_date_templates(&body_string)
+        {
+            return None;
+        }
+
+        // The Content-Type default must match the execute path's check EXACTLY for byte-identity: it
+        // tests the raw config map for the two literal casings only (a `HashMap`, case-sensitive), NOT
+        // a case-insensitive `HeaderMap` lookup — otherwise a config header like `CONTENT-TYPE` would
+        // diverge (execute adds a duplicate default; a case-insensitive check would not). Computed on
+        // `is.headers` before the `HeaderMap` normalizes casing.
+        let has_content_type =
+            is.headers.contains_key("content-type") || is.headers.contains_key("Content-Type");
+
+        // Parse & validate every header once; an invalid name/value stores no prepared form so the
+        // error surfaces at serve time exactly as today (issue #703: no config-validation change).
+        let mut headers = hyper::HeaderMap::new();
+        for (name, values) in &is.headers {
+            let header_name = hyper::header::HeaderName::from_bytes(name.as_bytes()).ok()?;
+            for value in values {
+                let header_value = hyper::header::HeaderValue::from_str(value).ok()?;
+                headers.append(header_name.clone(), header_value);
+            }
+        }
+        if rendered_body.is_some() && !has_content_type {
+            headers.append(
+                hyper::header::CONTENT_TYPE,
+                hyper::header::HeaderValue::from_static("application/json"),
+            );
+        }
+        // The imposter marker the slow path always appends (handler.rs).
+        headers.append(
+            hyper::header::HeaderName::from_static("x-rift-imposter"),
+            hyper::header::HeaderValue::from_static("true"),
+        );
+
+        let status = hyper::StatusCode::from_u16(is.status_code).ok()?;
+        Some(PreparedResponse {
+            status,
+            headers,
+            body: bytes::Bytes::from(body_string),
+        })
+    }
+
+    /// Serve the prepared response: a status copy plus refcounted `HeaderMap`/`Bytes` clones, with
+    /// no builder round-trip (no per-request header string re-parsing).
+    pub fn serve(&self) -> hyper::Response<http_body_util::Full<bytes::Bytes>> {
+        let (mut parts, ()) = hyper::Response::new(()).into_parts();
+        parts.status = self.status;
+        parts.headers = self.headers.clone();
+        hyper::Response::from_parts(parts, http_body_util::Full::new(self.body.clone()))
+    }
+}
+
 /// Get RiftScript config if the response is a RiftScript type
 pub fn get_rift_script_config(response: &StubResponse) -> Option<RiftScriptConfig> {
     match response {
@@ -1036,5 +1149,291 @@ mod tests {
             start.elapsed() < std::time::Duration::from_secs(3),
             "must return near the configured deadline, not after the loop cap"
         );
+    }
+}
+
+#[cfg(test)]
+mod prepared_response_tests {
+    //! Gate for issue #703. The differential test proves the fast-path `PreparedResponse` serves
+    //! byte-identically to the legacy `execute_stub_response_with_rift` + slow-path assembly; the
+    //! eligibility tests pin which responses stay on the slow path.
+    use super::*;
+    use crate::imposter::types::{IsResponse, ResponseMode, StubResponse};
+    use serde_json::json;
+    use std::collections::HashMap;
+
+    fn is_response(
+        status: u16,
+        headers: &[(&str, &str)],
+        body: Option<serde_json::Value>,
+    ) -> IsResponse {
+        let mut map: HashMap<String, Vec<String>> = HashMap::new();
+        for (k, v) in headers {
+            map.entry((*k).to_string())
+                .or_default()
+                .push((*v).to_string());
+        }
+        IsResponse {
+            status_code: status,
+            headers: map,
+            body,
+            mode: ResponseMode::Text,
+        }
+    }
+
+    fn prepared_of(resp: &StubResponse) -> Option<&PreparedResponse> {
+        match resp {
+            StubResponse::Is { prepared, .. } => prepared.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// Header (name, value) multiset, lowercased — header order is non-deterministic (the slow path
+    /// iterates a `HashMap`), so equality is by multiset, not sequence.
+    fn header_multiset(pairs: impl IntoIterator<Item = (String, String)>) -> Vec<(String, String)> {
+        let mut v: Vec<(String, String)> = pairs
+            .into_iter()
+            .map(|(k, val)| (k.to_lowercase(), val))
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// The served (status, header-multiset, body-bytes) the legacy handler slow path produces for a
+    /// static `is` response: execute → per-value headers + `x-rift-imposter` → `apply_date_templates`.
+    fn legacy_serve(resp: &StubResponse) -> (u16, Vec<(String, String)>, Vec<u8>) {
+        let (status, headers, body, _behaviors, _rift, mode, _fault) =
+            execute_stub_response_with_rift(resp).expect("static is executes");
+        assert_eq!(mode, ResponseMode::Text, "corpus is text-only");
+        let mut pairs: Vec<(String, String)> = Vec::new();
+        for (k, values) in &headers {
+            for v in values {
+                pairs.push((k.clone(), v.clone()));
+            }
+        }
+        pairs.push(("x-rift-imposter".to_string(), "true".to_string()));
+        let body_bytes = crate::extensions::apply_date_templates(&body).into_bytes();
+        (status, header_multiset(pairs), body_bytes)
+    }
+
+    fn prepared_serve(prep: &PreparedResponse) -> (u16, Vec<(String, String)>, Vec<u8>) {
+        (
+            prep.status.as_u16(),
+            header_multiset(
+                prep.headers
+                    .iter()
+                    .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap().to_string())),
+            ),
+            prep.body.to_vec(),
+        )
+    }
+
+    #[test]
+    fn prepared_matches_legacy_for_static_corpus() {
+        let corpus = vec![
+            StubResponse::new_is(
+                is_response(200, &[], Some(json!("plain string body"))),
+                None,
+                None,
+            ),
+            StubResponse::new_is(
+                is_response(201, &[], Some(json!({"id": 1, "name": "x"}))),
+                None,
+                None,
+            ),
+            StubResponse::new_is(is_response(204, &[], None), None, None),
+            StubResponse::new_is(
+                is_response(
+                    200,
+                    &[("Content-Type", "text/plain"), ("X-A", "1")],
+                    Some(json!("ok")),
+                ),
+                None,
+                None,
+            ),
+            StubResponse::new_is(
+                is_response(
+                    200,
+                    &[("Set-Cookie", "a=1"), ("Set-Cookie", "b=2")],
+                    Some(json!("multi")),
+                ),
+                None,
+                None,
+            ),
+            // JSON (non-string) body with no Content-Type: exercises the application/json default.
+            StubResponse::new_is(is_response(200, &[], Some(json!({"k": "v"}))), None, None),
+            // JSON body with an oddly-cased Content-Type header: the execute path's case-sensitive
+            // two-casing check still adds the default (a duplicate), so the fast path must reproduce
+            // that exactly — locks the parity the case-sensitivity fix guarantees.
+            StubResponse::new_is(
+                is_response(
+                    200,
+                    &[("CONTENT-TYPE", "application/xml")],
+                    Some(json!({"k": "v"})),
+                ),
+                None,
+                None,
+            ),
+            // Non-object rendered bodies (array, number) take the same rendered_body path.
+            StubResponse::new_is(is_response(200, &[], Some(json!([1, 2, 3]))), None, None),
+            StubResponse::new_is(is_response(200, &[], Some(json!(42))), None, None),
+        ];
+        for resp in &corpus {
+            let prep = prepared_of(resp).expect("static response must be prepared");
+            assert_eq!(
+                prepared_serve(prep),
+                legacy_serve(resp),
+                "fast path diverged from legacy"
+            );
+        }
+    }
+
+    #[test]
+    fn content_type_default_and_marker_present_for_json_body() {
+        let resp = StubResponse::new_is(is_response(200, &[], Some(json!({"k": "v"}))), None, None);
+        let (_s, headers, _b) = prepared_serve(prepared_of(&resp).unwrap());
+        assert!(headers.contains(&("content-type".to_string(), "application/json".to_string())));
+        assert!(headers.contains(&("x-rift-imposter".to_string(), "true".to_string())));
+    }
+
+    #[test]
+    fn explicit_content_type_is_not_overridden() {
+        let resp = StubResponse::new_is(
+            is_response(
+                200,
+                &[("content-type", "application/xml")],
+                Some(json!({"k": "v"})),
+            ),
+            None,
+            None,
+        );
+        let (_s, headers, _b) = prepared_serve(prepared_of(&resp).unwrap());
+        let cts: Vec<_> = headers
+            .iter()
+            .filter(|(k, _)| k == "content-type")
+            .collect();
+        assert_eq!(
+            cts.len(),
+            1,
+            "no duplicate Content-Type when one is configured"
+        );
+        assert_eq!(cts[0].1, "application/xml");
+    }
+
+    #[test]
+    fn behaviors_force_slow_path() {
+        let resp = StubResponse::new_is(
+            is_response(200, &[], Some(json!("x"))),
+            Some(json!({"wait": 5})),
+            None,
+        );
+        assert!(
+            prepared_of(&resp).is_none(),
+            "_behaviors must not be prepared"
+        );
+    }
+
+    #[test]
+    fn rift_templated_and_fault_force_slow_path() {
+        let templated = RiftResponseExtension {
+            templated: true,
+            ..Default::default()
+        };
+        let resp = StubResponse::new_is(
+            is_response(200, &[], Some(json!("x"))),
+            None,
+            Some(templated),
+        );
+        assert!(
+            prepared_of(&resp).is_none(),
+            "_rift.templated must not be prepared"
+        );
+
+        let faulted = RiftResponseExtension {
+            fault: Some(crate::imposter::types::RiftFaultConfig::default()),
+            ..Default::default()
+        };
+        let resp =
+            StubResponse::new_is(is_response(200, &[], Some(json!("x"))), None, Some(faulted));
+        assert!(
+            prepared_of(&resp).is_none(),
+            "_rift.fault must not be prepared"
+        );
+
+        let scripted = RiftResponseExtension {
+            script: Some(crate::imposter::types::RiftScriptConfig::default()),
+            ..Default::default()
+        };
+        let resp = StubResponse::new_is(
+            is_response(200, &[], Some(json!("x"))),
+            None,
+            Some(scripted),
+        );
+        assert!(
+            prepared_of(&resp).is_none(),
+            "_rift.script must not be prepared"
+        );
+    }
+
+    #[test]
+    fn request_templates_in_body_or_header_force_slow_path() {
+        let body_tpl = StubResponse::new_is(
+            is_response(200, &[], Some(json!("hello ${request.path}"))),
+            None,
+            None,
+        );
+        assert!(
+            prepared_of(&body_tpl).is_none(),
+            "${{request.*}} body must not be prepared"
+        );
+
+        let header_tpl = StubResponse::new_is(
+            is_response(200, &[("X-Echo", "${request.query.q}")], Some(json!("x"))),
+            None,
+            None,
+        );
+        assert!(
+            prepared_of(&header_tpl).is_none(),
+            "${{request.*}} header must not be prepared"
+        );
+    }
+
+    #[test]
+    fn date_templates_force_slow_path() {
+        let resp = StubResponse::new_is(
+            is_response(200, &[], Some(json!("expires {{DAYS+7}} at {{NOW}}"))),
+            None,
+            None,
+        );
+        assert!(
+            prepared_of(&resp).is_none(),
+            "date-token body must not be prepared"
+        );
+    }
+
+    #[test]
+    fn binary_mode_forces_slow_path() {
+        let mut is = is_response(200, &[], Some(json!("aGVsbG8=")));
+        is.mode = ResponseMode::Binary;
+        let resp = StubResponse::new_is(is, None, None);
+        assert!(
+            prepared_of(&resp).is_none(),
+            "binary mode must not be prepared"
+        );
+    }
+
+    #[test]
+    fn reconstruction_recomputes_prepared() {
+        // The RCU stub-mutation flow rebuilds responses through `new_is`, so `prepared` is derived
+        // fresh: a static response is prepared, and rebuilding the same slot with a now-dynamic body
+        // drops the prepared form (no stale fast path survives a mutation).
+        let stat = StubResponse::new_is(is_response(200, &[], Some(json!("x"))), None, None);
+        assert!(prepared_of(&stat).is_some());
+        let dynamic = StubResponse::new_is(
+            is_response(200, &[], Some(json!("${request.path}"))),
+            None,
+            None,
+        );
+        assert!(prepared_of(&dynamic).is_none());
     }
 }
