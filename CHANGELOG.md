@@ -101,6 +101,14 @@ record.
 
 ### Changed
 
+- **The compiled-regex cache does lock-free reads and no longer flushes wholesale on overflow.** It
+  was a `RwLock<HashMap>` taking a shared read lock on every cache hit — a lock on the matching hot
+  path, per regex predicate per request — and on reaching its 1024-entry ceiling it `clear()`ed the
+  entire cache, so a workload cycling just over the cap recompiled everything repeatedly. It is now
+  a lock-free `papaya` map (hits are a wait-free guarded lookup, no lock) that evicts a bounded
+  batch (~a quarter of the cap) on overflow instead of clearing, so the bulk of the working set
+  stays hot across the boundary. Compile semantics and keying are unchanged.
+
 - **Path `startsWith`/`contains`/`endsWith` stubs are matched in a single Aho-Corasick pass, and
   `endsWith` is now indexed at all.** The Stage-1 prefilter previously walked a linear bucket per
   distinct prefix/substring literal, so the prefilter's own cost grew with the number of literal
