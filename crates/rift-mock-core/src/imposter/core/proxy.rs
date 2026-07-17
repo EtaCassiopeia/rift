@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::imposter::predicates::regex_cache::cached_regex;
+use std::hash::BuildHasher;
 
 /// Parts read from a successful upstream proxy response, before recording:
 /// `(status, headers, body, latency_ms)`.
@@ -15,12 +16,12 @@ impl Imposter {
     /// Returns `Err` when an `inject` generator could not produce predicates (script/pool/output
     /// failure) so the caller can skip auto-stub creation instead of silently recording a match-all
     /// stub (issue #498). An `Ok(empty)` list means the generators legitimately produced nothing.
-    pub(crate) fn generate_predicates_from_request(
+    pub(crate) fn generate_predicates_from_request<SH: BuildHasher>(
         &self,
         generators: &[serde_json::Value],
         method: &str,
         path: &str,
-        headers: &HashMap<String, String>,
+        headers: &HashMap<String, String, SH>,
         body: Option<&str>,
         query: Option<&str>,
     ) -> Result<Vec<serde_json::Value>, crate::scripting::PredicateGeneratorError> {
@@ -30,11 +31,11 @@ impl Imposter {
     /// [`Self::generate_predicates_from_request`] without `&self`, so the proxy-recording path
     /// can run it on `spawn_blocking` (issue #476) — a `predicateGenerators.inject` script must
     /// not execute (and block on the MB script pool) on a tokio async worker.
-    fn generate_predicates_impl(
+    fn generate_predicates_impl<SH: BuildHasher>(
         generators: &[serde_json::Value],
         method: &str,
         path: &str,
-        headers: &HashMap<String, String>,
+        headers: &HashMap<String, String, SH>,
         body: Option<&str>,
         query: Option<&str>,
     ) -> Result<Vec<serde_json::Value>, crate::scripting::PredicateGeneratorError> {
@@ -57,8 +58,13 @@ impl Imposter {
                     let mb_request = MountebankRequest {
                         method: method.to_string(),
                         path: path.to_string(),
-                        query: query_map,
-                        headers: headers.clone(),
+                        query: query_map.into_iter().collect(),
+                        // `MountebankRequest.headers` is the fixed std-hasher scripting boundary
+                        // (out of scope for #704), so a hasher-changing map is copied across.
+                        headers: headers
+                            .iter()
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect(),
                         // `body` is already the classified string from the caller (base64 for a
                         // binary request body, issue #636); this path doesn't thread the mode
                         // flag through separately, so default to `Text`.
@@ -292,14 +298,19 @@ impl Imposter {
     }
 
     /// Forward a request through proxy and optionally record the response
-    pub async fn handle_proxy_request(
+    pub async fn handle_proxy_request<SH>(
         &self,
         proxy_config: &ProxyResponse,
         method: &str,
         uri: &hyper::Uri,
-        headers: &HashMap<String, String>,
+        headers: &HashMap<String, String, SH>,
         body: Option<&str>,
-    ) -> anyhow::Result<(u16, Vec<(String, String)>, Vec<u8>, Option<u64>)> {
+    ) -> anyhow::Result<(u16, Vec<(String, String)>, Vec<u8>, Option<u64>)>
+    where
+        // `Clone + Send + 'static`: an inject predicateGenerator clones `headers` into a
+        // `spawn_blocking` `'static` closure below.
+        SH: BuildHasher + Clone + Send + 'static,
+    {
         let client = get_http_client();
 
         info!(

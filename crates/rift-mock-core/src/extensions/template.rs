@@ -22,6 +22,7 @@
 //! ```
 
 use crate::predicate::parse_query_string;
+use crate::util::FastMap;
 use regex::Regex;
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -43,12 +44,15 @@ pub struct RequestData {
     pub method: String,
     /// Request path (without query string)
     pub path: String,
-    /// Query parameters parsed from the URL
+    /// Query parameters parsed from the URL. Kept as the std-hasher map (issue #704): its source,
+    /// the legacy `crate::predicate::parse_query_string`, already returns one, so a `FastMap` here
+    /// would re-hash the whole map for a request-scoped map that is only `.get()`-probed a few times.
     pub query: HashMap<String, String>,
-    /// Request headers (keys lowercased)
-    pub headers: HashMap<String, String>,
-    /// Path parameters extracted from route patterns (e.g., /users/:id)
-    pub path_params: HashMap<String, String>,
+    /// Request headers (keys lowercased). Request-scoped — `FastMap` (issue #704).
+    pub headers: FastMap<String, String>,
+    /// Path parameters extracted from route patterns (e.g., /users/:id). Request-scoped —
+    /// `FastMap` (issue #704).
+    pub path_params: FastMap<String, String>,
     /// Raw request body
     pub body: String,
 }
@@ -62,8 +66,9 @@ impl RequestData {
         headers: &hyper::HeaderMap,
         body: Option<&str>,
     ) -> Self {
+        // Zero-copy: the legacy parser already returns a std-hasher map (see the `query` field).
         let query = parse_query_string(query_string);
-        let headers_map = headers
+        let headers_map: FastMap<String, String> = headers
             .iter()
             .filter_map(|(k, v)| {
                 v.to_str()
@@ -77,7 +82,7 @@ impl RequestData {
             path: path.to_string(),
             query,
             headers: headers_map,
-            path_params: HashMap::new(),
+            path_params: FastMap::default(),
             body: body.unwrap_or("").to_string(),
         }
     }
@@ -111,8 +116,9 @@ impl RequestData {
 
 /// Extract path parameters from a route `pattern` (`:name` segments) and the actual request
 /// `path`. Returns an empty map when the segment counts differ or a literal segment doesn't match.
-pub(crate) fn extract_path_params(pattern: &str, path: &str) -> HashMap<String, String> {
-    let mut params = HashMap::new();
+/// Request-scoped — `FastMap` (issue #704).
+pub(crate) fn extract_path_params(pattern: &str, path: &str) -> FastMap<String, String> {
+    let mut params = FastMap::default();
 
     let pattern_parts: Vec<&str> = pattern.split('/').collect();
     let path_parts: Vec<&str> = path.split('/').collect();
@@ -126,7 +132,7 @@ pub(crate) fn extract_path_params(pattern: &str, path: &str) -> HashMap<String, 
             params.insert(param_name.to_string(), path_part.to_string());
         } else if pattern_part != path_part {
             // Pattern doesn't match
-            return HashMap::new();
+            return FastMap::default();
         }
     }
 

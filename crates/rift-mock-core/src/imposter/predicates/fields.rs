@@ -3,24 +3,28 @@
 
 use super::json::compare_json_recursive;
 use super::regex_cache::cached_regex;
+use crate::util::FastMap;
 use std::collections::HashMap;
+use std::hash::BuildHasher;
 
 /// Check predicate fields against request values
 /// Supports: method, path, body, query, headers, requestFrom, ip, form
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn check_predicate_fields<F>(
+pub(crate) fn check_predicate_fields<F, SH>(
     obj: &HashMap<String, serde_json::Value>,
     method: &str,
     path: &str,
-    query: &HashMap<String, String>,
-    headers: &HashMap<String, String>,
+    // Concretely `FastMap` — always sourced from `parse_query`/`parse_query_string` (issue #704).
+    query: &FastMap<String, String>,
+    headers: &HashMap<String, String, SH>,
     body: &str,
     apply_except: &impl for<'a> Fn(&'a str) -> std::borrow::Cow<'a, str>,
     compare: F,
     deep_equals: bool,
     request_from: Option<&str>,
     client_ip: Option<&str>,
-    form: Option<&HashMap<String, String>>,
+    // Concretely `FastMap` — see `predicate_matches_inner`.
+    form: Option<&FastMap<String, String>>,
     key_case_sensitive: bool,
     // Request body already parsed once per request (issue #290); `Some` only for a
     // no-selector predicate whose `body` field then equals this parse.
@@ -28,6 +32,7 @@ pub(crate) fn check_predicate_fields<F>(
 ) -> bool
 where
     F: Fn(&str, &str) -> bool,
+    SH: BuildHasher,
 {
     // Helper for key comparison based on keyCaseSensitive
     let key_matches = |expected_key: &str, actual_key: &str| -> bool {
@@ -195,22 +200,27 @@ where
 /// Check predicate fields with regex matching
 /// Supports: method, path, body, query, headers, requestFrom, ip, form
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn check_predicate_fields_regex(
+pub(crate) fn check_predicate_fields_regex<SH>(
     obj: &HashMap<String, serde_json::Value>,
     method: &str,
     path: &str,
-    query: &HashMap<String, String>,
-    headers: &HashMap<String, String>,
+    // Concretely `FastMap` — see `check_predicate_fields`.
+    query: &FastMap<String, String>,
+    headers: &HashMap<String, String, SH>,
     body: &str,
     apply_except: &impl for<'a> Fn(&'a str) -> std::borrow::Cow<'a, str>,
     case_sensitive: bool,
     request_from: Option<&str>,
     client_ip: Option<&str>,
-    form: Option<&HashMap<String, String>>,
+    // Concretely `FastMap` — see `check_predicate_fields`.
+    form: Option<&FastMap<String, String>>,
     key_case_sensitive: bool,
     // Request body already parsed once per request (issue #290); see `check_predicate_fields`.
     body_json: Option<&serde_json::Value>,
-) -> bool {
+) -> bool
+where
+    SH: BuildHasher,
+{
     // Compile-once, cached regex keyed on (pattern, case_insensitive). Returns `None` for an
     // unparseable pattern, which callers treat as "no match" — same as the previous per-request
     // `Regex::new` returning `Err`.

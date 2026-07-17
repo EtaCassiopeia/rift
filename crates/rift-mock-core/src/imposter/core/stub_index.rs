@@ -17,6 +17,7 @@
 
 use super::StubState;
 use crate::imposter::types::Stub;
+use crate::util::FastMap;
 use rift_types::predicate::{Predicate, PredicateOperation};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -62,7 +63,9 @@ fn classify(stub: &Stub) -> Option<PathAnchor> {
 /// that loads the index gets a self-consistent (stubs, candidates) pair.
 pub(crate) struct StubIndex {
     stubs: Arc<Vec<Arc<StubState>>>,
-    exact: HashMap<String, Vec<usize>>,
+    // Rebuilt on every stub-set replace/mutation (issue #704); its keys come from operator stub
+    // config, not request traffic — see `crate::util::fastmap` doc for the HashDoS policy.
+    exact: FastMap<String, Vec<usize>>,
     prefix: Vec<(String, Vec<usize>)>,
     contains: Vec<(String, Vec<usize>)>,
     fallback: Vec<usize>,
@@ -93,9 +96,9 @@ impl StubIndex {
     /// Classify every stub in `stubs` into its path-anchor bucket (or fallback), preserving
     /// ascending stub index within each bucket.
     pub(crate) fn build(stubs: Arc<Vec<Arc<StubState>>>) -> Self {
-        let mut exact: HashMap<String, Vec<usize>> = HashMap::new();
-        let mut prefix: HashMap<String, Vec<usize>> = HashMap::new();
-        let mut contains: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut exact: FastMap<String, Vec<usize>> = FastMap::default();
+        let mut prefix: FastMap<String, Vec<usize>> = FastMap::default();
+        let mut contains: FastMap<String, Vec<usize>> = FastMap::default();
         let mut fallback: Vec<usize> = Vec::new();
 
         for (i, state) in stubs.iter().enumerate() {

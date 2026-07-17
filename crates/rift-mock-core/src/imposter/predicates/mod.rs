@@ -5,7 +5,9 @@
 
 use crate::behaviors::{extract_jsonpath, extract_xpath_with_ns};
 use crate::imposter::types::{Predicate, PredicateOperation, PredicateSelector};
+use crate::util::FastMap;
 use std::collections::HashMap;
+use std::hash::BuildHasher;
 
 /// Check if a stub matches a request based on its predicates.
 ///
@@ -14,22 +16,31 @@ use std::collections::HashMap;
 /// predicate as non-matching, so callers must surface the error rather than swallow it into
 /// `false`. Every other predicate op is infallible.
 #[allow(clippy::too_many_arguments)]
-pub fn stub_matches(
+pub fn stub_matches<SH>(
     predicates: &[Predicate],
     method: &str,
     path: &str,
     query: Option<&str>,
-    headers: &HashMap<String, String>,
+    headers: &HashMap<String, String, SH>,
     body: Option<&str>,
     request_from: Option<&str>,
     client_ip: Option<&str>,
+    // Kept as the plain std-hasher map (unlike `headers`): a bare `None` here — the overwhelming
+    // majority of calls — can't be threaded through a generic hasher parameter (nothing at the
+    // call site would pin the type down), so `stub_matches`/`predicate_matches` keep this
+    // parameter exactly as before and convert once at the `stub_matches_inner` boundary below.
     form: Option<&HashMap<String, String>>,
     imposter_port: u16,
-) -> anyhow::Result<bool> {
+) -> anyhow::Result<bool>
+where
+    SH: BuildHasher,
+{
     // Parse the body and query once for standalone callers; the request hot path parses each once
     // per request (before the stub scan) and calls `stub_matches_inner` directly (issues #290, #480).
     let body_json = body.and_then(|b| serde_json::from_str::<serde_json::Value>(b).ok());
     let query_map = parse_query(query);
+    let form_fast: Option<FastMap<String, String>> =
+        form.map(|f| f.iter().map(|(k, v)| (k.clone(), v.clone())).collect());
     stub_matches_inner(
         predicates,
         method,
@@ -39,7 +50,7 @@ pub fn stub_matches(
         body,
         request_from,
         client_ip,
-        form,
+        form_fast.as_ref(),
         imposter_port,
         body_json.as_ref(),
         Some(&query_map),
@@ -51,20 +62,27 @@ pub fn stub_matches(
 ///
 /// See [`stub_matches`] for the `Err` contract (issue #440).
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn stub_matches_inner(
+pub(crate) fn stub_matches_inner<SH>(
     predicates: &[Predicate],
     method: &str,
     path: &str,
     query: Option<&str>,
-    headers: &HashMap<String, String>,
+    headers: &HashMap<String, String, SH>,
     body: Option<&str>,
     request_from: Option<&str>,
     client_ip: Option<&str>,
-    form: Option<&HashMap<String, String>>,
+    // Concretely `FastMap` — always sourced from `Imposter::parse_form_data` (issue #704) on the
+    // request hot path; unlike `headers`, this can't be generic (a bare `None` form argument, the
+    // common non-form-predicate case, gives type inference nothing to pin the hasher to).
+    form: Option<&FastMap<String, String>>,
     imposter_port: u16,
     body_json: Option<&serde_json::Value>,
-    query_map: Option<&HashMap<String, String>>,
-) -> anyhow::Result<bool> {
+    // Always sourced from `parse_query`/`parse_query_string` (issue #704); same reasoning as `form`.
+    query_map: Option<&FastMap<String, String>>,
+) -> anyhow::Result<bool>
+where
+    SH: BuildHasher,
+{
     // If no predicates, match everything
     if predicates.is_empty() {
         return Ok(true);
@@ -93,8 +111,8 @@ pub(crate) fn stub_matches_inner(
 }
 
 /// Parse query string for predicate matching, URL-decoding both keys and values
-pub fn parse_query(query: Option<&str>) -> HashMap<String, String> {
-    query.map_or_else(HashMap::new, parse_query_string)
+pub fn parse_query(query: Option<&str>) -> FastMap<String, String> {
+    query.map_or_else(FastMap::default, parse_query_string)
 }
 
 // Allocation-free ASCII case-insensitive string tests (issue #480). The previous
@@ -130,22 +148,28 @@ fn ends_with_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
 /// `Err` propagates a predicate-`inject` failure (issue #440) — see [`stub_matches`] for the
 /// full contract. Every other predicate op is infallible.
 #[allow(clippy::too_many_arguments)]
-pub fn predicate_matches(
+pub fn predicate_matches<SH>(
     predicate: &Predicate,
     method: &str,
     path: &str,
     query: Option<&str>,
-    headers: &HashMap<String, String>,
+    headers: &HashMap<String, String, SH>,
     body: Option<&str>,
     request_from: Option<&str>,
     client_ip: Option<&str>,
+    // See `stub_matches` for why this stays the plain std-hasher map.
     form: Option<&HashMap<String, String>>,
     imposter_port: u16,
-) -> anyhow::Result<bool> {
+) -> anyhow::Result<bool>
+where
+    SH: BuildHasher,
+{
     // Standalone callers parse the body and query here; the request hot path parses each once per
     // request and calls `predicate_matches_inner` directly with the shared parses (issues #290, #480).
     let body_json = body.and_then(|b| serde_json::from_str::<serde_json::Value>(b).ok());
     let query_map = parse_query(query);
+    let form_fast: Option<FastMap<String, String>> =
+        form.map(|f| f.iter().map(|(k, v)| (k.clone(), v.clone())).collect());
     predicate_matches_inner(
         predicate,
         method,
@@ -155,7 +179,7 @@ pub fn predicate_matches(
         body,
         request_from,
         client_ip,
-        form,
+        form_fast.as_ref(),
         imposter_port,
         body_json.as_ref(),
         Some(&query_map),
@@ -172,20 +196,25 @@ pub fn predicate_matches(
 // (issue #599); without that feature the arm doesn't use it, so it's only threaded through the
 // recursive And/Or descent — a false positive for this build only.
 #[cfg_attr(not(feature = "javascript"), allow(clippy::only_used_in_recursion))]
-pub(crate) fn predicate_matches_inner(
+pub(crate) fn predicate_matches_inner<SH>(
     predicate: &Predicate,
     method: &str,
     path: &str,
     query: Option<&str>,
-    headers: &HashMap<String, String>,
+    headers: &HashMap<String, String, SH>,
     body: Option<&str>,
     request_from: Option<&str>,
     client_ip: Option<&str>,
-    form: Option<&HashMap<String, String>>,
+    // Concretely `FastMap` — see `stub_matches_inner`.
+    form: Option<&FastMap<String, String>>,
     imposter_port: u16,
     body_json: Option<&serde_json::Value>,
-    query_map: Option<&HashMap<String, String>>,
-) -> anyhow::Result<bool> {
+    // Concretely `FastMap` — see `stub_matches_inner`.
+    query_map: Option<&FastMap<String, String>>,
+) -> anyhow::Result<bool>
+where
+    SH: BuildHasher,
+{
     // Get predicate options
     let case_sensitive = predicate.parameters.case_sensitive.unwrap_or(false);
 
@@ -250,7 +279,7 @@ pub(crate) fn predicate_matches_inner(
     // Build request context for field access. Use the once-per-request parse when the caller
     // threaded it (hot path / standalone wrappers); only parse locally as a fallback (issue #480).
     let parsed_query;
-    let query_map: &HashMap<String, String> = match query_map {
+    let query_map: &FastMap<String, String> = match query_map {
         Some(q) => q,
         None => {
             parsed_query = parse_query(query);
@@ -462,8 +491,17 @@ pub(crate) fn predicate_matches_inner(
                     method: method.to_string(),
                     path: path.to_string(),
                     // Reuse the once-per-request query map instead of re-parsing (issue #480).
-                    query: query_map.clone(),
-                    headers: headers.clone(),
+                    // `MountebankRequest`'s fields are the fixed std-hasher scripting boundary
+                    // (out of scope for #704), so a hasher-changing map is copied across rather
+                    // than moved.
+                    query: query_map
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect(),
+                    headers: headers
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect(),
                     // `body` is already the classified string from the caller (base64 for a
                     // binary request body, issue #636); this predicate-inject path doesn't thread
                     // the mode flag through separately, so default to `Text` — the script still
@@ -496,8 +534,8 @@ use regex_cache::cached_regex;
 /// URL-decodes both keys and values to properly handle encoded characters.
 /// Bare params without `=` (e.g. `?flag`) are treated as key with empty value.
 /// Duplicate keys are joined with commas (Mountebank `stringify` behavior).
-pub fn parse_query_string(query: &str) -> HashMap<String, String> {
-    let mut map = HashMap::new();
+pub fn parse_query_string(query: &str) -> FastMap<String, String> {
+    let mut map = FastMap::default();
     for pair in query.split('&').filter(|s| !s.is_empty()) {
         let (key, value) = match pair.split_once('=') {
             Some((k, v)) => (k, v),

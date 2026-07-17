@@ -116,6 +116,14 @@ impl Imposter {
             .as_deref()
             .and_then(|b| serde_json::from_str::<Value>(b).ok());
         let client_ip = client_ip_of(req);
+        // `RecordedRequest.query` is the fixed std-hasher journal/serde boundary (out of scope for
+        // #704); `stub_matches_inner`'s `query_map` parameter is concretely `FastMap` (it is always
+        // sourced from `parse_query`/`parse_query_string` elsewhere), so copy across here.
+        let query_map: crate::util::FastMap<String, String> = req
+            .query
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
         stub_matches_inner(
             predicates,
             &req.method,
@@ -128,7 +136,7 @@ impl Imposter {
             form.as_ref(),
             self.script_state_key(),
             body_json.as_ref(),
-            Some(&req.query),
+            Some(&query_map),
         )
     }
 

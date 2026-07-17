@@ -3,6 +3,8 @@
 //! Part of the `Imposter` implementation; see `core/mod.rs` for the struct definition.
 
 use super::*;
+use crate::util::FastMap;
+use std::hash::BuildHasher;
 
 impl Imposter {
     /// Find a matching stub for a request and return a cloned copy with its index.
@@ -25,16 +27,19 @@ impl Imposter {
 
     /// Find a matching stub with client address information (for requestFrom/ip predicates)
     #[allow(clippy::too_many_arguments)]
-    pub fn find_matching_stub_with_client(
+    pub fn find_matching_stub_with_client<SH>(
         &self,
         method: &str,
         path: &str,
-        headers_map: &HashMap<String, String>,
+        headers_map: &HashMap<String, String, SH>,
         query: Option<&str>,
         body: Option<&str>,
         request_from: Option<&str>,
         client_ip: Option<&str>,
-    ) -> anyhow::Result<Option<(Arc<StubState>, usize)>> {
+    ) -> anyhow::Result<Option<(Arc<StubState>, usize)>>
+    where
+        SH: BuildHasher,
+    {
         // Stage 1 (issue #292): the index embeds its stub snapshot, so `stubs` and the candidate
         // set are always consistent. Non-anchored stubs sit in its fallback bucket, so `candidates`
         // is a superset of the true matches, ascending — Stage-2 first-match-wins is unchanged.
@@ -112,17 +117,22 @@ impl Imposter {
     /// No abort flag: Boa has no per-instruction interrupt, so after a timeout the loop-iteration
     /// cap (issue #327) is what eventually frees the blocking thread.
     #[allow(clippy::too_many_arguments)]
-    pub async fn find_matching_stub_with_client_bounded(
+    pub async fn find_matching_stub_with_client_bounded<SH>(
         self: &Arc<Self>,
         method: &str,
         path: &str,
-        headers_map: &HashMap<String, String>,
+        headers_map: &HashMap<String, String, SH>,
         query: Option<&str>,
         body: Option<&str>,
         request_from: Option<&str>,
         client_ip: Option<&str>,
         timeout: std::time::Duration,
-    ) -> anyhow::Result<Option<(Arc<StubState>, usize)>> {
+    ) -> anyhow::Result<Option<(Arc<StubState>, usize)>>
+    where
+        // `Clone + Send + 'static`: the `spawn_blocking` offload below clones `headers_map` into a
+        // `'static` worker closure when the snapshot needs offloading (inject/scenario-gate).
+        SH: BuildHasher + Clone + Send + 'static,
+    {
         let snapshot = self.stub_index.load();
         let has_inject = snapshot.has_inject();
         // A scenario-gated stub reads flow state inside the matching pass; on a blocking backend
@@ -260,7 +270,10 @@ impl Imposter {
     /// Resolve the correlation `flow_id` for a request, partitioning scenario state.
     /// `"header:<Name>"` uses that (case-insensitive) header; `"imposter_port"` (the default,
     /// and the fallback when the header is absent) uses the imposter port.
-    pub fn resolve_flow_id(&self, headers: &HashMap<String, String>) -> String {
+    pub fn resolve_flow_id<SH: BuildHasher>(
+        &self,
+        headers: &HashMap<String, String, SH>,
+    ) -> String {
         // Live path uses the single-value header view (`headers_clone`); kept separate from the
         // multi-value `flow_id_for` (used over recorded requests) to avoid a per-request alloc.
         let port = self.config.port.unwrap_or(0);
@@ -493,11 +506,13 @@ impl Imposter {
         }
     }
 
-    /// Parse form-urlencoded data from body if Content-Type matches
-    pub(crate) fn parse_form_data(
-        headers: &HashMap<String, String>,
+    /// Parse form-urlencoded data from body if Content-Type matches. Request-scoped and rebuilt
+    /// per request, so the return is `FastMap` (issue #704) regardless of the input header map's
+    /// hasher.
+    pub(crate) fn parse_form_data<SH: BuildHasher>(
+        headers: &HashMap<String, String, SH>,
         body: Option<&str>,
-    ) -> Option<HashMap<String, String>> {
+    ) -> Option<FastMap<String, String>> {
         // Header keys are Title-Case in the pre-built map, so match Content-Type case-insensitively
         // (HeaderMap lookups were case-insensitive; preserve that).
         let content_type = headers
@@ -509,7 +524,7 @@ impl Imposter {
         if content_type.contains("application/x-www-form-urlencoded")
             && let Some(body_str) = body
         {
-            let mut map = HashMap::new();
+            let mut map = FastMap::default();
             for pair in body_str.split('&').filter(|s| !s.is_empty()) {
                 let mut parts = pair.splitn(2, '=');
                 if let Some(raw_key) = parts.next() {

@@ -7,6 +7,32 @@ use hyper::{Response, StatusCode};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Fast, non-cryptographic hash maps for the imposter hot path (issue #704).
+///
+/// [`FastMap`]/[`FastSet`] swap SipHash for [`foldhash`], which is ~2–4× faster on the short string
+/// keys the request path deals in. `foldhash::fast::RandomState` is seeded per-process, so it is not
+/// a fixed-seed map an attacker can precompute against, but it is only *minimally* HashDoS-resistant.
+///
+/// # When to use which
+///
+/// - **`FastMap`/`FastSet` — request-scoped maps** built from a single request and dropped at
+///   response (headers, query, form, per-request template context). Keys come from one request with
+///   bounded entry counts (header/query caps), so an attacker cannot accumulate collisions across
+///   requests. Also **stub-index maps** rebuilt on stub mutation, whose keys come from operator
+///   stub config, not request traffic.
+/// - **Keep `std::collections::HashMap` (SipHash)** for any *long-lived* map keyed by *unbounded,
+///   request-derived* input, where an attacker could grow a colliding key set over many requests.
+///   None exist on the hot path today (the request journal keys by port, not request content).
+pub mod fastmap {
+    /// A `HashMap` using the fast, non-cryptographic `foldhash` hasher. See the [module docs](self)
+    /// for the HashDoS policy governing when this is appropriate.
+    pub type FastMap<K, V> = std::collections::HashMap<K, V, foldhash::fast::RandomState>;
+    /// A `HashSet` using the fast, non-cryptographic `foldhash` hasher. See the [module docs](self).
+    pub type FastSet<K> = std::collections::HashSet<K, foldhash::fast::RandomState>;
+}
+
+pub use fastmap::{FastMap, FastSet};
+
 /// Whether HTTP/2 auto-negotiation should be force-disabled on the serve listeners, read once from
 /// the `RIFT_DISABLE_HTTP2` env var (issue #378). An operational escape hatch: the listeners
 /// auto-negotiate HTTP/1 and HTTP/2 by default (#295); set this (`1`/`true`/`yes`/`on`) to serve
@@ -169,10 +195,26 @@ pub fn unix_timestamp() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_response, build_response_with_headers, http2_disabled_from, rift_debug_from,
-        strict_behaviors_from,
+        FastMap, FastSet, build_response, build_response_with_headers, http2_disabled_from,
+        rift_debug_from, strict_behaviors_from,
     };
     use hyper::StatusCode;
+
+    #[test]
+    fn fastmap_is_foldhash_backed_and_default_constructible() {
+        // The alias must resolve to a foldhash-hashed map, and `Default` must construct it (so
+        // migrations can swap `HashMap::new()` for `FastMap::default()` mechanically).
+        fn assert_foldhash<K, V>(_: &std::collections::HashMap<K, V, foldhash::fast::RandomState>) {
+        }
+        let mut map: FastMap<String, i32> = FastMap::default();
+        assert_foldhash(&map);
+        map.insert("k".to_string(), 1);
+        assert_eq!(map.get("k"), Some(&1));
+
+        let mut set: FastSet<String> = FastSet::default();
+        set.insert("a".to_string());
+        assert!(set.contains("a"));
+    }
 
     // Issue #611: the terminal builder fallback must not answer 200. A response-builder failure is
     // a server fault, and `Response::new` defaults to 200 — the same 200-masking shape #606 fixed
