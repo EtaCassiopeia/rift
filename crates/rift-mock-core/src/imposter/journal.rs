@@ -13,7 +13,7 @@ use super::types::RecordedRequest;
 use parking_lot::RwLock;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// Cap on stored entries per port (issue #186); oldest evicted first.
 pub const MAX_RECORDED_REQUESTS: usize = 10_000;
@@ -145,6 +145,12 @@ struct PortSlot {
     /// Highest index dropped by *cap eviction*. Deliberate deletions never touch it: losing
     /// entries you asked to delete is not a hole in your view of the journal.
     evicted_through: AtomicU64,
+    /// Whether the cap warning already fired for the current fill-up. A full journal evicts on
+    /// EVERY record, and warning per eviction serialized the whole recording path on the
+    /// tracing subscriber's writer at one log line per request (issue #718: −29% RPS at 200
+    /// connections, −55% in the #702 sweep). Deliberate deletions re-arm it, so each fill-up
+    /// warns exactly once.
+    cap_warned: AtomicBool,
 }
 
 /// Reference journal with the exact semantics of the storage it replaced.
@@ -173,13 +179,17 @@ impl RequestJournal for LocalJournal {
 
     fn record_indexed(&self, port: u16, flow_id: &str, req: RecordedRequest) -> Option<u64> {
         let slot = self.slot(port);
+        // Allocated before taking the lock to keep the critical section minimal.
+        let flow = flow_id.to_string();
         let mut entries = slot.entries.write();
         if entries.len() >= MAX_RECORDED_REQUESTS {
-            tracing::warn!(
-                port,
-                max = MAX_RECORDED_REQUESTS,
-                "Recorded requests cap reached; oldest entry evicted"
-            );
+            if !slot.cap_warned.swap(true, Ordering::SeqCst) {
+                tracing::warn!(
+                    port,
+                    max = MAX_RECORDED_REQUESTS,
+                    "Recorded requests cap reached; evicting oldest entries (warned once per fill-up)"
+                );
+            }
             if let Some((evicted, _, _)) = entries.pop_front() {
                 slot.evicted_through.store(evicted, Ordering::SeqCst);
             }
@@ -187,7 +197,7 @@ impl RequestJournal for LocalJournal {
         // Assigned under the write lock: a fetch_add outside it could interleave with a
         // concurrent recorder and push entries in a different order than their indices.
         let index = slot.last_index.fetch_add(1, Ordering::SeqCst) + 1;
-        entries.push_back((index, flow_id.to_string(), req));
+        entries.push_back((index, flow, req));
         Some(index)
     }
 
@@ -248,23 +258,28 @@ impl RequestJournal for LocalJournal {
 
     fn clear(&self, port: u16) -> anyhow::Result<()> {
         let slot = self.slot(port);
-        slot.entries.write().clear();
+        let mut entries = slot.entries.write();
+        entries.clear();
         slot.count.store(0, Ordering::SeqCst);
+        // A deliberate deletion starts a new fill-up, which deserves its own cap warning.
+        // Re-armed while still holding the write lock, like the swap in `record_indexed`, so
+        // a racing recorder can never observe the stale flag and skip a fill-up's warning.
+        slot.cap_warned.store(false, Ordering::SeqCst);
         Ok(())
     }
 
     fn retain(&self, port: u16, keep: &dyn Fn(&RecordedRequest) -> bool) {
-        self.slot(port)
-            .entries
-            .write()
-            .retain(|(_, _, req)| keep(req));
+        let slot = self.slot(port);
+        let mut entries = slot.entries.write();
+        entries.retain(|(_, _, req)| keep(req));
+        slot.cap_warned.store(false, Ordering::SeqCst);
     }
 
     fn clear_flow(&self, port: u16, flow_id: &str) -> anyhow::Result<()> {
-        self.slot(port)
-            .entries
-            .write()
-            .retain(|(_, flow, _)| flow != flow_id);
+        let slot = self.slot(port);
+        let mut entries = slot.entries.write();
+        entries.retain(|(_, flow, _)| flow != flow_id);
+        slot.cap_warned.store(false, Ordering::SeqCst);
         Ok(())
     }
 
@@ -690,6 +705,78 @@ mod tests {
             j.read_since(1, None, &|_| true).is_none(),
             "absence of a cursor is reported honestly, not faked from offsets"
         );
+    }
+
+    // Issue #718: at steady-state-full every record evicts, and warning per eviction made the
+    // tracing subscriber's writer serialize the whole recording path (−29% RPS at c=200 in the
+    // attribution run; −55% in the #702 sweep harness). One fill-up warns exactly once.
+    #[test]
+    #[tracing_test::traced_test]
+    fn cap_warns_once_per_fill_not_per_eviction() {
+        let j = LocalJournal::default();
+        for i in 0..(MAX_RECORDED_REQUESTS + 100) {
+            j.record(1, "f", req(&format!("/{i}")));
+        }
+        logs_assert(|lines: &[&str]| {
+            let n = lines.iter().filter(|l| l.contains("cap reached")).count();
+            if n == 1 {
+                Ok(())
+            } else {
+                Err(format!("expected exactly one cap warning, saw {n}"))
+            }
+        });
+    }
+
+    // Issue #718: deliberate deletions (clear / retain / clear_flow) start a new fill-up, so
+    // the next cap hit warns again — but still only once per fill-up.
+    #[test]
+    #[tracing_test::traced_test]
+    fn cap_warning_rearms_after_deliberate_deletions() {
+        let j = LocalJournal::default();
+        let fill = |j: &LocalJournal| {
+            for i in 0..(MAX_RECORDED_REQUESTS + 5) {
+                j.record(1, "f", req(&format!("/{i}")));
+            }
+        };
+        fill(&j); // 5 evictions → 1 warning
+        j.clear(1).expect("local clear is infallible");
+        fill(&j); // re-armed by clear → 1 warning
+        j.retain(1, &|_| false);
+        fill(&j); // re-armed by retain → 1 warning
+        j.clear_flow(1, "f")
+            .expect("local clear_flow is infallible");
+        fill(&j); // re-armed by clear_flow → 1 warning
+        logs_assert(|lines: &[&str]| {
+            let n = lines.iter().filter(|l| l.contains("cap reached")).count();
+            if n == 4 {
+                Ok(())
+            } else {
+                Err(format!(
+                    "expected 4 cap warnings (one per fill-up), saw {n}"
+                ))
+            }
+        });
+    }
+
+    // Issue #718: the warn-once flag lives on the port slot, so each port's fill-up gets its
+    // own warning.
+    #[test]
+    #[tracing_test::traced_test]
+    fn cap_warning_is_independent_per_port() {
+        let j = LocalJournal::default();
+        for port in [1u16, 2] {
+            for i in 0..(MAX_RECORDED_REQUESTS + 5) {
+                j.record(port, "f", req(&format!("/{i}")));
+            }
+        }
+        logs_assert(|lines: &[&str]| {
+            let n = lines.iter().filter(|l| l.contains("cap reached")).count();
+            if n == 2 {
+                Ok(())
+            } else {
+                Err(format!("expected 2 cap warnings (one per port), saw {n}"))
+            }
+        });
     }
 
     // Ports are isolated slices of the journal.

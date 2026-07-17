@@ -11,6 +11,17 @@ record.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Recording-path throughput collapse once the journal hit its 10,000-entry cap.** A full
+  journal evicts on every recorded request, and the per-eviction warning emitted one log line
+  per request (87k+ lines/sec under load), serializing the whole recording path on the tracing
+  subscriber's writer lock — measured at −29% to −55% RPS versus recording-off, and flat
+  (non-scaling) throughput from 10 to 200 connections. The cap warning now fires once per
+  fill-up (re-armed by deliberate deletions: `DELETE .../requests`, scoped clears, retention),
+  and recording overhead drops to ~2% of throughput at saturation. Cap and eviction semantics
+  (10k entries, oldest-first, cursor truncation) are unchanged. (#718)
+
 ### Added
 
 - **HTTP connection-builder tuning knobs and optional accept-side connection backpressure**
