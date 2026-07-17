@@ -156,6 +156,9 @@ Environment variables override CLI defaults:
 | `RIFT_DISABLE_HTTP2` | Force HTTP/1-only listeners, disabling HTTP/2 & h2c auto-negotiation (truthy: `1`/`true`/`yes`/`on`) | off |
 | `RIFT_TCP_BACKLOG` | Listen backlog for the accept loop (positive integer) | `1024` |
 | `RIFT_TCP_NODELAY` | `TCP_NODELAY` on accepted sockets; set `false`/`0`/`off` to disable | on |
+| `RIFT_HTTP_MAX_BUF` | Per-connection HTTP read/write buffer cap, in bytes (positive integer; floored at hyper's 8 KB minimum). Bounds per-connection memory at high connection counts | `65536` |
+| `RIFT_HTTP_HEADER_TIMEOUT` | Seconds to wait for a client to finish sending request headers before closing the connection (slowloris hygiene; positive integer) | `30` |
+| `RIFT_MAX_CONNECTIONS` | Cap on concurrently-served connections per listener (positive integer). Unset means unlimited; at the cap the server stops accepting until a connection closes, so overload waits in the kernel backlog rather than piling up | unlimited |
 | `RIFT_STRICT_BEHAVIORS` | Force strict mode process-wide (truthy: `1`/`true`/`yes`/`on`): a `decorate`/`shellTransform`/binary-base64-decode failure returns `500` instead of the lenient fallback body | off |
 | `NO_COLOR` | Suppress ANSI color and the decorative banner in `rift-verify` / `rift-lint` output | |
 | `RUST_LOG` | Detailed log configuration | `info` |

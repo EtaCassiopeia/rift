@@ -13,6 +13,18 @@ record.
 
 ### Added
 
+- **HTTP connection-builder tuning knobs and optional accept-side connection backpressure**
+  (env-tunable, applied to the imposter, proxy, admin-API, and metrics listeners). The hyper
+  connection builders previously ran on defaults: a ~400 KB per-connection buffer and no
+  header-read timeout. `RIFT_HTTP_MAX_BUF` (default 64 KB) now caps the per-connection buffer —
+  bounding memory at high connection counts without affecting normal small mock requests — and
+  `RIFT_HTTP_HEADER_TIMEOUT` (default 30 s) sets an explicit header-read timeout so a
+  slow-header (slowloris) client can no longer hold a connection open indefinitely. Both are
+  conservative defense-in-depth tightenings, on by default. `RIFT_MAX_CONNECTIONS` (default
+  unlimited — today's behavior) optionally bounds concurrently-served connections with a
+  per-listener semaphore acquired *before* accept, so overload is absorbed by the kernel backlog
+  rather than collapsing into unbounded queueing; it never RST-storms clients.
+
 - **The `match=` filter grammar on recorded traffic gains `method=` and `path=` exact-equality
   clauses.** Alongside `header:<Name>=<Value>` and `flow_id=<Value>`, `GET`/`DELETE
   /imposters/{port}/savedRequests` and the SSE streams (`GET /events`,

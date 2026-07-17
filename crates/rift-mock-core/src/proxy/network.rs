@@ -6,10 +6,98 @@
 
 use socket2::{Domain, Protocol, Socket, Type};
 use std::net::SocketAddr;
+use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
 
 /// Default listen backlog; overridable via `RIFT_TCP_BACKLOG`.
 const DEFAULT_BACKLOG: i32 = 1024;
+
+/// Default `hyper`/`hyper-util` connection buffer cap; overridable via `RIFT_HTTP_MAX_BUF`.
+/// Hyper's own default is ~400KB, sized for arbitrary internet traffic; mock/proxy requests are
+/// small and numerous, so a 64KB ceiling bounds per-connection memory without touching normal
+/// traffic.
+pub const DEFAULT_HTTP_MAX_BUF: usize = 64 * 1024;
+
+/// Default HTTP/1 header-read timeout (slowloris hygiene); overridable via
+/// `RIFT_HTTP_HEADER_TIMEOUT` (seconds).
+const DEFAULT_HTTP_HEADER_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// `hyper`'s h1 buffer floor (`proto::h1::MINIMUM_MAX_BUFFER_SIZE`, currently 8KB). It isn't part
+/// of hyper's public API, so it's mirrored here as a guard: `http1::Builder::max_buf_size` (and
+/// the `auto::Builder` equivalent) panics if handed anything smaller. Enforced only in `parse` so
+/// a bogus/too-small env value degrades to the default instead of crashing the server.
+const HYPER_H1_MIN_MAX_BUF: usize = 8192;
+
+/// HTTP connection-builder tuning knobs (issue #716): the hyper/hyper-util `serve_connection`
+/// builders otherwise run on hyper's own defaults (a ~400KB buffer, no header-read timeout, and
+/// no cap on concurrent connections).
+///
+/// Populated from the environment ([`HttpTuning::from_env`]) once per listener setup, mirroring
+/// [`SocketTuning`] — not read per accepted connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HttpTuning {
+    /// Cap on the connection's internal read/write buffer (`Builder::max_buf_size`).
+    pub max_buf_size: usize,
+    /// How long to wait for a client to finish sending request headers before closing the
+    /// connection (`Builder::header_read_timeout`) — mitigates slowloris-style stalls.
+    pub header_read_timeout: Duration,
+    /// Cap on concurrently accepted connections. `None` (the default) preserves today's
+    /// behavior: unlimited, accept-as-fast-as-the-kernel-hands-them-over.
+    pub max_connections: Option<usize>,
+}
+
+impl Default for HttpTuning {
+    fn default() -> Self {
+        Self {
+            max_buf_size: DEFAULT_HTTP_MAX_BUF,
+            header_read_timeout: DEFAULT_HTTP_HEADER_TIMEOUT,
+            max_connections: None,
+        }
+    }
+}
+
+impl HttpTuning {
+    /// Read tuning from the environment: `RIFT_HTTP_MAX_BUF` (bytes), `RIFT_HTTP_HEADER_TIMEOUT`
+    /// (seconds), and `RIFT_MAX_CONNECTIONS` (connection count, opt-in). Unset or unparsable
+    /// values fall back to [`HttpTuning::default`].
+    #[must_use]
+    pub fn from_env() -> Self {
+        Self::parse(
+            std::env::var("RIFT_HTTP_MAX_BUF").ok().as_deref(),
+            std::env::var("RIFT_HTTP_HEADER_TIMEOUT").ok().as_deref(),
+            std::env::var("RIFT_MAX_CONNECTIONS").ok().as_deref(),
+        )
+    }
+
+    /// Pure parser behind [`HttpTuning::from_env`] — kept env-free so it is testable without
+    /// mutating process-global state.
+    fn parse(
+        max_buf: Option<&str>,
+        header_timeout_secs: Option<&str>,
+        max_conns: Option<&str>,
+    ) -> Self {
+        let defaults = Self::default();
+        let max_buf_size = max_buf
+            .and_then(|s| s.trim().parse::<usize>().ok())
+            .filter(|&v| v >= HYPER_H1_MIN_MAX_BUF)
+            .unwrap_or(defaults.max_buf_size);
+        let header_read_timeout = header_timeout_secs
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .filter(|&secs| secs > 0)
+            .map(Duration::from_secs)
+            .unwrap_or(defaults.header_read_timeout);
+        // Opt-in: unset, zero, negative, or garbage all mean "unlimited" rather than an error —
+        // this knob defaults to today's behavior, so a malformed value should not fail closed.
+        let max_connections = max_conns
+            .and_then(|s| s.trim().parse::<usize>().ok())
+            .filter(|&n| n > 0);
+        Self {
+            max_buf_size,
+            header_read_timeout,
+            max_connections,
+        }
+    }
+}
 
 /// Accept-loop / socket tuning knobs.
 ///
@@ -149,6 +237,80 @@ pub fn apply_stream_tuning(stream: &TcpStream, tuning: &SocketTuning) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- issue #716: HTTP connection-builder tuning knobs -------------------------------
+
+    #[test]
+    fn http_tuning_defaults() {
+        let t = HttpTuning::default();
+        assert_eq!(t.max_buf_size, DEFAULT_HTTP_MAX_BUF);
+        assert_eq!(t.header_read_timeout, std::time::Duration::from_secs(30));
+        assert_eq!(
+            t.max_connections, None,
+            "unlimited by default (today's behavior)"
+        );
+    }
+
+    #[test]
+    fn http_tuning_parse_falls_back_to_defaults_when_unset() {
+        assert_eq!(HttpTuning::parse(None, None, None), HttpTuning::default());
+    }
+
+    #[test]
+    fn http_tuning_parse_reads_max_buf() {
+        assert_eq!(
+            HttpTuning::parse(Some(" 16384 "), None, None).max_buf_size,
+            16384
+        );
+    }
+
+    #[test]
+    fn http_tuning_parse_rejects_garbage_or_zero_max_buf() {
+        for v in ["0", "-5", "nope", ""] {
+            assert_eq!(
+                HttpTuning::parse(Some(v), None, None).max_buf_size,
+                DEFAULT_HTTP_MAX_BUF,
+                "value {v} must fall back to the default"
+            );
+        }
+    }
+
+    #[test]
+    fn http_tuning_parse_reads_header_timeout_seconds() {
+        assert_eq!(
+            HttpTuning::parse(None, Some("10"), None).header_read_timeout,
+            std::time::Duration::from_secs(10)
+        );
+    }
+
+    #[test]
+    fn http_tuning_parse_rejects_garbage_header_timeout() {
+        for v in ["nope", "-1", ""] {
+            assert_eq!(
+                HttpTuning::parse(None, Some(v), None).header_read_timeout,
+                std::time::Duration::from_secs(30),
+                "value {v} must fall back to the default"
+            );
+        }
+    }
+
+    #[test]
+    fn http_tuning_parse_max_connections_opt_in() {
+        // Unset or non-positive => unlimited (None); a positive value => a cap.
+        assert_eq!(HttpTuning::parse(None, None, None).max_connections, None);
+        assert_eq!(
+            HttpTuning::parse(None, None, Some("0")).max_connections,
+            None
+        );
+        assert_eq!(
+            HttpTuning::parse(None, None, Some("nope")).max_connections,
+            None
+        );
+        assert_eq!(
+            HttpTuning::parse(None, None, Some(" 500 ")).max_connections,
+            Some(500)
+        );
+    }
 
     #[test]
     fn default_tuning_enables_nodelay_and_uses_default_backlog() {

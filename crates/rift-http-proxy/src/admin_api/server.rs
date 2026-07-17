@@ -211,7 +211,30 @@ async fn accept_loop(
     cancel: CancellationToken,
     tracker: TaskTracker,
 ) -> anyhow::Result<()> {
+    // Read HTTP tuning once per listener, not per accepted connection (issue #716).
+    let http_tuning = rift_mock_core::proxy::HttpTuning::from_env();
+    // `None` (the default) preserves today's behavior exactly: no semaphore, no permit.
+    let connection_semaphore = http_tuning
+        .max_connections
+        .map(|n| Arc::new(tokio::sync::Semaphore::new(n)));
+
     loop {
+        // Acquire a permit *before* accepting so a cap holds connections back in the listener
+        // backlog rather than accepting-then-failing. Raced against `cancel` so a saturated cap
+        // never delays admin-server shutdown.
+        let permit = match &connection_semaphore {
+            Some(sem) => {
+                let acquire = Arc::clone(sem).acquire_owned();
+                tokio::select! {
+                    _ = cancel.cancelled() => break,
+                    acquired = acquire => match acquired {
+                        Ok(permit) => Some(permit),
+                        Err(_) => break,
+                    },
+                }
+            }
+            None => None,
+        };
         let (stream, _) = tokio::select! {
             _ = cancel.cancelled() => break,
             accepted = listener.accept() => accepted?,
@@ -225,6 +248,8 @@ async fn accept_loop(
         let conn_cancel = cancel.clone();
 
         tracker.spawn(async move {
+            // Held for the connection's lifetime; released to the semaphore when this task ends.
+            let _permit = permit;
             let stream_cancel = conn_cancel.clone();
             let service = service_fn(move |req| {
                 let manager = Arc::clone(&manager);
@@ -315,13 +340,24 @@ async fn accept_loop(
             }
 
             if rift_mock_core::util::http2_disabled() {
-                drive_conn!(
-                    hyper::server::conn::http1::Builder::new().serve_connection(io, service)
-                );
+                let mut builder = hyper::server::conn::http1::Builder::new();
+                // A timer is required for `header_read_timeout` to take effect (hyper panics on
+                // serve_connection otherwise) — always paired with it (issue #716).
+                builder
+                    .timer(hyper_util::rt::TokioTimer::new())
+                    .header_read_timeout(http_tuning.header_read_timeout)
+                    .max_buf_size(http_tuning.max_buf_size);
+                drive_conn!(builder.serve_connection(io, service));
             } else {
-                let builder = hyper_util::server::conn::auto::Builder::new(
+                let mut builder = hyper_util::server::conn::auto::Builder::new(
                     hyper_util::rt::TokioExecutor::new(),
                 );
+                // The h1 buffer/timeout knobs live on the `.http1()` sub-config of the auto builder.
+                builder
+                    .http1()
+                    .timer(hyper_util::rt::TokioTimer::new())
+                    .header_read_timeout(http_tuning.header_read_timeout)
+                    .max_buf_size(http_tuning.max_buf_size);
                 drive_conn!(builder.serve_connection(io, service));
             }
         });

@@ -43,3 +43,6 @@ pub use handler::rule_applies_to_upstream;
 pub use server::ProxyServer;
 // TLS session-resumption config, shared with the intercept listener in rift-http-proxy (issue #705).
 pub use tls::{TLS_SESSION_CACHE_SIZE, configure_session_resumption};
+// HTTP connection-builder tuning, shared with the metrics/admin accept loops in rift-http-proxy
+// (issue #716) — `network` itself stays `pub(crate)`, only this type is exposed.
+pub use network::{DEFAULT_HTTP_MAX_BUF, HttpTuning};
