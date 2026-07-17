@@ -491,7 +491,10 @@ mod structural_hash_tests {
         // deepEquals compares arrays element-wise (order-sensitive), so the hash must be too —
         // `[1,2]` and `[2,1]` do not deep-equal and should not collide.
         assert!(!deep_equals_default(&json!([1, 2]), &json!([2, 1])));
-        assert_ne!(structural_hash(&json!([1, 2])), structural_hash(&json!([2, 1])));
+        assert_ne!(
+            structural_hash(&json!([1, 2])),
+            structural_hash(&json!([2, 1]))
+        );
     }
 
     // A tiny deterministic LCG — a seeded, dependency-free "proptest-style" generator (the design

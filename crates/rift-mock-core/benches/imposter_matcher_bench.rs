@@ -343,13 +343,22 @@ fn bench_deepequals_body(c: &mut Criterion) {
     let headers: HashMap<String, String> = HashMap::new();
     let mut group = c.benchmark_group("find_matching_stub_deepequals_body");
     for count in [10usize, 100, 500] {
-        let imposter = imposter_with_stubs(count, &|i| {
-            json!({ "deepEquals": { "body": { "id": i, "kind": "order", "note": "x" } } })
-        });
+        let imposter = imposter_with_stubs(
+            count,
+            &|i| json!({ "deepEquals": { "body": { "id": i, "kind": "order", "note": "x" } } }),
+        );
         let body = format!(r#"{{"id":{},"kind":"order","note":"x"}}"#, count - 1);
         assert!(
             imposter
-                .find_matching_stub_with_client("POST", "/orders", &headers, None, Some(&body), None, None)
+                .find_matching_stub_with_client(
+                    "POST",
+                    "/orders",
+                    &headers,
+                    None,
+                    Some(&body),
+                    None,
+                    None
+                )
                 .expect("matching must not error")
                 .is_some(),
             "deepequals_body/{count}: fixture no longer matches its target stub",

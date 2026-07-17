@@ -2193,7 +2193,7 @@ mod tests {
             json!([{"deepEquals": {"body": "hello"}}]), // 3 scalar body (raw-string compare)
             json!([{"deepEquals": {"body": {"a": "{\"k\":1}"}}}]), // 4 JSON-in-string leaf in expected
             json!([{"deepEquals": {"body": {"a": 1}}, "except": "x"}]), // 5 except (rewrites the value)
-            deep_body(json!({"eligible": true})),                  // 6 ELIGIBLE (indexed)
+            deep_body(json!({"eligible": true})),                       // 6 ELIGIBLE (indexed)
         ]);
         // A body matching only stub 6: the eligible stub is hit by the probe; the six ineligible
         // stubs are `always` and must all remain — none can be hash-pruned.
