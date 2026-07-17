@@ -40,13 +40,14 @@ impl Imposter {
     where
         SH: BuildHasher,
     {
-        // Stage 1 (issue #292): the index embeds its stub snapshot, so `stubs` and the candidate
-        // set are always consistent. Non-anchored stubs sit in its fallback bucket, so `candidates`
-        // is a superset of the true matches, ascending — Stage-2 first-match-wins is unchanged.
-        // Note: a path-anchored stub whose anchor doesn't match the request is no longer visited, so
-        // its `required_scenario_state` backend read (which could `Err`, #318) is skipped for that
+        // Stage 1 (issues #292, #707): one wait-free load yields the stubs and the index built over
+        // those exact stubs, so they are consistent by construction. Every dimension over-
+        // approximates (stubs it can't index sit in its always-bits), so `candidates` is a superset
+        // of the true matches, ascending — Stage-2 first-match-wins is unchanged.
+        // Note: a stub some dimension rules out is no longer visited, so its
+        // `required_scenario_state` backend read (which could `Err`, #318) is skipped for that
         // request — correct, since a stub that provably can't match should not be consulted.
-        let snapshot = self.stub_index.load();
+        let snapshot = self.snapshot();
         let stubs = snapshot.stubs();
         // `headers_map` is the single-value, Title-Case header view already built once by the
         // caller (#288) — no re-conversion from `HeaderMap` here.
@@ -60,7 +61,7 @@ impl Imposter {
         let body_json = body.and_then(|b| serde_json::from_str::<serde_json::Value>(b).ok());
         // Likewise parse the query string once per request rather than per predicate (issue #480).
         let query_map = crate::imposter::predicates::parse_query(query);
-        for stub_idx in snapshot.candidates(path) {
+        for stub_idx in snapshot.candidates(method, path).iter() {
             let stub_state = &stubs[stub_idx];
             let stub = &stub_state.stub;
             // Correlated-isolation gate (issue #223, runs first): a space-scoped stub only
@@ -133,7 +134,7 @@ impl Imposter {
         // `'static` worker closure when the snapshot needs offloading (inject/scenario-gate).
         SH: BuildHasher + Clone + Send + 'static,
     {
-        let snapshot = self.stub_index.load();
+        let snapshot = self.snapshot();
         let has_inject = snapshot.has_inject();
         // A scenario-gated stub reads flow state inside the matching pass; on a blocking backend
         // (Redis) that read must not run on the tokio worker either (issue #475). A scenario-free
@@ -217,7 +218,8 @@ impl Imposter {
         request_from: Option<&str>,
         client_ip: Option<&str>,
     ) -> anyhow::Result<Option<(Arc<StubState>, usize)>> {
-        let stubs = self.stubs.load();
+        let snapshot = self.snapshot();
+        let stubs = snapshot.stubs();
         let form = Self::parse_form_data(headers_map, body);
         let imposter_port = self.script_state_key();
         let flow_id = self.resolve_flow_id(headers_map);
@@ -459,8 +461,8 @@ impl Imposter {
     /// Distinct scenario names declared by this imposter's stubs (sorted).
     pub fn scenario_names(&self) -> Vec<String> {
         let mut names: Vec<String> = self
-            .stubs
-            .load()
+            .snapshot()
+            .stubs()
             .iter()
             .filter_map(|s| s.stub.scenario_name.clone())
             .collect();
@@ -471,8 +473,8 @@ impl Imposter {
 
     /// Stubs scoped to a given correlation space (issue #223).
     pub fn space_stubs(&self, space: &str) -> Vec<Stub> {
-        self.stubs
-            .load()
+        self.snapshot()
+            .stubs()
             .iter()
             .filter(|s| s.stub.space.as_deref() == Some(space))
             .map(|s| s.stub.clone())
@@ -779,7 +781,7 @@ mod bounded_matching_tests {
             }]),
             Arc::new(BlockingProbeStore::new()),
         );
-        assert!(imp.stub_index.load().has_scenario_gate());
+        assert!(imp.snapshot().has_scenario_gate());
         assert!(imp.flow_store.is_blocking());
 
         let matched = imp
@@ -896,7 +898,7 @@ mod bounded_matching_tests {
             "responses": [{ "is": { "statusCode": 200 } }]
         }]));
         assert!(
-            !imp.stub_index.load().has_inject(),
+            !imp.snapshot().has_inject(),
             "a scriptless stub set must not set the has_inject gate"
         );
         let matched = imp

@@ -27,6 +27,15 @@ record.
 
 ### Fixed
 
+- **A path-anchored stub could silently stop matching when its anchor contained non-ASCII text.**
+  The Stage-1 path prefilter folded case with Unicode `to_lowercase`, while predicate evaluation
+  folds with ASCII (`eq_ignore_ascii_case`). Unicode folding is length-changing and
+  context-sensitive, so for `startsWith`/`contains` anchors the two disagreed: a stub with
+  `startsWith: {"path": "/ΟΣ"}` was pruned from the candidate set for a request to `/ΟΣΑ` — which
+  evaluation *would* have matched — and the request fell through to a later stub or to no match at
+  all. The prefilter now folds exactly as the evaluator does, so the index and evaluation can no
+  longer diverge. Only stubs whose path anchor contained non-ASCII characters were affected.
+
 - **A request whose body fails mid-read now answers `400`, not `413`, and is no longer silent.** The
   imposter body reader funneled the size-cap breach and a genuine transport failure — a connection
   reset, a truncated chunked body — through one error arm that always answered `413` "Request body
@@ -91,6 +100,22 @@ record.
   reloaded file carries an `intercept` block, so an edit to it never looks applied when it wasn't.
 
 ### Changed
+
+- **Stub matching prunes candidates on request *method*, not just path.** The Stage-1 prefilter is
+  now a multi-dimensional candidate-bitset index (the Lucent Bit Vector technique from packet
+  classification): each dimension answers which stubs a request attribute cannot rule out, and the
+  per-dimension bitsets are intersected. A `POST`-anchored stub is therefore no longer a candidate
+  for every `GET`. On a 1000-stub corpus sharing one path and partitioned 6 ways by method,
+  matching went from ~33.4 µs to ~12.9 µs per request (~2.6x). Matching *semantics* are unchanged:
+  the index only ever over-approximates, and full predicate evaluation remains the single source of
+  truth (a randomized differential test asserts the indexed path returns exactly what an
+  exhaustive linear scan does).
+
+- **`Imposter::stubs` is no longer a public field.** It and the internal `stub_index` were merged
+  into one atomically-swapped snapshot so the match hot path takes a single wait-free load and a
+  torn (stubs *N*, index *N+1*) read is unrepresentable. The stub-reading API is unchanged —
+  `get_stubs`, `get_stub`, `get_stub_by_id`, `stub_count` and the admin/FFI surfaces all behave
+  exactly as before; only direct field access by an embedding Rust consumer is affected.
 
 - **Every image base is now digest-pinned** (`image:tag@sha256:...`), with Dependabot owning the
   bumps. `rustlang/rust:nightly` floats daily, so builds of the same commit were not reproducible.

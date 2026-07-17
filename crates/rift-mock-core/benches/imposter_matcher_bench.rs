@@ -185,5 +185,76 @@ fn bench_find_matching_stub(c: &mut Criterion) {
     );
 }
 
-criterion_group!(benches, bench_stub_matches, bench_find_matching_stub);
+const METHODS: [&str; 6] = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD"];
+
+/// Issue #707: what the method dimension buys, isolated from the path index.
+///
+/// Every stub shares ONE path, so the path dimension resolves *all* of them as candidates and can
+/// prune nothing — pre-#707 that meant a full predicate evaluation of every stub on every request,
+/// because the index could not see the method at all. Stubs are distinguished by method (6-way) and
+/// by a body, and the request targets the *last* stub, so nothing short-circuits early.
+///
+/// The method dimension collapses the candidate set to the ~1/6 of stubs sharing the request's
+/// method, so this should scale at ~1/6 the per-stub work — and the collapse itself is asserted
+/// exactly (not just timed) by `method_dimension_collapses_candidates` in `stub_index.rs`.
+fn bench_method_dimension(c: &mut Criterion) {
+    let headers: HashMap<String, String> = HashMap::new();
+    let mut group = c.benchmark_group("find_matching_stub_method_disjoint");
+
+    for count in [10usize, 100, 1000] {
+        let imposter = imposter_with_stubs(count, &|i| {
+            json!({ "equals": {
+                "method": METHODS[i % METHODS.len()],
+                "path": "/api/shared",
+                "body": format!("req{i}"),
+            }})
+        });
+        // Target the last stub: its method, its body.
+        let last = count - 1;
+        let method = METHODS[last % METHODS.len()];
+        let body = format!("req{last}");
+
+        // A fixture that stops matching would silently measure the no-match path instead. Pin it.
+        assert!(
+            imposter
+                .find_matching_stub_with_client(
+                    method,
+                    "/api/shared",
+                    &headers,
+                    None,
+                    Some(&body),
+                    None,
+                    None
+                )
+                .expect("matching must not error")
+                .is_some(),
+            "method_disjoint/{count}: fixture no longer matches its target stub",
+        );
+
+        group.throughput(Throughput::Elements(count as u64));
+        group.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, _| {
+            b.iter(|| {
+                imposter
+                    .find_matching_stub_with_client(
+                        black_box(method),
+                        black_box("/api/shared"),
+                        black_box(&headers),
+                        None,
+                        black_box(Some(body.as_str())),
+                        None,
+                        None,
+                    )
+                    .expect("matching must not error")
+            })
+        });
+    }
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_stub_matches,
+    bench_find_matching_stub,
+    bench_method_dimension
+);
 criterion_main!(benches);
