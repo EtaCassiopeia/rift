@@ -112,6 +112,10 @@ harness = false
 name = "proxy_rules_bench"
 harness = false
 
+[[bench]]
+name = "response_serve_bench"
+harness = false
+
 [features]
 default = ["redis-backend", "javascript"]
 redis-backend = ["redis", "r2d2"]

@@ -366,6 +366,13 @@ pub enum StubResponse {
         /// (served as-is) or no body at all.
         #[serde(skip)]
         rendered_body: Option<std::sync::Arc<str>>,
+        /// Issue #703: fully-materialized static response (status + `HeaderMap` + `Bytes`), computed
+        /// ONCE at construction so the hot path serves it as refcount clones. `Some` only for a
+        /// request-independent `is` response (no templates/date tokens/`_behaviors`/`_rift` effect,
+        /// text mode, valid headers); `None` routes to the existing slow path. Derived cache, like
+        /// the two fields above — not serde-driven.
+        #[serde(skip)]
+        prepared: Option<std::sync::Arc<crate::imposter::response::PreparedResponse>>,
     },
     Proxy {
         proxy: ProxyResponse,
@@ -421,12 +428,22 @@ impl StubResponse {
             is.body.as_ref().filter(|b| !b.is_string()).map(|b| {
                 std::sync::Arc::from(serde_json::to_string(b).unwrap_or_default().as_str())
             });
+        // Issue #703: materialize the static-serving form once, here (same pass, same invalidation
+        // as `rendered_body`). `None` for any request-dependent response — the slow path covers it.
+        let prepared = crate::imposter::response::PreparedResponse::try_build(
+            &is,
+            rendered_body.as_ref(),
+            rift.as_ref(),
+            behaviors_parsed.is_some(),
+        )
+        .map(std::sync::Arc::new);
         StubResponse::Is {
             is,
             behaviors,
             rift,
             behaviors_parsed,
             rendered_body,
+            prepared,
         }
     }
 }
