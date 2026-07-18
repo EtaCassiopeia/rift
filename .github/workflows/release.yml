@@ -617,3 +617,24 @@ jobs:
     with:
       tag: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
     secrets: inherit
+
+  # =============================================================================
+  # Trigger the Node SDK bump (immediate engine -> rift-node coupling)
+  # =============================================================================
+  # The npm package (@rift-vs/rift) lives in EtaCassiopeia/rift-node and tracks this engine's
+  # releases. Instead of waiting for rift-node's daily engine-bump poll (up to ~24h), trigger it
+  # now so the SDK bump PR opens within minutes of this release. rift-node's own pipeline still
+  # owns and gates the actual npm publish (its first release is human-gated). Needs a PAT with
+  # actions:write on rift-node (RIFT_NODE_DISPATCH_TOKEN) — GITHUB_TOKEN cannot trigger workflows
+  # in another repo. Best-effort: a dispatch failure must not fail the engine release.
+  trigger-node-sdk-bump:
+    name: Trigger rift-node engine bump
+    runs-on: ubuntu-latest
+    needs: release
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && !inputs.dry_run)
+    continue-on-error: true
+    steps:
+      - name: Dispatch rift-node engine-bump
+        env:
+          GH_TOKEN: ${{ secrets.RIFT_NODE_DISPATCH_TOKEN }}
+        run: gh workflow run engine-bump.yml -R EtaCassiopeia/rift-node
