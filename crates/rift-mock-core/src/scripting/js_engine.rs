@@ -4051,6 +4051,62 @@ function respond(ctx) {
         );
     }
 
+    // Issue #743 (RFC-712 pre-work): the hypothesized defect — thread-local per-port script
+    // state surviving imposter deletion on other pool workers — does NOT exist: `IMPOSTER_STATE`
+    // is one process-global map shared by every worker, and `clear_imposter_state` removes the
+    // port's entry for all of them at once. This test proves it across concurrent pool workers
+    // and locks the invariant in as a regression gate, so a future topology change (per-core
+    // runtimes, RFC-712) cannot silently break it: state accumulated from many workers vanishes
+    // after the delete-path clear, and a recreated imposter on the same port starts fresh no
+    // matter which worker serves it.
+    #[test]
+    fn clear_imposter_state_resets_state_for_every_pool_worker() {
+        let port = test_port();
+        let incr = r#"function(config) {
+            config.state.count = (config.state.count || 0) + 1;
+            return true;
+        }"#;
+        let n: usize = 32;
+        std::thread::scope(|s| {
+            for _ in 0..n {
+                s.spawn(move || {
+                    execute_predicate_inject(incr, &mb_req("POST", "/gen"), port)
+                        .expect("predicate inject should run");
+                });
+            }
+        });
+        let read = r#"function(config) {
+            return { statusCode: 200, body: String(config.state.count || 0) };
+        }"#;
+        let before = execute_mountebank_inject(read, &mb_req("GET", "/gen"), port, None)
+            .expect("read inject should run");
+        assert_eq!(
+            before.body,
+            n.to_string(),
+            "precondition: increments from every worker persisted into the shared cell"
+        );
+
+        // The imposter-delete path (`manager.rs` shutdown, after connection drain) calls
+        // exactly this — a replace routes through the same shutdown.
+        clear_imposter_state(port);
+
+        // A recreated imposter on the same port must see fresh state from EVERY worker. Reads
+        // run concurrently so multiple pool workers serve them — a worker-cached copy of the
+        // old state would resurface here.
+        std::thread::scope(|s| {
+            for _ in 0..8 {
+                s.spawn(move || {
+                    let resp = execute_mountebank_inject(read, &mb_req("GET", "/gen"), port, None)
+                        .expect("read inject should run");
+                    assert_eq!(
+                        resp.body, "0",
+                        "post-delete reads must see fresh state on every worker"
+                    );
+                });
+            }
+        });
+    }
+
     // =========================================================================================
     // Issue #355 Item 1: native logger routes to `tracing`.
     // =========================================================================================
