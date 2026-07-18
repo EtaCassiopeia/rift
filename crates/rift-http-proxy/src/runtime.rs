@@ -3,9 +3,10 @@
 //! Default is unchanged: one multi-threaded work-stealing tokio runtime. `--runtime per-core[=N]`
 //! (or `RIFT_RUNTIME`) selects N single-threaded worker runtimes fed by per-worker command
 //! channels, with the control plane (admin API, metrics, imposter mutations) on a small
-//! multi-thread runtime. In this issue the workers only answer `Ping` and `Shutdown`; imposter
-//! `Bind`/`Unbind` fan-out arrives with the follow-up (#745), so per-core mode is not yet
-//! user-visible behavior — only topology plumbing.
+//! multi-thread runtime. Imposter accept loops fan out across the workers through the runtime
+//! handles exported by [`WorkerSet::handles`] (issue #745): the imposter manager spawns one
+//! SO_REUSEPORT accept loop per worker per port, so no Bind/Unbind command protocol is needed —
+//! the command channel carries only lifecycle (`Ping`/`Shutdown`).
 //!
 //! Platform policy (RFC-712 D5): Linux is first-class (SO_REUSEPORT balances accepts by 4-tuple
 //! hash — the design's premise). macOS *refuses* per-core with a warning and falls back to
@@ -137,8 +138,9 @@ pub fn platform_gate(
     }
 }
 
-/// Commands a worker runtime accepts. `Bind`/`Unbind` for imposter listeners arrive with #745;
-/// until then `Ping` doubles as the liveness/identification probe (#746 needs per-worker
+/// Lifecycle commands a worker runtime accepts. Imposter listeners need no Bind/Unbind
+/// protocol — the manager spawns accept loops directly through [`WorkerSet::handles`] (#745) —
+/// so `Ping` doubles as the liveness/identification probe (#746 needs per-worker
 /// identification for the accept counters anyway).
 #[derive(Debug)]
 pub enum WorkerCommand {
@@ -153,6 +155,9 @@ pub enum WorkerCommand {
 pub struct WorkerSet {
     senders: Vec<mpsc::UnboundedSender<WorkerCommand>>,
     handles: Vec<std::thread::JoinHandle<()>>,
+    /// One tokio runtime handle per worker, exported at spawn — the seam the imposter
+    /// manager's per-core listener fan-out spawns accept loops through (issue #745).
+    runtime_handles: Vec<tokio::runtime::Handle>,
 }
 
 impl WorkerSet {
@@ -176,8 +181,13 @@ impl WorkerSet {
         let blocking = max_blocking_threads(workers);
         let mut senders = Vec::with_capacity(workers);
         let mut handles = Vec::with_capacity(workers);
+        let mut runtime_handles = Vec::with_capacity(workers);
         for index in 0..workers {
             let (tx, mut rx) = mpsc::unbounded_channel::<WorkerCommand>();
+            // Sync channel: the worker exports its runtime handle before entering the command
+            // loop, so a runtime that fails to build is detected HERE, synchronously, instead
+            // of surfacing later as a dead accept target (issue #745).
+            let (handle_tx, handle_rx) = std::sync::mpsc::channel::<tokio::runtime::Handle>();
             let core = core_ids.get(index).copied();
             let handle = std::thread::Builder::new()
                 .name(format!("rift-worker-{index}"))
@@ -194,32 +204,71 @@ impl WorkerSet {
                     {
                         Ok(rt) => rt,
                         Err(e) => {
-                            // The spawner's Ping handshake detects the dead worker; the error
-                            // is logged here where the cause is known.
+                            // Dropping `handle_tx` without sending makes the spawner's recv
+                            // fail — the build error is surfaced synchronously to spawn().
                             tracing::error!(worker = index, "worker runtime build failed: {e}");
                             return;
                         }
                     };
-                    runtime.block_on(async move {
-                        while let Some(cmd) = rx.recv().await {
-                            match cmd {
-                                WorkerCommand::Ping(reply) => {
-                                    // A dropped receiver just means the caller stopped waiting.
-                                    let _ = reply.send(index);
+                    if handle_tx.send(runtime.handle().clone()).is_err() {
+                        return; // spawner already gave up (its recv timed out)
+                    }
+                    // Fail-stop supervision (issue #745 handoff): once accept loops run here,
+                    // a panic that unwinds out of the command loop or the runtime itself would
+                    // leave a request-serving core silently dark. Abort instead — loud and
+                    // observable beats degraded-and-invisible. (Panics inside spawned TASKS are
+                    // caught by tokio and surfaced per-task, exactly as on the default
+                    // work-stealing runtime; this guards the worker thread itself.)
+                    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        runtime.block_on(async move {
+                            while let Some(cmd) = rx.recv().await {
+                                match cmd {
+                                    WorkerCommand::Ping(reply) => {
+                                        // A dropped receiver just means the caller stopped
+                                        // waiting.
+                                        let _ = reply.send(index);
+                                    }
+                                    WorkerCommand::Shutdown => break,
                                 }
-                                WorkerCommand::Shutdown => break,
                             }
-                        }
-                    });
+                        });
+                    }));
+                    if outcome.is_err() {
+                        tracing::error!(
+                            worker = index,
+                            "worker thread panicked; aborting rather than serving degraded"
+                        );
+                        std::process::abort();
+                    }
                 })?;
+            match handle_rx.recv_timeout(std::time::Duration::from_secs(10)) {
+                Ok(rt_handle) => runtime_handles.push(rt_handle),
+                Err(_) => {
+                    return Err(io::Error::other(format!(
+                        "worker {index} failed to start its runtime (see logs)"
+                    )));
+                }
+            }
             senders.push(tx);
             handles.push(handle);
         }
-        Ok(Self { senders, handles })
+        Ok(Self {
+            senders,
+            handles,
+            runtime_handles,
+        })
     }
 
     pub fn worker_count(&self) -> usize {
         self.senders.len()
+    }
+
+    /// The workers' tokio runtime handles, in worker order — pass to
+    /// `ImposterManager::with_accept_runtimes` (via `ServerBuilder::accept_runtimes`) so
+    /// imposter accept loops fan out across the workers (issue #745).
+    #[must_use]
+    pub fn handles(&self) -> Vec<tokio::runtime::Handle> {
+        self.runtime_handles.clone()
     }
 
     /// Ping every worker and collect the indices that answered — the liveness handshake the
@@ -422,6 +471,31 @@ mod tests {
         let mut alive = control.block_on(set.ping_all());
         alive.sort_unstable();
         assert_eq!(alive, vec![1, 2], "exactly the live workers answer");
+        set.shutdown();
+    }
+
+    // Issue #745: the exported runtime handles are the fan-out seam — a task spawned through
+    // handle[i] must execute on worker i's thread (proving the handle targets that worker's
+    // runtime, not some ambient one).
+    #[test]
+    fn exported_handles_run_tasks_on_their_worker_threads() {
+        let set = WorkerSet::spawn(2, false).expect("spawn worker set");
+        let handles = set.handles();
+        assert_eq!(handles.len(), 2);
+        let control = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("control runtime");
+        for (i, handle) in handles.iter().enumerate() {
+            let name = control
+                .block_on(handle.spawn(async { std::thread::current().name().map(str::to_string) }))
+                .expect("task joins");
+            assert_eq!(
+                name.as_deref(),
+                Some(format!("rift-worker-{i}").as_str()),
+                "task must run on its worker's thread"
+            );
+        }
         set.shutdown();
     }
 

@@ -311,13 +311,28 @@ pub enum ScriptAction {
 pub struct ServerBuilder {
     cli: Cli,
     manager: Option<Arc<ImposterManager>>,
+    accept_runtimes: Vec<tokio::runtime::Handle>,
 }
 
 impl ServerBuilder {
     /// Everything the binary derives from the CLI today.
     #[must_use]
     pub fn from_cli(cli: Cli) -> Self {
-        Self { cli, manager: None }
+        Self {
+            cli,
+            manager: None,
+            accept_runtimes: Vec::new(),
+        }
+    }
+
+    /// Fan imposter accept loops out across per-core worker runtimes (RFC-712, issue #745).
+    /// Applies to the internally-constructed manager only; a manager injected via
+    /// [`Self::manager`] carries its own topology (`ImposterManager::with_accept_runtimes`).
+    /// An empty vec keeps the default single-listener topology.
+    #[must_use]
+    pub fn accept_runtimes(mut self, runtimes: Vec<tokio::runtime::Handle>) -> Self {
+        self.accept_runtimes = runtimes;
+        self
     }
 
     /// Inject a pre-built manager (skipping internal construction, including `--datadir`
@@ -362,7 +377,8 @@ impl ServerBuilder {
                 };
                 Arc::new(
                     ImposterManager::with_datadir(cli.datadir.clone())
-                        .with_tls_defaults(tls_defaults),
+                        .with_tls_defaults(tls_defaults)
+                        .with_accept_runtimes(self.accept_runtimes),
                 )
             }
         };

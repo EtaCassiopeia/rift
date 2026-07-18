@@ -194,9 +194,8 @@ fn run_mountebank_mode(cli: Cli) -> Result<(), anyhow::Error> {
         }
         runtime::RuntimeTopology::PerCore { workers } => {
             // Control plane: admin API, metrics, savefile machinery, and imposter mutations
-            // stay on one small multi-thread runtime; the workers exist for imposter accept
-            // loops, whose Bind/Unbind fan-out arrives with issue #745. Until then the worker
-            // set is topology plumbing only — verified live via the Ping handshake below.
+            // stay on one small multi-thread runtime; imposter accept loops fan out across
+            // the workers (issue #745), verified live via the Ping handshake below.
             let control = tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(2)
                 .enable_all()
@@ -212,7 +211,14 @@ fn run_mountebank_mode(cli: Cli) -> Result<(), anyhow::Error> {
                 ));
             }
             info!("Per-core workers up: {}", alive.len());
-            let result = control.block_on(ServerBuilder::from_cli(cli).run());
+            // Imposter accept loops fan out across the workers (issue #745): the builder
+            // threads the runtime handles into the manager, which binds one SO_REUSEPORT
+            // listener per worker per imposter port.
+            let result = control.block_on(
+                ServerBuilder::from_cli(cli)
+                    .accept_runtimes(workers.handles())
+                    .run(),
+            );
             workers.shutdown();
             result
         }

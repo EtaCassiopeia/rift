@@ -13,6 +13,16 @@ record.
 
 ### Added
 
+- **Per-core topology now serves imposter traffic (experimental, RFC-712).** Under
+  `--runtime per-core[=N]` every imposter port binds one SO_REUSEPORT listener per worker
+  runtime and each accept loop runs pinned to its worker; the kernel spreads connections by
+  4-tuple hash. All listeners for a port share one imposter, one connection tracker, one
+  shutdown broadcast, and one backpressure semaphore — so delete/drain semantics and the
+  global `RIFT_MAX_CONNECTIONS` cap are identical in both topologies, and creates are
+  all-or-nothing (a port is never half-bound). Embedders get the same seam via
+  `ServerBuilder::accept_runtimes` / `ImposterManager::with_accept_runtimes`. The default
+  work-stealing topology is unchanged. (#745)
+
 - **Opt-in per-core runtime topology (experimental, RFC-712).** `--runtime per-core[=N]` (or
   `RIFT_RUNTIME`) boots N single-threaded worker runtimes behind per-worker command channels,
   with the control plane (admin API, metrics, mutations) on a small multi-thread runtime, and

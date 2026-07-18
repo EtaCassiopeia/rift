@@ -243,6 +243,11 @@ pub struct ImposterManager {
     request_journal: Option<Arc<dyn RequestJournal>>,
     /// Pluggable proxy-recording backend (issue #315); None = per-imposter LocalProxyStore.
     proxy_store: Option<Arc<dyn ProxyRecordingStore>>,
+    /// Per-core accept runtimes (RFC-712, issue #745). When set, every imposter port binds one
+    /// SO_REUSEPORT listener per runtime and each accept loop runs pinned to its runtime; the
+    /// kernel spreads connections across them by 4-tuple hash. `None` (the default) keeps
+    /// today's single listener on the ambient runtime.
+    accept_runtimes: Option<Arc<Vec<tokio::runtime::Handle>>>,
     /// Upper bound on how long `delete` waits for a torn-down imposter's in-flight connections to
     /// drain before returning anyway with a warning (issue #596). Never configurable at runtime;
     /// overridable only in tests via [`Self::with_conn_drain`].
@@ -278,9 +283,24 @@ impl ImposterManager {
             sequencer: None,
             request_journal: None,
             proxy_store: None,
+            accept_runtimes: None,
             conn_drain: DEFAULT_CONN_DRAIN,
             event_bus: Arc::new(super::events::AdminEventBus::new()),
         }
+    }
+
+    /// Fan imposter accept loops out across per-core worker runtimes (RFC-712, issue #745):
+    /// one SO_REUSEPORT listener per runtime per port. An empty vec means "no fan-out" and
+    /// keeps the default single-listener topology, so callers can pass a possibly-empty set
+    /// without branching.
+    #[must_use]
+    pub fn with_accept_runtimes(mut self, runtimes: Vec<tokio::runtime::Handle>) -> Self {
+        self.accept_runtimes = if runtimes.is_empty() {
+            None
+        } else {
+            Some(Arc::new(runtimes))
+        };
+        self
     }
 
     /// Override the post-delete connection-drain bound (issue #596). Test-only: production always
@@ -471,7 +491,9 @@ impl ImposterManager {
             None
         };
 
-        let bind_host: &str = config.host.as_deref().unwrap_or("0.0.0.0");
+        // Owned (not borrowed from `config`): the per-core fan-out (#745) rebinds listeners
+        // after `config` has moved into the imposter.
+        let bind_host: String = config.host.clone().unwrap_or_else(|| "0.0.0.0".to_string());
         // Determine port - either from config or auto-assign
         let (port, listener) = match config.port {
             Some(p) if p != 0 => {
@@ -481,7 +503,7 @@ impl ImposterManager {
                 }
                 // Bind with SO_REUSEADDR/REUSEPORT so a hot-reload (#197) can re-bind the same port
                 // immediately after the previous imposter's listener is torn down.
-                let addr = (bind_host, p)
+                let addr = (bind_host.as_str(), p)
                     .to_socket_addrs()
                     .map_err(|e| ImposterError::BindError(p, anyhow::Error::new(e)))?
                     .next()
@@ -496,7 +518,7 @@ impl ImposterManager {
             }
             _ => {
                 // Auto-assign port: find an available port starting from a base
-                self.find_available_port(bind_host).await?
+                self.find_available_port(&bind_host).await?
             }
         };
 
@@ -527,130 +549,76 @@ impl ImposterManager {
 
         let imposter = Arc::new(imposter);
 
-        // Start serving
-        let imposter_clone = Arc::clone(&imposter);
-        let conn_shutdown_tx = shutdown_tx.clone();
-        let mut shutdown_rx = shutdown_tx.subscribe();
+        // Start serving. Under per-core fan-out (RFC-712, issue #745) the port gets one
+        // SO_REUSEPORT listener per worker runtime; every loop shares this ONE imposter, its
+        // connection tracker, its shutdown broadcast, and one backpressure semaphore, so
+        // delete/drain (#596) and the global connection cap (#716) are topology-independent.
+        // All listeners are bound BEFORE any loop spawns: a bind failure just drops the
+        // already-bound listeners — a port is never half-bound (all-or-nothing create).
+        let listeners = match &self.accept_runtimes {
+            None => vec![listener],
+            Some(runtimes) => {
+                let addr = (bind_host.as_str(), port)
+                    .to_socket_addrs()
+                    .map_err(|e| ImposterError::BindError(port, anyhow::Error::new(e)))?
+                    .next()
+                    .ok_or_else(|| {
+                        ImposterError::BindError(port, anyhow::anyhow!("no socket address"))
+                    })?;
+                // The auto-assign probe binds without SO_REUSEPORT and cannot coexist with the
+                // reusable group, so the group is rebound from scratch; explicit-port creates
+                // rebind uniformly for one code path. The instant between drop and rebind is
+                // the classic rebind race — tolerated at admin rate, and #197 hot reloads
+                // already accept the same window.
+                drop(listener);
+                let mut group = Vec::with_capacity(runtimes.len());
+                for _ in 0..runtimes.len() {
+                    group.push(
+                        crate::proxy::network::create_reusable_listener(addr)
+                            .map_err(|e| ImposterError::BindError(port, anyhow::Error::new(e)))?,
+                    );
+                }
+                group
+            }
+        };
+
         let response_decorator = self.response_decorator.clone();
-        // Read socket/HTTP tuning once per listener, not per accepted connection.
+        // Read socket/HTTP tuning once per imposter, not per accepted connection.
         let socket_tuning = crate::proxy::network::SocketTuning::from_env();
         let http_tuning = crate::proxy::network::HttpTuning::from_env();
         // `None` (the default) preserves today's behavior exactly: no semaphore, no permit,
-        // accept as fast as the kernel hands connections over.
+        // accept as fast as the kernel hands connections over. Created once per imposter and
+        // shared by every listener so `RIFT_MAX_CONNECTIONS` keeps its global meaning under
+        // fan-out (#716, #745). INVARIANT: construction must stay OUTSIDE the per-listener
+        // spawn loop below — moving it inside would silently multiply the global cap by N,
+        // and no test pins this (env-injected cap tests are racy); this comment is the guard.
         let connection_semaphore = http_tuning
             .max_connections
             .map(|n| Arc::new(tokio::sync::Semaphore::new(n)));
 
-        let serve_handle = tokio::spawn(async move {
-            loop {
-                // Acquire a permit *before* accepting so a cap holds connections back in the
-                // listener backlog/kernel SYN queue rather than accepting them and then failing
-                // downstream (issue #716). Raced against shutdown (not just `select!`-dropped)
-                // because `delete_imposter_inner` awaits this task with no timeout — without the
-                // race, a cap saturated by long-lived connections would make delete hang until one
-                // freed up, instead of tearing down promptly.
-                let permit = match &connection_semaphore {
-                    Some(sem) => {
-                        let acquire = sem.clone().acquire_owned();
-                        tokio::select! {
-                            acquired = acquire => match acquired {
-                                Ok(permit) => Some(permit),
-                                // Only closes on Drop, which never happens here — but if it ever
-                                // does, stop accepting rather than panic.
-                                Err(_) => break,
-                            },
-                            _ = shutdown_rx.recv() => {
-                                info!("Imposter on port {} shutting down", port);
-                                break;
-                            }
-                        }
-                    }
-                    None => None,
-                };
-                tokio::select! {
-                    result = listener.accept() => {
-                        match result {
-                            Ok((stream, addr)) => {
-                                crate::proxy::network::apply_stream_tuning(&stream, &socket_tuning);
-                                let imposter = Arc::clone(&imposter_clone);
-                                // Each connection watches the shutdown signal so existing
-                                // keep-alive connections are gracefully closed on delete,
-                                // not just new connections (issue #207).
-                                let conn_shutdown_rx = conn_shutdown_tx.subscribe();
-                                // Per-imposter TLS acceptor is cheap to clone (Arc-backed).
-                                let tls_acceptor = tls_acceptor.clone();
-                                let decorator = response_decorator.clone();
-                                // Track the connection task so `delete` can drain it (issue #596).
-                                imposter_clone.conn_tracker.spawn(async move {
-                                    // Held for the connection's lifetime; released back to the
-                                    // semaphore when this task ends (issue #716).
-                                    let _permit = permit;
-                                    // Per-connection slot for a real transport fault (issue #239);
-                                    // armed by the handler, applied by FaultIo on the response write.
-                                    let fault_cell: FaultCell = Arc::new(Mutex::new(None));
-                                    // FaultIo sits beneath TLS so #239 connection faults still break
-                                    // an HTTPS connection.
-                                    let faulted = FaultIo::new(stream, Arc::clone(&fault_cell));
-                                    match tls_acceptor {
-                                        // Bound the TLS handshake so a stalled/half-open client
-                                        // can't pin the connection task indefinitely.
-                                        Some(acceptor) => match tokio::time::timeout(
-                                            std::time::Duration::from_secs(10),
-                                            acceptor.accept(faulted),
-                                        )
-                                        .await
-                                        {
-                                            Ok(Ok(tls)) => {
-                                                run_http1(
-                                                    TokioIo::new(tls),
-                                                    imposter,
-                                                    addr,
-                                                    fault_cell,
-                                                    conn_shutdown_rx,
-                                                    port,
-                                                    decorator,
-                                                    http_tuning,
-                                                )
-                                                .await
-                                            }
-                                            Ok(Err(e)) => {
-                                                debug!("TLS handshake failed on port {}: {}", port, e)
-                                            }
-                                            Err(_) => {
-                                                debug!("TLS handshake timed out on port {}", port)
-                                            }
-                                        },
-                                        None => {
-                                            run_http1(
-                                                TokioIo::new(faulted),
-                                                imposter,
-                                                addr,
-                                                fault_cell,
-                                                conn_shutdown_rx,
-                                                port,
-                                                decorator,
-                                                http_tuning,
-                                            )
-                                            .await
-                                        }
-                                    }
-                                });
-                            }
-                            Err(e) => {
-                                error!("Accept error on port {}: {}", port, e);
-                            }
-                        }
-                    }
-                    _ = shutdown_rx.recv() => {
-                        info!("Imposter on port {} shutting down", port);
-                        break;
-                    }
-                }
-            }
-        });
-        // Hand the accept-loop handle to the imposter so `delete` awaits the listener's teardown
-        // (issue #596). Stored post-spawn because the loop needs the `Arc`-wrapped imposter.
-        *imposter.serve_handle.lock() = Some(serve_handle);
+        let mut serve_handles = Vec::with_capacity(listeners.len());
+        for (index, listener) in listeners.into_iter().enumerate() {
+            let loop_future = Self::run_accept_loop(
+                listener,
+                Arc::clone(&imposter),
+                shutdown_tx.clone(),
+                shutdown_tx.subscribe(),
+                connection_semaphore.clone(),
+                tls_acceptor.clone(),
+                response_decorator.clone(),
+                socket_tuning,
+                http_tuning,
+                port,
+            );
+            serve_handles.push(match &self.accept_runtimes {
+                Some(runtimes) => runtimes[index].spawn(loop_future),
+                None => tokio::spawn(loop_future),
+            });
+        }
+        // Hand the accept-loop handles to the imposter so `delete` awaits every listener's
+        // teardown (issue #596). Stored post-spawn because the loops need the `Arc`-wrapped
+        // imposter.
+        *imposter.serve_handles.lock() = serve_handles;
 
         // Store imposter. `try_claim`'s internal mutex closes the same TOCTOU the old write lock
         // did between the earlier read-only check and the bind: with SO_REUSEADDR/REUSEPORT two
@@ -680,6 +648,130 @@ impl ImposterManager {
         }
 
         Ok(port)
+    }
+
+    /// One listener's accept loop, extracted verbatim from `create_imposter_inner` so the
+    /// per-core fan-out (issue #745) can run N of them. Parameters are the loop's former
+    /// captures — `imposter_clone` keeps its capture-era name precisely so the body is a
+    /// verbatim move with zero semantic drift.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_accept_loop(
+        listener: TcpListener,
+        imposter_clone: Arc<Imposter>,
+        conn_shutdown_tx: broadcast::Sender<()>,
+        mut shutdown_rx: broadcast::Receiver<()>,
+        connection_semaphore: Option<Arc<tokio::sync::Semaphore>>,
+        tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
+        response_decorator: Option<Arc<dyn ResponseDecorator>>,
+        socket_tuning: crate::proxy::network::SocketTuning,
+        http_tuning: crate::proxy::network::HttpTuning,
+        port: u16,
+    ) {
+        loop {
+            // Acquire a permit *before* accepting so a cap holds connections back in the
+            // listener backlog/kernel SYN queue rather than accepting them and then failing
+            // downstream (issue #716). Raced against shutdown (not just `select!`-dropped)
+            // because `delete_imposter_inner` awaits this task with no timeout — without the
+            // race, a cap saturated by long-lived connections would make delete hang until one
+            // freed up, instead of tearing down promptly.
+            let permit = match &connection_semaphore {
+                Some(sem) => {
+                    let acquire = sem.clone().acquire_owned();
+                    tokio::select! {
+                        acquired = acquire => match acquired {
+                            Ok(permit) => Some(permit),
+                            // Only closes on Drop, which never happens here — but if it ever
+                            // does, stop accepting rather than panic.
+                            Err(_) => break,
+                        },
+                        _ = shutdown_rx.recv() => {
+                            info!("Imposter on port {} shutting down", port);
+                            break;
+                        }
+                    }
+                }
+                None => None,
+            };
+            tokio::select! {
+                result = listener.accept() => {
+                    match result {
+                        Ok((stream, addr)) => {
+                            crate::proxy::network::apply_stream_tuning(&stream, &socket_tuning);
+                            let imposter = Arc::clone(&imposter_clone);
+                            // Each connection watches the shutdown signal so existing
+                            // keep-alive connections are gracefully closed on delete,
+                            // not just new connections (issue #207).
+                            let conn_shutdown_rx = conn_shutdown_tx.subscribe();
+                            // Per-imposter TLS acceptor is cheap to clone (Arc-backed).
+                            let tls_acceptor = tls_acceptor.clone();
+                            let decorator = response_decorator.clone();
+                            // Track the connection task so `delete` can drain it (issue #596).
+                            imposter_clone.conn_tracker.spawn(async move {
+                                // Held for the connection's lifetime; released back to the
+                                // semaphore when this task ends (issue #716).
+                                let _permit = permit;
+                                // Per-connection slot for a real transport fault (issue #239);
+                                // armed by the handler, applied by FaultIo on the response write.
+                                let fault_cell: FaultCell = Arc::new(Mutex::new(None));
+                                // FaultIo sits beneath TLS so #239 connection faults still break
+                                // an HTTPS connection.
+                                let faulted = FaultIo::new(stream, Arc::clone(&fault_cell));
+                                match tls_acceptor {
+                                    // Bound the TLS handshake so a stalled/half-open client
+                                    // can't pin the connection task indefinitely.
+                                    Some(acceptor) => match tokio::time::timeout(
+                                        std::time::Duration::from_secs(10),
+                                        acceptor.accept(faulted),
+                                    )
+                                    .await
+                                    {
+                                        Ok(Ok(tls)) => {
+                                            run_http1(
+                                                TokioIo::new(tls),
+                                                imposter,
+                                                addr,
+                                                fault_cell,
+                                                conn_shutdown_rx,
+                                                port,
+                                                decorator,
+                                                http_tuning,
+                                            )
+                                            .await
+                                        }
+                                        Ok(Err(e)) => {
+                                            debug!("TLS handshake failed on port {}: {}", port, e)
+                                        }
+                                        Err(_) => {
+                                            debug!("TLS handshake timed out on port {}", port)
+                                        }
+                                    },
+                                    None => {
+                                        run_http1(
+                                            TokioIo::new(faulted),
+                                            imposter,
+                                            addr,
+                                            fault_cell,
+                                            conn_shutdown_rx,
+                                            port,
+                                            decorator,
+                                            http_tuning,
+                                        )
+                                        .await
+                                    }
+                                }
+                            });
+                        }
+                        Err(e) => {
+                            error!("Accept error on port {}: {}", port, e);
+                        }
+                    }
+                }
+                _ = shutdown_rx.recv() => {
+                    info!("Imposter on port {} shutting down", port);
+                    break;
+                }
+            }
+        }
     }
 
     /// Bind to an available port for auto-assignment
@@ -736,12 +828,13 @@ impl ImposterManager {
         // Await the accept loop: its `select!` breaks on the signal and drops the listener, so the
         // bind is released by the time this resolves. A `JoinError` (loop task panicked) is
         // irrelevant here — we only need it stopped — but is surfaced as a warning rather than swallowed.
-        let serve_handle = imposter.serve_handle.lock().take();
-        if let Some(handle) = serve_handle
-            && let Err(e) = handle.await
-            && !e.is_cancelled()
-        {
-            warn!("imposter on port {port}: accept loop ended abnormally during delete: {e}");
+        let serve_handles: Vec<_> = std::mem::take(&mut *imposter.serve_handles.lock());
+        for handle in serve_handles {
+            if let Err(e) = handle.await
+                && !e.is_cancelled()
+            {
+                warn!("imposter on port {port}: accept loop ended abnormally during delete: {e}");
+            }
         }
         // Drain in-flight connections within a bound. Each reacts to the signal above with a hyper
         // graceful shutdown (finish the in-flight response, then close), so this is normally
@@ -3657,6 +3750,155 @@ mod tests {
             );
 
             manager.delete_all().await;
+        }
+    }
+
+    // ===== Per-core listener fan-out (RFC-712, issue #745) =====
+    mod per_core_fanout {
+        use super::*;
+
+        /// K OS threads each driving a parked current-thread runtime — the shape
+        /// `WorkerSet` (rift-http-proxy) provides in production. Handles are only useful
+        /// while a thread drives the runtime, so a bare `Runtime` object would not do.
+        struct TestRuntimes {
+            handles: Vec<tokio::runtime::Handle>,
+            stop: Vec<tokio::sync::oneshot::Sender<()>>,
+            joins: Vec<std::thread::JoinHandle<()>>,
+        }
+
+        fn test_runtimes(n: usize) -> TestRuntimes {
+            let mut handles = Vec::new();
+            let mut stop = Vec::new();
+            let mut joins = Vec::new();
+            for _ in 0..n {
+                let (handle_tx, handle_rx) = std::sync::mpsc::channel();
+                let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+                joins.push(std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("test runtime");
+                    handle_tx.send(rt.handle().clone()).expect("export handle");
+                    let _ = rt.block_on(stop_rx);
+                }));
+                handles.push(handle_rx.recv().expect("test runtime handle"));
+                stop.push(stop_tx);
+            }
+            TestRuntimes {
+                handles,
+                stop,
+                joins,
+            }
+        }
+
+        impl TestRuntimes {
+            fn shutdown(self) {
+                for s in self.stop {
+                    let _ = s.send(());
+                }
+                for j in self.joins {
+                    let _ = j.join();
+                }
+            }
+        }
+
+        // AC (#745): under per-core fan-out, a create spawns one accept loop per runtime and
+        // the port serves requests.
+        #[tokio::test]
+        async fn fanout_spawns_one_accept_loop_per_runtime_and_serves() {
+            let rts = test_runtimes(3);
+            let manager = ImposterManager::new().with_accept_runtimes(rts.handles.clone());
+            manager
+                .create_imposter(imposter_cfg(json!({
+                    "protocol": "http", "port": 19601, "stubs": [stub_json("fanout-ok")]
+                })))
+                .await
+                .expect("create under per-core fan-out");
+
+            let imposter = manager.imposters.get(19601).expect("imposter registered");
+            assert_eq!(
+                imposter.serve_handles.lock().len(),
+                3,
+                "one accept loop per worker runtime"
+            );
+
+            for _ in 0..8 {
+                let body = reqwest::get("http://127.0.0.1:19601/fanout-ok")
+                    .await
+                    .expect("request")
+                    .text()
+                    .await
+                    .expect("body");
+                assert!(body.contains("fanout-ok"), "served by the fan-out: {body}");
+            }
+
+            manager.delete_imposter(19601).await.expect("delete");
+            rts.shutdown();
+        }
+
+        // AC (#745): delete closes EVERY listener in the group and drains. A plain
+        // (non-SO_REUSEPORT) bind succeeds only when no group member still holds the port —
+        // the strongest cross-platform proof that all N listeners are gone.
+        #[tokio::test]
+        async fn delete_closes_every_listener_and_frees_the_port() {
+            let rts = test_runtimes(3);
+            let manager = ImposterManager::new().with_accept_runtimes(rts.handles.clone());
+            manager
+                .create_imposter(imposter_cfg(json!({
+                    "protocol": "http", "port": 19602, "stubs": [stub_json("ok")]
+                })))
+                .await
+                .expect("create");
+            let _ = reqwest::get("http://127.0.0.1:19602/x")
+                .await
+                .expect("request");
+
+            manager.delete_imposter(19602).await.expect("delete");
+
+            let plain = tokio::net::TcpListener::bind(("127.0.0.1", 19602)).await;
+            assert!(
+                plain.is_ok(),
+                "a plain bind must succeed after delete — a leftover fan-out listener would hold the port: {:?}",
+                plain.err()
+            );
+            rts.shutdown();
+        }
+
+        // AC (#745): create is all-or-nothing — a bind failure leaves no claim and no stray
+        // listeners, and the port is creatable once the conflict clears.
+        #[tokio::test]
+        async fn create_is_all_or_nothing_on_bind_failure() {
+            let rts = test_runtimes(2);
+            let manager = ImposterManager::new().with_accept_runtimes(rts.handles.clone());
+            // A plain listener occupies the port: the reusable group cannot join it.
+            let blocker = tokio::net::TcpListener::bind(("0.0.0.0", 19603))
+                .await
+                .expect("blocker bind");
+
+            let err = manager
+                .create_imposter(imposter_cfg(json!({
+                    "protocol": "http", "port": 19603, "stubs": [stub_json("ok")]
+                })))
+                .await
+                .expect_err("create must fail while the port is plainly occupied");
+            assert!(
+                matches!(err, ImposterError::BindError(19603, _)),
+                "bind failure surfaces as BindError, got {err:?}"
+            );
+            assert!(
+                !manager.imposters.contains(19603),
+                "a failed create must not leave a port claim behind"
+            );
+
+            drop(blocker);
+            manager
+                .create_imposter(imposter_cfg(json!({
+                    "protocol": "http", "port": 19603, "stubs": [stub_json("ok")]
+                })))
+                .await
+                .expect("create succeeds once the conflict clears");
+            manager.delete_imposter(19603).await.expect("delete");
+            rts.shutdown();
         }
     }
 }

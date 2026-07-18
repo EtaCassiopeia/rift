@@ -147,11 +147,14 @@ pub struct Imposter {
     pub created_at: chrono::DateTime<chrono::Utc>,
     /// Shutdown signal sender (for future graceful shutdown)
     pub shutdown_tx: Option<broadcast::Sender<()>>,
-    /// Accept-loop task handle (issue #596). The manager stores it here after spawning the loop so
-    /// `delete` can `await` it — guaranteeing the listener socket is dropped (bind released) before
-    /// delete returns, instead of the old fire-and-forget teardown. `Mutex` because it is set after
-    /// the imposter is already `Arc`-wrapped, and taken (to be awaited) on teardown.
-    pub(crate) serve_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Accept-loop task handles (issue #596). The manager stores them here after spawning the
+    /// loop(s) so `delete` can `await` them — guaranteeing every listener socket is dropped
+    /// (bind released) before delete returns, instead of the old fire-and-forget teardown.
+    /// One handle in the default topology; N under per-core fan-out (RFC-712, issue #745), all
+    /// stopped by the same shutdown broadcast and drained through the one shared
+    /// `conn_tracker`. `Mutex` because they are set after the imposter is already `Arc`-wrapped,
+    /// and taken (to be awaited) on teardown.
+    pub(crate) serve_handles: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     /// Tracks this generation's live per-connection tasks (issue #596) so `delete` can drain them
     /// (each already reacts to `shutdown_tx` with a hyper graceful shutdown, #207) within a bound.
     pub(crate) conn_tracker: tokio_util::task::TaskTracker,
@@ -228,7 +231,7 @@ impl Imposter {
             enabled: AtomicBool::new(true),
             created_at: chrono::Utc::now(),
             shutdown_tx: None,
-            serve_handle: Mutex::new(None),
+            serve_handles: Mutex::new(Vec::new()),
             conn_tracker: tokio_util::task::TaskTracker::new(),
             flow_store,
             sequencer,
