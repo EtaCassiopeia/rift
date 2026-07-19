@@ -43,7 +43,7 @@ provisioning that trust (it emits a CA cert and a ready-to-use truststore) — s
 
 The intercept listener is an opt-in, embedder-facing API — nothing runs until you start it, so the
 default imposter-on-a-port model is unchanged. A minimal, complete, runnable example lives in
-[`crates/rift-http-proxy/tests/intercept_config_cdn_example.rs`](https://github.com/EtaCassiopeia/rift/blob/master/crates/rift-http-proxy/tests/intercept_config_cdn_example.rs)
+[`crates/rift-http-proxy/tests/intercept_config_cdn_example.rs`](https://github.com/achird-labs/rift/blob/master/crates/rift-http-proxy/tests/intercept_config_cdn_example.rs)
 (run it with `cargo test -p rift-http-proxy --test intercept_config_cdn_example`). In outline:
 
 ```rust

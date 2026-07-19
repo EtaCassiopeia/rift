@@ -473,7 +473,7 @@ jobs:
           #### Quick Install (Unix)
           ```bash
           # Download and extract (replace TARGET with your platform)
-          curl -LO https://github.com/EtaCassiopeia/rift/releases/download/${{ steps.version.outputs.VERSION }}/rift-${{ steps.version.outputs.VERSION }}-x86_64-unknown-linux-gnu.tar.gz
+          curl -LO https://github.com/achird-labs/rift/releases/download/${{ steps.version.outputs.VERSION }}/rift-${{ steps.version.outputs.VERSION }}-x86_64-unknown-linux-gnu.tar.gz
           tar -xzf rift-${{ steps.version.outputs.VERSION }}-x86_64-unknown-linux-gnu.tar.gz
           sudo mv rift-${{ steps.version.outputs.VERSION }}-x86_64-unknown-linux-gnu/bin/* /usr/local/bin/
           ```
@@ -545,8 +545,8 @@ jobs:
 
           ### Documentation
 
-          - [README](https://github.com/EtaCassiopeia/rift#readme)
-          - [Mountebank Compatibility](https://github.com/EtaCassiopeia/rift/blob/main/docs/mountebank-compatibility.md)
+          - [README](https://github.com/achird-labs/rift#readme)
+          - [Mountebank Compatibility](https://github.com/achird-labs/rift/blob/main/docs/mountebank-compatibility.md)
 
           EOF
 

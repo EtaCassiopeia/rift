@@ -93,6 +93,22 @@ Status codes can also be specified as strings for compatibility with some tools:
 }
 ```
 
+**Non-string header values are accepted and coerced.** JSON numbers and booleans are converted to
+their string form, matching Mountebank, so a config like this is valid rather than a `400`:
+
+```json
+{ "is": { "headers": { "Content-Length": 124, "X-Cache-Hit": true } } }
+```
+
+sends `Content-Length: 124` and `X-Cache-Hit: true`. Arrays may mix types the same way; `null`,
+objects and nested arrays are still rejected.
+
+**Automatic `Content-Type`.** When a response has a **JSON** body (an object or array, not a
+string) and the stub sets **no** `Content-Type` header, Rift adds `Content-Type: application/json`.
+The check is case-insensitive — configuring `content-type`, `CONTENT-TYPE`, or any other casing
+suppresses the default rather than producing a duplicate header. A string body never gets an
+automatic `Content-Type`.
+
 ### Body Types
 
 **String body:**

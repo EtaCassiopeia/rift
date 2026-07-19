@@ -439,7 +439,7 @@ This automatically adds CORS headers to responses and handles preflight OPTIONS 
 
 ## Example Files
 
-Complete working examples are available in the [`examples/`](https://github.com/EtaCassiopeia/rift/tree/master/examples) directory:
+Complete working examples are available in the [`examples/`](https://github.com/achird-labs/rift/tree/master/examples) directory:
 
 | File | Description |
 |:-----|:------------|

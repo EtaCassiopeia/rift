@@ -1,6 +1,6 @@
 # Rift vs Mountebank Performance Benchmark
 
-Compares [Rift](https://github.com/EtaCassiopeia/rift) (Rust) against
+Compares [Rift](https://github.com/achird-labs/rift) (Rust) against
 [Mountebank](http://www.mbtest.org/) (Node.js) on byte-identical imposter
 configs. Two harnesses, both native processes (no Docker):
 

@@ -12,7 +12,7 @@ Ready-to-use examples for common use cases.
 > **Runnable demos.** Beyond the snippets below, the repository ships a set of `docker-compose`
 > demos — Mountebank mode, HTTPS/TLS, fault injection, scripting engines, and retry-proxy — each with
 > a working imposter config you can bring up in one command. See
-> [`docs/demo/`](https://github.com/EtaCassiopeia/rift/tree/master/docs/demo) (start with its
+> [`docs/demo/`](https://github.com/achird-labs/rift/tree/master/docs/demo) (start with its
 > `README.md`).
 
 ---

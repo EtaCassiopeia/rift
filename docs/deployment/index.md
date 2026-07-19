@@ -54,7 +54,7 @@ Standalone deployment without containers:
 
 ```bash
 # Download
-curl -L https://github.com/EtaCassiopeia/rift/releases/latest/download/rift-http-proxy-linux-x86_64 -o rift
+curl -L https://github.com/achird-labs/rift/releases/latest/download/rift-http-proxy-linux-x86_64 -o rift
 
 # Run
 chmod +x rift

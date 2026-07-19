@@ -56,6 +56,10 @@ Get API information and links.
 
 List all imposters.
 
+Imposters are returned in **ascending port order**. This ordering is guaranteed and stable across
+calls, so a client may rely on it — for example when diffing two snapshots of the server state.
+Earlier releases followed an internal hash map order, which could vary between calls (#713).
+
 **Query Parameters:**
 - `replayable` (boolean) - Include full stub details for export
 

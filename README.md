@@ -2,13 +2,13 @@
 
 **High-performance Mountebank-compatible HTTP/HTTPS mock server written in Rust**
 
-[![Status](https://img.shields.io/badge/status-beta-blue)](https://github.com/EtaCassiopeia/rift)
+[![Status](https://img.shields.io/badge/status-beta-blue)](https://github.com/achird-labs/rift)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-nightly-orange)](https://www.rust-lang.org/)
 
 Rift is a high-performance, [Mountebank](https://www.mbtest.dev/)-compatible mock server that delivers **~20–150x faster throughput on typical workloads, and up to ~450x on large regex predicate sets**. Use your existing Mountebank configurations and enjoy faster test execution.
 
-**[Documentation](https://etacassiopeia.github.io/rift/)** | **[Quick Start](#quick-start)** | **[Examples](examples/)**
+**[Documentation](https://achird-labs.github.io/rift/)** | **[Quick Start](#quick-start)** | **[Examples](examples/)**
 
 ---
 
@@ -107,11 +107,11 @@ cargo install rift-http-proxy
 
 ### Download Binary
 
-Download pre-built binaries from [GitHub Releases](https://github.com/EtaCassiopeia/rift/releases):
+Download pre-built binaries from [GitHub Releases](https://github.com/achird-labs/rift/releases):
 
 ```bash
 # Example for Linux x86_64
-curl -LO https://github.com/EtaCassiopeia/rift/releases/latest/download/rift-vX.X.X-x86_64-unknown-linux-gnu.tar.gz
+curl -LO https://github.com/achird-labs/rift/releases/latest/download/rift-vX.X.X-x86_64-unknown-linux-gnu.tar.gz
 tar -xzf rift-vX.X.X-x86_64-unknown-linux-gnu.tar.gz
 sudo mv rift-vX.X.X-x86_64-unknown-linux-gnu/bin/* /usr/local/bin/
 ```
@@ -124,7 +124,7 @@ Available platforms:
 ### Build from Source
 
 ```bash
-git clone https://github.com/EtaCassiopeia/rift.git
+git clone https://github.com/achird-labs/rift.git
 cd rift
 cargo build --release
 ./target/release/rift-http-proxy
@@ -170,45 +170,45 @@ try (Rift rift = Rift.embedded()) {                  // or Rift.connect(uri) / R
 }
 ```
 
-See the [rift-java docs](https://etacassiopeia.github.io/rift-java/) for the full feature surface.
+See the [rift-java docs](https://achird-labs.github.io/rift-java/) for the full feature surface.
 
 ---
 
 ## Documentation
 
 ### Getting Started
-- [Installation](https://etacassiopeia.github.io/rift/getting-started/) - Docker, binary, build from source
-- [Quick Start](https://etacassiopeia.github.io/rift/getting-started/quickstart) - Create your first imposter
-- [Node.js Integration](https://etacassiopeia.github.io/rift/getting-started/nodejs/) - npm package for Node.js
+- [Installation](https://achird-labs.github.io/rift/getting-started/) - Docker, binary, build from source
+- [Quick Start](https://achird-labs.github.io/rift/getting-started/quickstart) - Create your first imposter
+- [Node.js Integration](https://achird-labs.github.io/rift/getting-started/nodejs/) - npm package for Node.js
 - [Java / JVM SDK](https://github.com/EtaCassiopeia/rift-java) - rift-java for JUnit 5, Spring, and Testcontainers
-- [Migration Guide](https://etacassiopeia.github.io/rift/getting-started/migration) - Using Rift with Mountebank configs
+- [Migration Guide](https://achird-labs.github.io/rift/getting-started/migration) - Using Rift with Mountebank configs
 
 ### Mountebank Compatibility
-- [Imposters](https://etacassiopeia.github.io/rift/mountebank/imposters) - Mock server configuration
-- [Predicates](https://etacassiopeia.github.io/rift/mountebank/predicates) - Request matching
-- [Responses](https://etacassiopeia.github.io/rift/mountebank/responses) - Response configuration
-- [Behaviors](https://etacassiopeia.github.io/rift/mountebank/behaviors) - wait, decorate, copy
-- [Proxy Mode](https://etacassiopeia.github.io/rift/mountebank/proxy) - Record and replay
+- [Imposters](https://achird-labs.github.io/rift/mountebank/imposters) - Mock server configuration
+- [Predicates](https://achird-labs.github.io/rift/mountebank/predicates) - Request matching
+- [Responses](https://achird-labs.github.io/rift/mountebank/responses) - Response configuration
+- [Behaviors](https://achird-labs.github.io/rift/mountebank/behaviors) - wait, decorate, copy
+- [Proxy Mode](https://achird-labs.github.io/rift/mountebank/proxy) - Record and replay
 
 ### Configuration
-- [Mountebank Format](https://etacassiopeia.github.io/rift/configuration/mountebank) - JSON configuration
-- [Native Rift Format](https://etacassiopeia.github.io/rift/configuration/native) - YAML for advanced features
-- [CLI Reference](https://etacassiopeia.github.io/rift/configuration/cli) - Command-line options
+- [Mountebank Format](https://achird-labs.github.io/rift/configuration/mountebank) - JSON configuration
+- [Native Rift Format](https://achird-labs.github.io/rift/configuration/native) - YAML for advanced features
+- [CLI Reference](https://achird-labs.github.io/rift/configuration/cli) - Command-line options
 
 ### Features
-- [Fault Injection](https://etacassiopeia.github.io/rift/features/fault-injection) - Chaos engineering
-- [Scripting](https://etacassiopeia.github.io/rift/features/scripting) - Rhai, JavaScript
-- [TLS/HTTPS](https://etacassiopeia.github.io/rift/features/tls) - Secure connections
-- [Metrics](https://etacassiopeia.github.io/rift/features/metrics) - Prometheus integration
-- [TUI](https://etacassiopeia.github.io/rift/features/tui) - Interactive terminal interface
+- [Fault Injection](https://achird-labs.github.io/rift/features/fault-injection) - Chaos engineering
+- [Scripting](https://achird-labs.github.io/rift/features/scripting) - Rhai, JavaScript
+- [TLS/HTTPS](https://achird-labs.github.io/rift/features/tls) - Secure connections
+- [Metrics](https://achird-labs.github.io/rift/features/metrics) - Prometheus integration
+- [TUI](https://achird-labs.github.io/rift/features/tui) - Interactive terminal interface
 
 ### Deployment
-- [Docker](https://etacassiopeia.github.io/rift/deployment/docker) - Container deployment
-- [Kubernetes](https://etacassiopeia.github.io/rift/deployment/kubernetes) - K8s patterns
+- [Docker](https://achird-labs.github.io/rift/deployment/docker) - Container deployment
+- [Kubernetes](https://achird-labs.github.io/rift/deployment/kubernetes) - K8s patterns
 
 ### Reference
-- [REST API](https://etacassiopeia.github.io/rift/api/) - Admin API reference
-- [Performance](https://etacassiopeia.github.io/rift/performance/) - Benchmarks
+- [REST API](https://achird-labs.github.io/rift/api/) - Admin API reference
+- [Performance](https://achird-labs.github.io/rift/performance/) - Benchmarks
 
 ---
 

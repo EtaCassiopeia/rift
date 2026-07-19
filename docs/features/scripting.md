@@ -521,6 +521,9 @@ predicate `inject`, and the `decorate` behavior — all of which run off the asy
   `predicate injection timeout`; a `_rift.script` → `504` with `x-rift-script-error`; a `decorate`
   → the undecorated response (`200`) with `x-rift-decorate-error` (or `504` under
   `strictBehaviors`). All four also carry `x-rift-script-timeout: true`.
+  A [debug-mode](debug-mode.md) matching run (`X-Rift-Debug`) that misses the same deadline is the
+  fifth case: `504` with `x-rift-script-timeout: true`. It answered `500` in earlier releases —
+  a deadline miss there is now retry-worthy like every other script timeout (#695).
 - **Amortized JavaScript startup.** The Mountebank hooks reuse a per-worker-thread Boa context and
   a parsed-script cache keyed by source content, so steady-state execution skips both JS realm
   construction and re-parsing. Like Mountebank itself — which evaluates every injection in one

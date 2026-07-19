@@ -57,8 +57,8 @@ COPY --chmod=755 rift-http-proxy /usr/local/bin/rift
 LABEL \
   org.opencontainers.image.title="Rift HTTP Proxy (static)" \
   org.opencontainers.image.description="Mountebank-compatible HTTP chaos engineering proxy — statically linked, no OS packages." \
-  org.opencontainers.image.url="https://github.com/EtaCassiopeia/rift" \
-  org.opencontainers.image.source="https://github.com/EtaCassiopeia/rift" \
+  org.opencontainers.image.url="https://github.com/achird-labs/rift" \
+  org.opencontainers.image.source="https://github.com/achird-labs/rift" \
   org.opencontainers.image.version="$VERSION" \
   org.opencontainers.image.revision="$VCS_REF" \
   org.opencontainers.image.created="$BUILD_DATE" \

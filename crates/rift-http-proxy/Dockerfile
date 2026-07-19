@@ -87,8 +87,8 @@ ARG FEATURES=javascript,redis-backend
 LABEL \
   org.opencontainers.image.title="Rift HTTP Proxy" \
   org.opencontainers.image.description="Mountebank-compatible HTTP chaos engineering proxy with Rhai/JavaScript scripting and Redis state backend." \
-  org.opencontainers.image.url="https://github.com/EtaCassiopeia/rift" \
-  org.opencontainers.image.source="https://github.com/EtaCassiopeia/rift" \
+  org.opencontainers.image.url="https://github.com/achird-labs/rift" \
+  org.opencontainers.image.source="https://github.com/achird-labs/rift" \
   org.opencontainers.image.version="$VERSION" \
   org.opencontainers.image.revision="$VCS_REF" \
   org.opencontainers.image.created="$BUILD_DATE" \

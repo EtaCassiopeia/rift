@@ -45,7 +45,10 @@ the source, the source wins — please file an issue.
 | `rift-mock-core` | The engine library — no CLI, no HTTP server wiring. | `ImposterManager` and the SPI traits (`FlowStoreProvider`, `ResponseSequencer`, `RequestJournal`, `ProxyRecordingStore`, `ImposterEventListener`, `ResponseDecorator`), behaviors, predicates, scripting. |
 | `rift-http-proxy` | The server crate — builds the `rift` binary and hosts the admin/metrics HTTP layer. | `ServerBuilder`, `RunningServer`, `AdminApiServer`, `bind_metrics_server`, the single-port gateway, `install_default_crypto_provider()`. |
 | `rift-ffi` | The C-ABI shared library (`cdylib`) plus an `rlib` for in-crate tests. | The `extern "C"` functions (`rift_start`, `rift_serve_admin`, …) and the cbindgen header. |
-| `packages/rift-node` | A Node.js consumer of the above (prebuilt binaries). | Not a Rust SPI crate — an example downstream consumer. |
+
+> The Node.js package used to live here as `packages/rift-node`. It now has its own repository —
+> [`EtaCassiopeia/rift-node`](https://github.com/EtaCassiopeia/rift-node) — which owns and publishes
+> the npm package; this repository no longer builds or publishes it.
 
 ### Cargo features
 
@@ -56,6 +59,14 @@ The engines and allocator are feature-gated. Relevant features:
 | `redis-backend` | on | on | Redis flow-store backend |
 | `javascript` | on | on | JavaScript scripting engine (Boa) |
 | `mimalloc` | on | **never forwarded** | mimalloc global allocator (a `cdylib` must not impose an allocator on its host, so `rift-ffi` deliberately never enables it) |
+| `jemalloc` | off | n/a | Opt-in alternative allocator, kept for the #717 bake-off. If both `mimalloc` and `jemalloc` are enabled (as in CI's `--all-features` lanes), **mimalloc wins** — this is resolved by `cfg` precedence, not an error. mimalloc remains the shipped default. |
+| `quamina-matching` | **not forwarded** (see note) | **not forwarded** (see note) | Quamina-backed body-field candidate dimension. Defined on `rift-mock-core`, where it is on by default. Off ⇒ the dimension compiles to a no-op that never prunes and every body predicate is decided by the full Stage-2 evaluation — **matching results are identical either way**, only the prefilter speed differs. |
+
+> **`quamina-matching` does not currently reach the server binary or the C-ABI.** Both
+> `rift-http-proxy` and `rift-ffi` depend on `rift-mock-core` with `default-features = false` and do
+> not forward this feature, so it is active only when you depend on `rift-mock-core` directly with
+> its defaults. Tracked in [#777](https://github.com/achird-labs/rift/issues/777). Because the
+> dimension is a pure prefilter, this affects throughput only — never which stub matches.
 
 ---
 
