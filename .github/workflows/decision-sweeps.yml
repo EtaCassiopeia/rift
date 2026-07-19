@@ -75,10 +75,14 @@ jobs:
           for rep in $(seq 1 ${{ inputs.reps }}); do
             for alloc in mimalloc jemalloc system; do
               echo "===== allocator=$alloc rep=$rep ====="
-              python3 scripts/bench_direct.py --run-all --allocator "$alloc" \
+              python3 scripts/bench_direct.py --run-all --allocator "$alloc" --rep "$rep" \
                 --sweep-connections 50,200 --duration "${{ inputs.duration }}" --warmup 2s
-              cp "results/direct_rift_${alloc}.csv" "results/direct_rift_${alloc}_rep${rep}.csv"
             done
+          done
+          # Medians with per-rep spread, so the decision artefact is explicitly an aggregate
+          # rather than whichever rep happened to run last (#773).
+          for alloc in mimalloc jemalloc system; do
+            python3 scripts/bench_direct.py --aggregate-reps "_${alloc}"
           done
       - uses: actions/upload-artifact@v4
         if: always()
@@ -127,13 +131,18 @@ jobs:
             for n in "${BUDGETS[@]}"; do
               for rt in work-stealing per-core; do
                 echo "===== runtime=$rt cores=${n:-all} rep=$rep ====="
-                python3 scripts/bench_direct.py --run-all --runtime "$rt" \
+                python3 scripts/bench_direct.py --run-all --runtime "$rt" --rep "$rep" \
                   ${n:+--server-cores "$n"} \
                   --rift-bin ../../target/release/rift-http-proxy \
                   --sweep-connections "${{ inputs.connections }}" --duration "${{ inputs.duration }}" --warmup 2s
-                cp "results/direct_rift_${rt}${n:+_cores$n}.csv" \
-                   "results/direct_rift_${rt}${n:+_cores$n}_rep${rep}.csv"
               done
+            done
+          done
+          # Medians with per-rep spread per variant. Reading a single rep as if it were the
+          # aggregate is what produced the retracted #746 headline number (#773).
+          for n in "${BUDGETS[@]}"; do
+            for rt in work-stealing per-core; do
+              python3 scripts/bench_direct.py --aggregate-reps "_${rt}${n:+_cores$n}"
             done
           done
       - name: Per-worker accept counts (skew evidence, single spot-check)

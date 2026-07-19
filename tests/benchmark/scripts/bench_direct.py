@@ -20,7 +20,7 @@ Run everything (launches + stops both engines, writes the report):
 Must be run OUTSIDE the CLI sandbox (via the sidecar) because `oha` needs
 macOS keychain access to initialise TLS even for plain-HTTP targets.
 """
-import argparse, csv, json, subprocess, sys, threading, time, urllib.request, urllib.error, os, signal, shutil
+import argparse, csv, glob, json, re, subprocess, sys, threading, time, urllib.request, urllib.error, os, signal, shutil
 
 RESULTS_DIR = os.path.join(os.path.dirname(__file__), "..", "results")
 
@@ -509,8 +509,7 @@ def bench(engine, admin_port, offset, duration, warmup, conn_list, rate=None, re
     finally:
         if sampler is not None:
             sampler.stop()
-    csv_path = os.path.join(RESULTS_DIR, f"direct_{engine}{csv_suffix}.csv")
-    write_rift_csv(csv_path, rows)
+    csv_path = write_results_csv(engine, csv_suffix, rows)
     print(f"[{engine}] wrote {csv_path}")
 
 # ---- engine orchestration ----
@@ -750,21 +749,169 @@ def resolve_cpu_split(server_cpus):
     except ValueError as e:
         raise SystemExit(str(e))
 
-def result_suffix(allocator, runtime_mode, server_cpus=None):
-    """Allocator, runtime and core-count dimensions compose into one artefact suffix so no
-    combination overwrites another's CSV/report (#717, #746)."""
+def result_suffix(allocator, runtime_mode, server_cpus=None, rep=None):
+    """Allocator, runtime, core-count and repetition dimensions compose into one artefact suffix so
+    no combination overwrites another's CSV/report (#717, #746, #773).
+
+    `rep` is what stops a repeated run from being self-destructive. It used to be a *caller*
+    concept — the sweep workflow looped and copied the file afterwards — so every rep overwrote the
+    unsuffixed name and the artefact bundle ended up with a canonical-looking file holding one
+    unreplicated sample (#773). Threading it through here means a repped run never writes that
+    file at all."""
     suffix = f"_{allocator}" if allocator else ""
     if runtime_mode:
         suffix += f"_{runtime_mode}"
     if server_cpus:
         suffix += f"_cores{server_cpus}"
+    if rep is not None:
+        suffix += f"_rep{rep}"
     return suffix
 
+# Numeric CSV columns an aggregate takes the median of. `rps` additionally carries a spread so a
+# degraded rep is visible rather than silently folded into the middle value.
+AGGREGATE_FIELDS = ("rps", "p50_ms", "p90_ms", "p99_ms", "p999_ms", "avg_ms",
+                    "rss_mb_peak", "rss_mb_end")
+
+def _median(values):
+    """Median of a numeric list; the even case averages the middle two."""
+    s = sorted(values)
+    mid = len(s) // 2
+    return s[mid] if len(s) % 2 else (s[mid - 1] + s[mid]) / 2
+
+def _spread_pct(values):
+    """Peak-to-peak spread as a percentage of the mean — the number that would have exposed the
+    #746 degraded rep (~20% low on one of three runs) instead of it passing as a normal sample."""
+    mean = sum(values) / len(values)
+    return 0.0 if mean == 0 else (max(values) - min(values)) / mean * 100.0
+
+def aggregate_reps(reps):
+    """Collapse N repetitions into one median-per-point aggregate, keyed by
+    (scenario, connections, mode).
+
+    `reps` is a list of rep row-lists, each shaped like `load_rift_csv` output. Every point carries
+    `reps` (how many samples backed it) and `rps_spread_pct`, because a median alone cannot tell a
+    clean run from one where a rep was measured on a degraded machine — which is exactly how #746's
+    headline number went wrong."""
+    if not reps:
+        raise ValueError("aggregate_reps needs at least one repetition")
+    points = {}
+    for rows in reps:
+        for r in rows:
+            key = (r["scenario"], int(r["connections"]), r["mode"])
+            points.setdefault(key, []).append(r)
+    out = {}
+    for key, samples in points.items():
+        cell = {"reps": len(samples)}
+        for field in AGGREGATE_FIELDS:
+            # A percentile can be legitimately absent (oha omits p99.9 when a point has too few
+            # samples). An absent value stays absent rather than being counted as zero, which
+            # would drag the median toward a number nothing measured.
+            vals = [float(r[field]) for r in samples if r.get(field) not in (None, "")]
+            cell[field] = _median(vals) if vals else ""
+        rps_vals = [float(r["rps"]) for r in samples if r.get("rps") not in (None, "")]
+        cell["rps_spread_pct"] = _spread_pct(rps_vals) if rps_vals else ""
+        out[key] = cell
+    return out
+
+def results_csv_path(engine, csv_suffix):
+    """The one place a run's results CSV name is built."""
+    return os.path.join(RESULTS_DIR, f"direct_{engine}{csv_suffix}.csv")
+
+def write_results_csv(engine, csv_suffix, rows):
+    """Write a run's results through a single seam, so "which files does a run produce" is a
+    testable property rather than a fact buried in `bench()` behind a live server (#773).
+
+    An existing target is overwritten — reruns of the same rep are legitimate after a crash — but
+    never silently: the whole point of #773 is that a results file must not change under you
+    without saying so."""
+    path = results_csv_path(engine, csv_suffix)
+    if os.path.exists(path):
+        print(f"  note: overwriting existing {os.path.basename(path)}")
+    write_rift_csv(path, rows)
+    return path
+
+REP_FILE_RX = re.compile(r"_rep(\d+)\.csv$")
+
+def find_rep_files(base_suffix):
+    """Every `_repN.csv` written for one variant, in rep order.
+
+    Matches on the `_rep<digits>.csv` tail so a *different* variant sharing a prefix, or a stale
+    unsuffixed file from a pre-#773 run, is never swept into the aggregate."""
+    pattern = os.path.join(RESULTS_DIR, f"direct_rift{base_suffix}_rep*.csv")
+    matched = []
+    for p in glob.glob(pattern):
+        m = REP_FILE_RX.search(p)
+        if m:
+            matched.append((int(m.group(1)), p))
+    return [p for _, p in sorted(matched)]
+
+def aggregate_reps_to_report(base_suffix, rift_ver):
+    """Read a variant's `_repN.csv` files, write the median-of-reps CSV + report, return the report
+    path. This is the artefact the unsuffixed filename used to *imply* and never was (#773)."""
+    paths = find_rep_files(base_suffix)
+    if not paths:
+        raise SystemExit(
+            f"no repetition files matched direct_rift{base_suffix}_rep*.csv in {RESULTS_DIR} — "
+            f"nothing to aggregate (run the sweep with --rep N first)")
+    reps = []
+    for p in paths:
+        with open(p) as f:
+            reps.append(load_rift_csv(f))
+    agg = aggregate_reps(reps)
+
+    # An aggregate must not quietly rest on fewer samples than it appears to. A point missing from
+    # some rep — a crashed run, a rep taken with different --sweep-connections, a truncated CSV —
+    # would otherwise yield a complete-looking report whose cells are backed by 2 of 3 reps, with
+    # exit 0 and nothing said. That is precisely the class of silence #773 exists to remove, so it
+    # is a hard error rather than a warning.
+    incomplete = {k: c["reps"] for k, c in agg.items() if c["reps"] != len(paths)}
+    if incomplete:
+        detail = ", ".join(f"{s}@c={c}/{m}: {n} of {len(paths)}"
+                           for (s, c, m), n in sorted(incomplete.items())[:8])
+        raise SystemExit(
+            f"incomplete repetitions across {len(paths)} rep files for '{base_suffix}': {detail}"
+            f"{' …' if len(incomplete) > 8 else ''}\n"
+            f"Every point must appear in every rep, or the median silently rests on fewer samples "
+            f"than the report claims. Re-run the missing reps, or aggregate a consistent subset.")
+
+    csv_path = os.path.join(RESULTS_DIR, f"direct_rift{base_suffix}_median.csv")
+    with open(csv_path, "w") as f:
+        f.write(CSV_HEADER + ",reps,rps_spread_pct\n")
+        for (scen, conns, mode), c in sorted(agg.items(), key=lambda kv: (kv[0][1], kv[0][0])):
+            spread = f"{c['rps_spread_pct']:.1f}" if c["rps_spread_pct"] != "" else ""
+            f.write(f"{csv_row(scen, conns, mode, c)},{c['reps']},{spread}\n")
+
+    out = os.path.join(RESULTS_DIR, f"DIRECT_RIFT_MEDIAN_REPORT{base_suffix}.md")
+    rep_counts = sorted({c["reps"] for c in agg.values()})
+    with open(out, "w") as f:
+        f.write("# Rift — Median of Repetitions (issue #773)\n\n")
+        f.write(f"- **Date:** {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+        # The aggregation runs offline over CSVs that carry no version, so claiming one nobody
+        # passed would put a wrong provenance line on the artefact meant to replace a retracted
+        # number. Say "unspecified" instead of guessing.
+        f.write(f"- **Rift:** {rift_ver or 'unspecified (pass --rift-version)'}\n")
+        f.write(f"- **Variant:** `{base_suffix or '(none)'}`\n")
+        f.write(f"- **Repetitions:** {', '.join(str(n) for n in rep_counts)} "
+                f"(from {', '.join(os.path.basename(p) for p in paths)})\n")
+        f.write("- **Spread** is peak-to-peak RPS as a percentage of the mean. A large spread "
+                "means the reps disagree — treat the median as provisional and look at the "
+                "individual reps before quoting it.\n\n")
+        f.write("| Scenario | c | RPS (median) | spread | p50 | p99 | p999 | reps |\n")
+        f.write("|---|--:|--:|--:|--:|--:|--:|--:|\n")
+        lat = lambda v: "n/a" if v == "" else f"{v:g}"
+        for (scen, conns, mode), c in sorted(agg.items(), key=lambda kv: (kv[0][1], kv[0][0])):
+            spread = "n/a" if c["rps_spread_pct"] == "" else f"{c['rps_spread_pct']:.1f}%"
+            f.write(f"| {scen} | {conns} | {c['rps']:,.0f} | {spread} | {lat(c['p50_ms'])} "
+                    f"| {lat(c['p99_ms'])} | {lat(c['p999_ms'])} | {c['reps']} |\n")
+    print(f"wrote {out}")
+    return out
+
 def run_all(duration, warmup, conn_list, rift_bin, mb_bin, engines, rate=None, recording=False,
-            allocator=None, runtime=None, server_cpus=None, engine_cpus=None, gen_cpus=None):
+            allocator=None, runtime=None, server_cpus=None, engine_cpus=None, gen_cpus=None,
+            rep=None):
     os.makedirs(RESULTS_DIR, exist_ok=True)
     node = shutil.which("node") or "node"
-    csv_suffix = result_suffix(allocator, runtime, server_cpus)
+    csv_suffix = result_suffix(allocator, runtime, server_cpus, rep)
     engine_prefix, oha_prefix = taskset_prefix(engine_cpus), taskset_prefix(gen_cpus)
     full_plan = [
         ("rift", 0,   engine_prefix
@@ -923,7 +1070,21 @@ if __name__ == "__main__":
                     help="core-count axis (#746): confine the engine to N CPUs with taskset — "
                          "both topologies size their workers from it — and confine oha to the "
                          "remaining physical cores. N must fall on a core boundary; Linux only.")
+    ap.add_argument("--rep", type=int, metavar="N",
+                    help="repetition index (#773): artefacts get a _repN suffix, so each rep of a "
+                         "sweep lands in its own file instead of overwriting the last. Re-running "
+                         "the SAME rep overwrites it, with a printed note. Rift-only. Without "
+                         "--rep the run writes the unsuffixed name as before.")
+    ap.add_argument("--aggregate-reps", metavar="SUFFIX",
+                    help="offline: read direct_rift<SUFFIX>_rep*.csv and write the median-of-reps "
+                         "CSV + report (per-rep spread included). SUFFIX is the variant part of "
+                         "the name, e.g. '_per-core_cores8' (use '' for a bare run).")
     a = ap.parse_args()
+    if a.aggregate_reps is not None:
+        aggregate_reps_to_report(a.aggregate_reps, a.rift_version)
+        sys.exit(0)
+    if a.rep is not None and a.rep < 1:
+        raise SystemExit(f"--rep must be >= 1 (got {a.rep})")
     if a.run_all:
         try:
             engines, conn_list, rate, recording = resolve_run_mode(
@@ -931,6 +1092,17 @@ if __name__ == "__main__":
         except ValueError as e:
             raise SystemExit(str(e))
         requested = [e.strip() for e in a.engines.split(",") if e.strip()]
+        # --rep is Rift-only, and refused rather than silently coerced: the rift-vs-mb comparison
+        # report reads the UNSUFFIXED direct_{engine}.csv paths, so a repped rift+mb run would
+        # write direct_rift_repN.csv and then build DIRECT_BENCHMARK_REPORT.md from whatever stale
+        # unsuffixed file happened to be on disk — presenting numbers this run never measured,
+        # which is the exact failure #773 exists to close. Coercing engines silently would hide
+        # that the requested comparison was not run at all.
+        if a.rep is not None and engines != ["rift"]:
+            raise SystemExit(
+                "--rep is Rift-only: the rift-vs-mb report reads unsuffixed artefacts, so a "
+                "repped comparison run would report a stale file as this run's numbers. "
+                "Re-run with --engines rift.")
         if (a.allocator or a.runtime) and engines != ["rift"]:
             engines = ["rift"]
         if engines != requested:
@@ -957,7 +1129,8 @@ if __name__ == "__main__":
                                   expected_workers=a.server_cores)
         run_all(a.duration, a.warmup, conn_list, rift_bin, a.mb_bin, engines,
                 rate=rate, recording=recording, allocator=a.allocator, runtime=a.runtime,
-                server_cpus=a.server_cores, engine_cpus=engine_cpus, gen_cpus=gen_cpus)
+                server_cpus=a.server_cores, engine_cpus=engine_cpus, gen_cpus=gen_cpus,
+                rep=a.rep)
     elif a.report:
         report(a.rift_version, a.mb_version, a.duration, a.connections)
     else:

@@ -401,6 +401,212 @@ class ResultSuffix(unittest.TestCase):
         self.assertEqual(bd.result_suffix("mimalloc", "per-core", 4),
                          "_mimalloc_per-core_cores4")
 
+    def test_rep_is_its_own_dimension(self):
+        # Issue #773: a repetition must be part of the artefact name, not something the caller
+        # bolts on after the fact — otherwise every rep overwrites the last and the canonical-
+        # looking file holds one unreplicated sample.
+        self.assertEqual(bd.result_suffix(None, "per-core", 8, rep=2), "_per-core_cores8_rep2")
+        self.assertEqual(bd.result_suffix(None, None, None, rep=1), "_rep1")
+
+    def test_all_four_compose(self):
+        self.assertEqual(bd.result_suffix("mimalloc", "per-core", 4, rep=3),
+                         "_mimalloc_per-core_cores4_rep3")
+
+    def test_rep_absent_reproduces_the_old_names(self):
+        # The pre-#773 contract must be byte-identical when no rep is given, so artefacts from
+        # earlier sweeps stay comparable.
+        self.assertEqual(bd.result_suffix("jemalloc", "per-core", 4, rep=None),
+                         "_jemalloc_per-core_cores4")
+
+
+class MedianOfReps(unittest.TestCase):
+    """Issue #773: the decision artefact must be an explicit median across reps with the per-rep
+    spread visible — a degraded rep should be observable, not silently averaged in (or, worse,
+    silently the only sample)."""
+
+    @staticmethod
+    def _rows(rps_by_scenario, conns=256):
+        return [
+            {"scenario": s, "connections": str(conns), "mode": "closed", "rps": str(v),
+             "p50_ms": "1.0", "p90_ms": "2.0", "p99_ms": "3.0", "p999_ms": "4.0",
+             "avg_ms": "1.5", "rss_mb_peak": "50.0", "rss_mb_end": "40.0"}
+            for s, v in rps_by_scenario.items()
+        ]
+
+    def test_median_of_three_reps_picks_the_middle(self):
+        reps = [self._rows({"a": 100.0}), self._rows({"a": 300.0}), self._rows({"a": 200.0})]
+        agg = bd.aggregate_reps(reps)
+        self.assertEqual(agg[("a", 256, "closed")]["rps"], 200.0)
+
+    def test_median_of_even_count_averages_the_middle_two(self):
+        reps = [self._rows({"a": 100.0}), self._rows({"a": 200.0})]
+        agg = bd.aggregate_reps(reps)
+        self.assertEqual(agg[("a", 256, "closed")]["rps"], 150.0)
+
+    def test_spread_exposes_a_degraded_rep(self):
+        # The #746 case: rep3 ran ~20% low on a degraded runner. The aggregate must SAY so.
+        reps = [self._rows({"a": 5510000.0}), self._rows({"a": 5620000.0}),
+                self._rows({"a": 4350000.0})]
+        agg = bd.aggregate_reps(reps)
+        cell = agg[("a", 256, "closed")]
+        self.assertEqual(cell["rps"], 5510000.0)
+        self.assertGreater(cell["rps_spread_pct"], 20.0)
+        self.assertEqual(cell["reps"], 3)
+
+    def test_spread_is_zero_for_identical_reps(self):
+        reps = [self._rows({"a": 100.0}), self._rows({"a": 100.0})]
+        self.assertEqual(bd.aggregate_reps(reps)[("a", 256, "closed")]["rps_spread_pct"], 0.0)
+
+    def test_latency_percentiles_are_aggregated_too(self):
+        reps = [self._rows({"a": 100.0}), self._rows({"a": 100.0}), self._rows({"a": 100.0})]
+        cell = bd.aggregate_reps(reps)[("a", 256, "closed")]
+        for field in ("p50_ms", "p99_ms", "p999_ms"):
+            self.assertIn(field, cell)
+
+    def test_rejects_empty_rep_set(self):
+        with self.assertRaises(ValueError):
+            bd.aggregate_reps([])
+
+    def test_single_rep_is_its_own_median_with_zero_spread(self):
+        cell = bd.aggregate_reps([self._rows({"a": 42.0})])[("a", 256, "closed")]
+        self.assertEqual(cell["rps"], 42.0)
+        self.assertEqual(cell["rps_spread_pct"], 0.0)
+        self.assertEqual(cell["reps"], 1)
+
+    def test_percentile_absent_in_only_some_reps_medians_the_present_ones(self):
+        # oha can omit p99.9 on a sparse point in one rep but not another. The median must come
+        # from what was actually measured, never treating the gap as a zero.
+        a, b = self._rows({"x": 100.0}), self._rows({"x": 100.0})
+        a[0]["p999_ms"] = ""
+        b[0]["p999_ms"] = "9.0"
+        cell = bd.aggregate_reps([a, b])[("x", 256, "closed")]
+        self.assertEqual(cell["p999_ms"], 9.0)
+
+    def test_absent_percentile_does_not_crash_the_median(self):
+        # oha omits p99.9 when a point has too few samples; the CSV cell is empty, not "None".
+        reps = self._rows({"a": 100.0}), self._rows({"a": 200.0})
+        for r in reps:
+            r[0]["p999_ms"] = ""
+        cell = bd.aggregate_reps(list(reps))[("a", 256, "closed")]
+        self.assertEqual(cell["p999_ms"], "")
+
+
+class RepArtefacts(unittest.TestCase):
+    """Issue #773: the whole point is that a repped run leaves no file claiming to be more than
+    the one sample it is."""
+
+    def test_discovers_rep_files_for_a_base_suffix(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            orig = bd.RESULTS_DIR
+            bd.RESULTS_DIR = tmp
+            try:
+                for rep in (1, 2, 3):
+                    open(os.path.join(tmp, f"direct_rift_per-core_cores8_rep{rep}.csv"), "w").close()
+                # decoys that must NOT be collected: a different variant, and a stale unsuffixed file
+                open(os.path.join(tmp, "direct_rift_work-stealing_cores8_rep1.csv"), "w").close()
+                open(os.path.join(tmp, "direct_rift_per-core_cores8.csv"), "w").close()
+                found = bd.find_rep_files("_per-core_cores8")
+                self.assertEqual(len(found), 3, f"expected exactly the 3 rep files, got {found}")
+                self.assertTrue(all("_rep" in os.path.basename(f) for f in found))
+                self.assertTrue(all("work-stealing" not in f for f in found))
+            finally:
+                bd.RESULTS_DIR = orig
+
+    def test_missing_reps_is_an_error_not_an_empty_aggregate(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            orig = bd.RESULTS_DIR
+            bd.RESULTS_DIR = tmp
+            try:
+                with self.assertRaises(SystemExit):
+                    bd.aggregate_reps_to_report("_nonexistent", "0.1.0")
+            finally:
+                bd.RESULTS_DIR = orig
+
+    def test_repped_writes_produce_only_suffixed_artefacts(self):
+        # THE acceptance criterion: a repped run must leave no unsuffixed file. Asserting on
+        # `result_suffix`'s string is not enough — a back-compat shim that ALSO wrote the
+        # unsuffixed name would satisfy that and reintroduce the whole bug.
+        import tempfile
+        rows = [("simple_health", 256, "closed",
+                 {"rps": 1.0, "p50_ms": 0.5, "p90_ms": 0.8, "p99_ms": 1.2,
+                  "p999_ms": 3.1, "avg_ms": 0.6, "codes": {"200": 1}})]
+        with tempfile.TemporaryDirectory() as tmp:
+            orig = bd.RESULTS_DIR
+            bd.RESULTS_DIR = tmp
+            try:
+                for rep in (1, 2, 3):
+                    bd.write_results_csv("rift", bd.result_suffix(None, "per-core", 8, rep=rep), rows)
+                produced = sorted(os.listdir(tmp))
+                self.assertEqual(produced, [
+                    "direct_rift_per-core_cores8_rep1.csv",
+                    "direct_rift_per-core_cores8_rep2.csv",
+                    "direct_rift_per-core_cores8_rep3.csv",
+                ], "a repped run must write exactly one file per rep and no unsuffixed artefact")
+                self.assertNotIn("direct_rift_per-core_cores8.csv", produced)
+            finally:
+                bd.RESULTS_DIR = orig
+
+    def test_unrepped_write_keeps_the_unsuffixed_name(self):
+        import tempfile
+        rows = [("simple_health", 256, "closed",
+                 {"rps": 1.0, "p50_ms": 0.5, "p90_ms": 0.8, "p99_ms": 1.2,
+                  "p999_ms": 3.1, "avg_ms": 0.6, "codes": {"200": 1}})]
+        with tempfile.TemporaryDirectory() as tmp:
+            orig = bd.RESULTS_DIR
+            bd.RESULTS_DIR = tmp
+            try:
+                bd.write_results_csv("rift", bd.result_suffix(None, "per-core", 8), rows)
+                self.assertEqual(os.listdir(tmp), ["direct_rift_per-core_cores8.csv"])
+            finally:
+                bd.RESULTS_DIR = orig
+
+    def test_partial_reps_are_an_error_not_a_quietly_thinner_median(self):
+        # A point missing from one rep (crashed run, changed --sweep-connections, truncated CSV)
+        # must fail loudly — a complete-looking report resting on 2 of 3 samples is the silence
+        # #773 exists to remove.
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            orig = bd.RESULTS_DIR
+            bd.RESULTS_DIR = tmp
+            try:
+                full = [("a", 256, "closed", self._metric(100.0)),
+                        ("b", 256, "closed", self._metric(200.0))]
+                partial = [("a", 256, "closed", self._metric(110.0))]   # 'b' missing here
+                bd.write_rift_csv(os.path.join(tmp, "direct_rift_p_rep1.csv"), full)
+                bd.write_rift_csv(os.path.join(tmp, "direct_rift_p_rep2.csv"), partial)
+                with self.assertRaises(SystemExit) as cm:
+                    bd.aggregate_reps_to_report("_p", "0.1.0")
+                self.assertIn("incomplete repetitions", str(cm.exception))
+                self.assertIn("b@c=256", str(cm.exception))
+            finally:
+                bd.RESULTS_DIR = orig
+
+    @staticmethod
+    def _metric(rps):
+        return {"rps": rps, "p50_ms": 0.5, "p90_ms": 0.8, "p99_ms": 1.2,
+                "p999_ms": 3.1, "avg_ms": 0.6, "codes": {"200": 1}}
+
+    def test_aggregate_report_states_rep_count_and_spread(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            orig = bd.RESULTS_DIR
+            bd.RESULTS_DIR = tmp
+            try:
+                for rep, rps in ((1, 5510000.0), (2, 5620000.0), (3, 4350000.0)):
+                    rows = [("simple_health", 256, "closed",
+                             {"rps": rps, "p50_ms": 0.5, "p90_ms": 0.8, "p99_ms": 1.2,
+                              "p999_ms": 3.1, "avg_ms": 0.6, "codes": {"200": 1}})]
+                    bd.write_rift_csv(os.path.join(tmp, f"direct_rift_x_rep{rep}.csv"), rows)
+                out = bd.aggregate_reps_to_report("_x", "0.1.0")
+                text = open(out).read()
+                self.assertIn("spread", text.lower())
+                self.assertIn("3", text)          # rep count is stated
+                self.assertIn("5,510,000", text)  # the median, not rep3's degraded 4.35M
+            finally:
+                bd.RESULTS_DIR = orig
+
 
 class CpuTopology(unittest.TestCase):
     """Issue #746 core-count axis: `lscpu -p=CPU,CORE` parsing. Real output carries a comment

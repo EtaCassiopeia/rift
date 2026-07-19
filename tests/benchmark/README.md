@@ -141,17 +141,44 @@ Connections alone do not test RFC-712's thesis, which is about the *slope* of RP
   leaves the generator no cores, is rejected with the host's valid budgets.
 
 ```bash
-for n in 2 4 8; do
-  for rt in work-stealing per-core; do
-    python3 scripts/bench_direct.py --run-all --runtime $rt --server-cores $n \
-        --sweep-connections 256,512 --duration 12s --warmup 2s
+for rep in 1 2 3; do
+  for n in 2 4 8; do
+    for rt in work-stealing per-core; do
+      python3 scripts/bench_direct.py --run-all --runtime $rt --server-cores $n --rep $rep \
+          --sweep-connections 256,512 --duration 12s --warmup 2s
+    done
   done
-done   # -> direct_rift_{work-stealing,per-core}_cores{2,4,8}.csv
+done   # -> direct_rift_{work-stealing,per-core}_cores{2,4,8}_rep{1,2,3}.csv
 ```
 
 Linux only (`taskset`/`lscpu`). Note the ceiling this implies: on an M-vCPU box the generator
 needs its own cores, so the engine tops out well below M — an ≥8-*physical*-core point needs a
 bigger box or an off-box generator, and any verdict quoting these numbers should say so.
+
+#### Repetitions and medians — never quote a single run
+
+**Always pass `--rep N`.** One run of one variant is one sample; a benchmark host is not a
+constant. Without `--rep` every repetition writes the *same* filename, so the file left behind is
+whichever rep ran last — a canonical-looking artefact holding one unreplicated sample. That is not
+hypothetical: it produced a wrong, publicly-retracted number on issue #746, where the last rep
+happened to land on a degraded runner ~20% low (issue #773).
+
+With `--rep`, each repetition gets its own `_repN` artefact and nothing is overwritten. Collapse
+them into the decision artefact with:
+
+```bash
+python3 scripts/bench_direct.py --aggregate-reps "_per-core_cores8"
+# -> direct_rift_per-core_cores8_median.csv
+#    DIRECT_RIFT_MEDIAN_REPORT_per-core_cores8.md
+```
+
+The report carries a **spread** column (peak-to-peak RPS as a percentage of the mean) next to every
+median. Read it before quoting a number: a large spread means the reps disagree and the median is
+provisional. Aggregation **fails loudly** if a point is missing from any rep, rather than quietly
+producing a median backed by fewer samples than the report implies.
+
+`--rep` is Rift-only — the rift-vs-mb comparison report reads unsuffixed artefacts, so a repped
+comparison run would report a stale file as the current one.
 
 Both scripts run each engine **one at a time on disjoint port ranges** (no CPU
 contention, no cross-talk), launch it in its own process group and hard-kill it by
