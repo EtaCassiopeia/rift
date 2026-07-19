@@ -28,21 +28,21 @@ docker run -p 2525:2525 zainalpour/rift-proxy:latest
 
 ### Download Binary
 
-Download pre-built binaries from the [releases page](https://github.com/EtaCassiopeia/rift/releases):
+Download pre-built binaries from the [releases page](https://github.com/achird-labs/rift/releases):
 
 ```bash
 # Linux (x86_64)
-curl -L https://github.com/EtaCassiopeia/rift/releases/latest/download/rift-http-proxy-linux-x86_64 -o rift
+curl -L https://github.com/achird-labs/rift/releases/latest/download/rift-http-proxy-linux-x86_64 -o rift
 chmod +x rift
 ./rift
 
 # macOS (Apple Silicon)
-curl -L https://github.com/EtaCassiopeia/rift/releases/latest/download/rift-http-proxy-darwin-aarch64 -o rift
+curl -L https://github.com/achird-labs/rift/releases/latest/download/rift-http-proxy-darwin-aarch64 -o rift
 chmod +x rift
 ./rift
 
 # macOS (Intel)
-curl -L https://github.com/EtaCassiopeia/rift/releases/latest/download/rift-http-proxy-darwin-x86_64 -o rift
+curl -L https://github.com/achird-labs/rift/releases/latest/download/rift-http-proxy-darwin-x86_64 -o rift
 chmod +x rift
 ./rift
 ```
@@ -52,7 +52,7 @@ chmod +x rift
 Requires Rust 1.70+:
 
 ```bash
-git clone https://github.com/EtaCassiopeia/rift.git
+git clone https://github.com/achird-labs/rift.git
 cd rift
 cargo build --release
 ./target/release/rift-http-proxy

@@ -2,7 +2,7 @@
 title: Rift
 description: High-performance Mountebank-compatible HTTP/HTTPS mock server written in Rust
 baseurl: "/rift"
-url: "https://etacassiopeia.github.io"
+url: "https://achird-labs.github.io"
 
 # Theme
 remote_theme: just-the-docs/just-the-docs
@@ -14,7 +14,7 @@ logo: "/assets/images/logo.png"
 # Aux links (top right)
 aux_links:
   "GitHub":
-    - "https://github.com/EtaCassiopeia/rift"
+    - "https://github.com/achird-labs/rift"
 
 aux_links_new_tab: true
 
@@ -34,7 +34,7 @@ search:
   button: false
 
 # Footer
-footer_content: "Copyright &copy; 2026 Rift Contributors. Distributed under the <a href=\"https://github.com/EtaCassiopeia/rift/blob/master/LICENSE\">Apache License 2.0</a>. Docs current as of <a href=\"https://github.com/EtaCassiopeia/rift/releases/tag/v0.13.0\">v0.13.0</a>."
+footer_content: "Copyright &copy; 2026 Rift Contributors. Distributed under the <a href=\"https://github.com/achird-labs/rift/blob/master/LICENSE\">Apache License 2.0</a>. Docs current as of <a href=\"https://github.com/achird-labs/rift/releases/tag/v0.13.0\">v0.13.0</a>."
 
 # Back to top link
 back_to_top: true

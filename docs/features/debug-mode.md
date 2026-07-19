@@ -267,6 +267,26 @@ Debug responses include:
 
 ---
 
+## Error Responses
+
+Debug mode evaluates predicates the same way a normal request does, so a stub that runs a script can
+fail or time out while being *inspected*. Both failure doors answer the standard JSON error envelope
+with `Content-Type: application/json`:
+
+| Situation | Status | Extra header | Body |
+|:----------|:-------|:-------------|:-----|
+| The matching run panicked | `500` | — | `{"errors":[{"code":"...","message":"Debug matching failed"}]}` |
+| The matching run exceeded `_rift.scriptEngine.timeoutMs` | `504` | `x-rift-script-timeout: true` | `{"errors":[{"code":"...","message":"Debug matching timed out"}]}` |
+
+The timeout answered `500` in earlier releases. It is now a `504`, consistent with every other script
+deadline (see [Scripting](scripting.md)), so a transient deadline miss is distinguishable from a
+permanent configuration error — a debug request that times out is worth retrying.
+
+Note the distinction from a normal debug response: an error here means the *inspection itself*
+failed, so there is no `X-Rift-Debug-Response: true` header and no match report.
+
+---
+
 ## Mountebank Compatibility
 
 | Feature | Mountebank | Rift |

@@ -226,6 +226,6 @@ failures (connection reset, etc.) via `_rift.fault.tcp` or a top-level `fault` r
 
 ## Getting Help
 
-- [GitHub Issues](https://github.com/EtaCassiopeia/rift/issues) - Report bugs or request features
+- [GitHub Issues](https://github.com/achird-labs/rift/issues) - Report bugs or request features
 - [Documentation]({{ site.baseurl }}/) - Full documentation
 - [Performance Benchmarks]({{ site.baseurl }}/performance/) - Compare with Mountebank

@@ -67,8 +67,8 @@ ARG BUILD_DATE=unknown
 LABEL \
   org.opencontainers.image.title="Rift Lint" \
   org.opencontainers.image.description="Imposter configuration validator for Rift/Mountebank. Validates JSON syntax, schema, and script correctness." \
-  org.opencontainers.image.url="https://github.com/EtaCassiopeia/rift" \
-  org.opencontainers.image.source="https://github.com/EtaCassiopeia/rift" \
+  org.opencontainers.image.url="https://github.com/achird-labs/rift" \
+  org.opencontainers.image.source="https://github.com/achird-labs/rift" \
   org.opencontainers.image.version="$VERSION" \
   org.opencontainers.image.revision="$VCS_REF" \
   org.opencontainers.image.created="$BUILD_DATE" \

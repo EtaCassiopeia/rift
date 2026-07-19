@@ -2,7 +2,7 @@
 # Rift Installation Script
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/EtaCassiopeia/rift/main/scripts/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/achird-labs/rift/master/scripts/install.sh | bash
 #
 # Options:
 #   RIFT_VERSION=v0.1.0  - Install specific version (default: latest)
@@ -19,7 +19,7 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # Configuration
-GITHUB_REPO="EtaCassiopeia/rift"
+GITHUB_REPO="achird-labs/rift"
 BINARY_NAME="rift"
 
 log_info() {

@@ -1,6 +1,6 @@
 # rift-tui
 
-Interactive Terminal User Interface for [Rift HTTP Proxy](https://github.com/EtaCassiopeia/rift).
+Interactive Terminal User Interface for [Rift HTTP Proxy](https://github.com/achird-labs/rift).
 
 ## Features
 
@@ -23,7 +23,7 @@ cargo install rift-tui
 ### Build from Repository
 
 ```bash
-git clone https://github.com/EtaCassiopeia/rift.git
+git clone https://github.com/achird-labs/rift.git
 cd rift
 cargo build --release --bin rift-tui
 ```
@@ -85,7 +85,7 @@ rift-tui --admin-url http://localhost:2525
 
 ## Documentation
 
-Full documentation available at [etacassiopeia.github.io/rift/features/tui](https://etacassiopeia.github.io/rift/features/tui).
+Full documentation available at [achird-labs.github.io/rift/features/tui](https://achird-labs.github.io/rift/features/tui).
 
 ## License
 

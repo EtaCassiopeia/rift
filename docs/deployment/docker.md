@@ -70,7 +70,7 @@ so there is no public key to distribute.
 ```bash
 # Verify the signature and its provenance
 cosign verify \
-  --certificate-identity-regexp 'https://github.com/EtaCassiopeia/rift/.github/workflows/.+' \
+  --certificate-identity-regexp 'https://github.com/achird-labs/rift/.github/workflows/.+' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   zainalpour/rift-proxy:latest-static
 

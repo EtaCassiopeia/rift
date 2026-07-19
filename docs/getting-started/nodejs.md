@@ -10,6 +10,11 @@ permalink: /getting-started/nodejs/
 
 Rift provides official Node.js bindings via the `@rift-vs/rift` npm package. This package is a drop-in replacement for Mountebank's Node.js API, making migration seamless.
 
+> **The Node.js SDK lives in its own repository.** It is developed and published from
+> [`EtaCassiopeia/rift-node`](https://github.com/EtaCassiopeia/rift-node), which owns the npm
+> release. This engine repository no longer contains or publishes it — file SDK issues there, and
+> engine issues here.
+
 ---
 
 ## Installation
@@ -219,7 +224,7 @@ describe('API Tests', () => {
 
 If automatic download doesn't work (e.g., behind a firewall), install the binary manually:
 
-1. Download from [GitHub Releases](https://github.com/EtaCassiopeia/rift/releases)
+1. Download from [GitHub Releases](https://github.com/achird-labs/rift/releases)
 2. Set the `RIFT_BINARY_PATH` environment variable:
 
 ```bash
@@ -239,7 +244,7 @@ First, build the Rift binary from source:
 
 ```bash
 # Clone the repository
-git clone https://github.com/EtaCassiopeia/rift.git
+git clone https://github.com/achird-labs/rift.git
 cd rift
 
 # Build the release binary

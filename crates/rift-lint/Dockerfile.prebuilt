@@ -22,8 +22,8 @@ RUN chmod +x /usr/local/bin/rift-lint
 LABEL \
   org.opencontainers.image.title="Rift Lint" \
   org.opencontainers.image.description="Linter for Mountebank/Rift imposter configurations" \
-  org.opencontainers.image.url="https://github.com/EtaCassiopeia/rift" \
-  org.opencontainers.image.source="https://github.com/EtaCassiopeia/rift" \
+  org.opencontainers.image.url="https://github.com/achird-labs/rift" \
+  org.opencontainers.image.source="https://github.com/achird-labs/rift" \
   org.opencontainers.image.version="$VERSION" \
   org.opencontainers.image.revision="$VCS_REF" \
   org.opencontainers.image.created="$BUILD_DATE" \

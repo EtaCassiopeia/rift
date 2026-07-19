@@ -20,8 +20,11 @@ record.
   matching results are unchanged — this is purely a prefilter (any predicate it cannot express
   — arrays, `null`, floats, `caseSensitive`/`keyCaseSensitive`, `except`/selector — safely
   falls through to full evaluation). It complements the `deepEquals`-on-body hash index. The
-  capability is behind a default-on `quamina-matching` Cargo feature, droppable for minimal or
-  FFI builds via `--no-default-features`. (#767)
+  capability is behind a `quamina-matching` Cargo feature, default-on for `rift-mock-core`.
+  **Note:** `rift-http-proxy` and `rift-ffi` take `rift-mock-core` with `default-features = false`
+  and do not forward this feature, so the dimension is not currently active in the `rift` binary or
+  the C-ABI — see #777. Because it is a pure prefilter, this affects throughput only, never which
+  stub matches. (#767)
 
 - **Per-worker accept counters + runtime-topology bench support** (part of the RFC-712 gate,
   #746). `rift_accepted_connections_total{worker=…}` counts accepted connections per
@@ -100,6 +103,13 @@ record.
 
 ### Changed
 
+- **TLS session resumption is now configured explicitly on every serving listener**, including the
+  intercept listener. Rift previously relied on rustls' defaults; it now installs a session cache
+  and a ring-based ticketer with roughly six-hourly key rotation. Clients that support resumption
+  skip a full handshake on reconnect — a visible latency win for HTTPS imposters under short-lived
+  connections — and resumption remains transparent to clients that do not. No configuration
+  surface: this is on by default with no way to opt out (#725).
+
 - **`deepEquals`-on-body matching is now indexed by a structural body hash** instead of being
   compared stub-by-stub. For the classic contract-test workload — hundreds of stubs on one
   path/method, each asserting one exact JSON body — selecting the matching stub drops from an
@@ -110,6 +120,23 @@ record.
   JSON all fall back to the existing full comparison (correctness is never affected, only pruning).
 
 ### Fixed
+
+- **An imposter with a numeric or boolean header value was rejected with a `400`.** Mountebank
+  tolerates non-string scalar header values — its own recorders routinely emit
+  `"Content-Length": 124` and `"X-Flag": true` — and coerces them to their string form. Rift
+  accepted neither, so a recorded Mountebank imposter replayed against Rift failed to load at all,
+  with the whole document rejected rather than the one field. Numbers and booleans are now accepted
+  and coerced to their string form, singly and inside multi-value arrays; `null`, objects, and
+  nested arrays are still rejected (issue #754).
+
+- **A systemic accept-loop failure could flood the log at the rate of the failure itself.** Every
+  `accept()` error was logged at warn level, so a persistent condition — a process-wide fd
+  exhaustion, for instance — produced one line per failed accept, drowning the log precisely when it
+  was most needed and burning CPU on the write. Transient, per-connection errors
+  (`ECONNABORTED`/`EINTR`/`ECONNRESET`) are now `debug!` — they are normal and the loop simply
+  continues. A systemic error logs **once** on entry and once on recovery, reporting how many
+  occurrences were suppressed in between, and the loop backs off exponentially (1 ms → 1 s) instead
+  of spinning. No change to which connections are served (#768).
 
 - **A stub whose configured `Content-Type` used a nonstandard casing (e.g. `CONTENT-TYPE`) with a
   JSON (non-string) body emitted two `Content-Type` headers.** The default-injection gate only
@@ -1078,28 +1105,28 @@ Initial release-candidate series establishing the Mountebank-compatible core: im
 predicates, responses, behaviors, proxy/record, and the `_rift` extension namespace (fault
 injection, multi-engine scripting, flow state).
 
-[Unreleased]: https://github.com/EtaCassiopeia/rift/compare/v0.14.0...HEAD
-[0.14.0]: https://github.com/EtaCassiopeia/rift/compare/v0.13.6...v0.14.0
-[0.13.6]: https://github.com/EtaCassiopeia/rift/compare/v0.13.5...v0.13.6
-[0.13.5]: https://github.com/EtaCassiopeia/rift/compare/v0.13.4...v0.13.5
-[0.13.4]: https://github.com/EtaCassiopeia/rift/compare/v0.13.3...v0.13.4
-[0.13.3]: https://github.com/EtaCassiopeia/rift/compare/v0.13.2...v0.13.3
-[0.13.2]: https://github.com/EtaCassiopeia/rift/compare/v0.13.1...v0.13.2
-[0.13.1]: https://github.com/EtaCassiopeia/rift/compare/v0.13.0...v0.13.1
-[0.13.0]: https://github.com/EtaCassiopeia/rift/compare/v0.12.0...v0.13.0
-[0.12.0]: https://github.com/EtaCassiopeia/rift/compare/v0.11.3...v0.12.0
-[0.11.3]: https://github.com/EtaCassiopeia/rift/compare/v0.11.2...v0.11.3
-[0.11.2]: https://github.com/EtaCassiopeia/rift/compare/v0.11.1...v0.11.2
-[0.11.1]: https://github.com/EtaCassiopeia/rift/compare/v0.11.0...v0.11.1
-[0.11.0]: https://github.com/EtaCassiopeia/rift/compare/v0.10.0...v0.11.0
-[0.10.0]: https://github.com/EtaCassiopeia/rift/compare/v0.9.1...v0.10.0
-[0.9.1]: https://github.com/EtaCassiopeia/rift/compare/v0.9.0...v0.9.1
-[0.9.0]: https://github.com/EtaCassiopeia/rift/compare/v0.8.0...v0.9.0
-[0.8.0]: https://github.com/EtaCassiopeia/rift/compare/v0.7.0...v0.8.0
-[0.7.0]: https://github.com/EtaCassiopeia/rift/compare/v0.6.0...v0.7.0
-[0.6.0]: https://github.com/EtaCassiopeia/rift/compare/v0.5.0...v0.6.0
-[0.5.0]: https://github.com/EtaCassiopeia/rift/compare/v0.4.0...v0.5.0
-[0.4.0]: https://github.com/EtaCassiopeia/rift/compare/v0.3.0...v0.4.0
-[0.3.0]: https://github.com/EtaCassiopeia/rift/compare/v0.2.0...v0.3.0
-[0.2.0]: https://github.com/EtaCassiopeia/rift/compare/v0.1.0-RC13...v0.2.0
-[0.1.0-RC13]: https://github.com/EtaCassiopeia/rift/releases/tag/v0.1.0-RC13
+[Unreleased]: https://github.com/achird-labs/rift/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/achird-labs/rift/compare/v0.13.6...v0.14.0
+[0.13.6]: https://github.com/achird-labs/rift/compare/v0.13.5...v0.13.6
+[0.13.5]: https://github.com/achird-labs/rift/compare/v0.13.4...v0.13.5
+[0.13.4]: https://github.com/achird-labs/rift/compare/v0.13.3...v0.13.4
+[0.13.3]: https://github.com/achird-labs/rift/compare/v0.13.2...v0.13.3
+[0.13.2]: https://github.com/achird-labs/rift/compare/v0.13.1...v0.13.2
+[0.13.1]: https://github.com/achird-labs/rift/compare/v0.13.0...v0.13.1
+[0.13.0]: https://github.com/achird-labs/rift/compare/v0.12.0...v0.13.0
+[0.12.0]: https://github.com/achird-labs/rift/compare/v0.11.3...v0.12.0
+[0.11.3]: https://github.com/achird-labs/rift/compare/v0.11.2...v0.11.3
+[0.11.2]: https://github.com/achird-labs/rift/compare/v0.11.1...v0.11.2
+[0.11.1]: https://github.com/achird-labs/rift/compare/v0.11.0...v0.11.1
+[0.11.0]: https://github.com/achird-labs/rift/compare/v0.10.0...v0.11.0
+[0.10.0]: https://github.com/achird-labs/rift/compare/v0.9.1...v0.10.0
+[0.9.1]: https://github.com/achird-labs/rift/compare/v0.9.0...v0.9.1
+[0.9.0]: https://github.com/achird-labs/rift/compare/v0.8.0...v0.9.0
+[0.8.0]: https://github.com/achird-labs/rift/compare/v0.7.0...v0.8.0
+[0.7.0]: https://github.com/achird-labs/rift/compare/v0.6.0...v0.7.0
+[0.6.0]: https://github.com/achird-labs/rift/compare/v0.5.0...v0.6.0
+[0.5.0]: https://github.com/achird-labs/rift/compare/v0.4.0...v0.5.0
+[0.4.0]: https://github.com/achird-labs/rift/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/achird-labs/rift/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/achird-labs/rift/compare/v0.1.0-RC13...v0.2.0
+[0.1.0-RC13]: https://github.com/achird-labs/rift/releases/tag/v0.1.0-RC13

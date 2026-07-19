@@ -16,7 +16,7 @@ configs, with sub-millisecond tail latency that stays flat as stub count grows.
 
 Native processes on Apple M4 (10 cores) / macOS · Rift 0.1.0 · Mountebank 2.9.1 ·
 `oha`, 50 connections, 20s/scenario. Full method and reproduction:
-[`tests/benchmark`](https://github.com/EtaCassiopeia/rift/tree/master/tests/benchmark).
+[`tests/benchmark`](https://github.com/achird-labs/rift/tree/master/tests/benchmark).
 
 | Feature | Mountebank | Rift | Speedup |
 |:--------|:-----------|:-----|:--------|
@@ -113,7 +113,7 @@ Mountebank shows linear degradation as stub count increases.
 
 The suite runs both engines as native processes, one at a time on disjoint ports,
 and posts byte-identical imposter JSON to each. See
-[`tests/benchmark/README.md`](https://github.com/EtaCassiopeia/rift/tree/master/tests/benchmark)
+[`tests/benchmark/README.md`](https://github.com/achird-labs/rift/tree/master/tests/benchmark)
 for full details.
 
 ### Prerequisites

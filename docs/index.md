@@ -14,7 +14,7 @@ permalink: /
 Rift is a drop-in replacement for [Mountebank](http://www.mbtest.org/) that provides **2-250x better performance** while maintaining full API compatibility. Use your existing Mountebank configurations and enjoy faster test execution.
 
 [Get Started]({{ site.baseurl }}/getting-started/){: .btn .btn-primary .fs-5 .mb-4 .mb-md-0 .mr-2 }
-[View on GitHub](https://github.com/EtaCassiopeia/rift){: .btn .fs-5 .mb-4 .mb-md-0 }
+[View on GitHub](https://github.com/achird-labs/rift){: .btn .fs-5 .mb-4 .mb-md-0 }
 
 ---
 
@@ -188,4 +188,4 @@ Rift is under active development. Current status:
 
 ## License
 
-Rift is distributed under the [Apache License 2.0](https://github.com/EtaCassiopeia/rift/blob/master/LICENSE).
+Rift is distributed under the [Apache License 2.0](https://github.com/achird-labs/rift/blob/master/LICENSE).

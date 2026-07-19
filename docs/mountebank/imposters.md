@@ -433,6 +433,33 @@ curl http://localhost:2525/imposters/4545
 
 ---
 
+## Imposter Error Responses
+
+These are errors served on the **imposter port** — distinct from the admin API's error responses
+(see [API Reference](../api/index.md)). Every one of them serves the same JSON envelope as the admin
+plane, with `Content-Type: application/json`:
+
+```json
+{ "errors": [ { "code": "...", "message": "..." } ] }
+```
+
+| Status | When |
+|:-------|:-----|
+| `400` | The request body could not be read to completion — a client transmission failure mid-stream. The underlying cause is logged server-side. |
+| `413` | The request body exceeded the configured size cap. |
+| `500` | An internal failure while building the response — for example a stub, inject, or upstream header value that is not a legal HTTP header. |
+| `504` | A script exceeded its deadline. See [Scripting](../features/scripting.md) and [Debug Mode](../features/debug-mode.md). |
+
+The `400`/`413` split matters when you are debugging a flaky client: **`413` means the body was too
+big, `400` means the connection failed to deliver the body it promised.** Earlier releases answered `413` for both,
+which reported every mid-stream network failure as "body too large" (#694).
+
+Two doors deliberately do **not** use the envelope: the `Unknown fault` diagnostic (a plain-text
+fault-injection marker) and the last-resort internal error emitted when the envelope itself cannot
+be constructed.
+
+---
+
 ## Best Practices
 
 1. **Use meaningful names** - Makes debugging easier
