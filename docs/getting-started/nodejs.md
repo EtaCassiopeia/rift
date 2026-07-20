@@ -11,7 +11,7 @@ permalink: /getting-started/nodejs/
 Rift provides official Node.js bindings via the `@rift-vs/rift` npm package. This package is a drop-in replacement for Mountebank's Node.js API, making migration seamless.
 
 > **The Node.js SDK lives in its own repository.** It is developed and published from
-> [`EtaCassiopeia/rift-node`](https://github.com/EtaCassiopeia/rift-node), which owns the npm
+> [`achird-labs/rift-node`](https://github.com/achird-labs/rift-node), which owns the npm
 > release. This engine repository no longer contains or publishes it — file SDK issues there, and
 > engine issues here.
 

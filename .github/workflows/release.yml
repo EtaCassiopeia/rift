@@ -621,7 +621,7 @@ jobs:
   # =============================================================================
   # Trigger the Node SDK bump (immediate engine -> rift-node coupling)
   # =============================================================================
-  # The npm package (@rift-vs/rift) lives in EtaCassiopeia/rift-node and tracks this engine's
+  # The npm package (@rift-vs/rift) lives in achird-labs/rift-node and tracks this engine's
   # releases. Instead of waiting for rift-node's daily engine-bump poll (up to ~24h), trigger it
   # now so the SDK bump PR opens within minutes of this release. rift-node's own pipeline still
   # owns and gates the actual npm publish (its first release is human-gated). Needs a PAT with
@@ -637,4 +637,4 @@ jobs:
       - name: Dispatch rift-node engine-bump
         env:
           GH_TOKEN: ${{ secrets.RIFT_NODE_DISPATCH_TOKEN }}
-        run: gh workflow run engine-bump.yml -R EtaCassiopeia/rift-node
+        run: gh workflow run engine-bump.yml -R achird-labs/rift-node

@@ -47,7 +47,7 @@ the source, the source wins — please file an issue.
 | `rift-ffi` | The C-ABI shared library (`cdylib`) plus an `rlib` for in-crate tests. | The `extern "C"` functions (`rift_start`, `rift_serve_admin`, …) and the cbindgen header. |
 
 > The Node.js package used to live here as `packages/rift-node`. It now has its own repository —
-> [`EtaCassiopeia/rift-node`](https://github.com/EtaCassiopeia/rift-node) — which owns and publishes
+> [`achird-labs/rift-node`](https://github.com/achird-labs/rift-node) — which owns and publishes
 > the npm package; this repository no longer builds or publishes it.
 
 ### Cargo features
