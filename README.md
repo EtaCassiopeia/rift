@@ -148,7 +148,7 @@ await server.close();
 
 ### Java / JVM
 
-For JVM projects, use the official [rift-java](https://github.com/EtaCassiopeia/rift-java) SDK.
+For JVM projects, use the official [rift-java](https://github.com/achird-labs/rift-java) SDK.
 It runs the engine three ways — embedded in-process (Panama FFM, no Docker), connected to any
 running admin endpoint, or as a managed spawned binary — with a fluent DSL plus JUnit 5, Spring,
 and Testcontainers integrations. Available on Maven Central under `io.github.etacassiopeia`:
@@ -180,7 +180,7 @@ See the [rift-java docs](https://achird-labs.github.io/rift-java/) for the full 
 - [Installation](https://achird-labs.github.io/rift/getting-started/) - Docker, binary, build from source
 - [Quick Start](https://achird-labs.github.io/rift/getting-started/quickstart) - Create your first imposter
 - [Node.js Integration](https://achird-labs.github.io/rift/getting-started/nodejs/) - npm package for Node.js
-- [Java / JVM SDK](https://github.com/EtaCassiopeia/rift-java) - rift-java for JUnit 5, Spring, and Testcontainers
+- [Java / JVM SDK](https://github.com/achird-labs/rift-java) - rift-java for JUnit 5, Spring, and Testcontainers
 - [Migration Guide](https://achird-labs.github.io/rift/getting-started/migration) - Using Rift with Mountebank configs
 
 ### Mountebank Compatibility
