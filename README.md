@@ -142,19 +142,33 @@ cargo build --release
 
 ### Node.js / npm
 
-For Node.js projects, use the official npm package:
+For Node.js projects, use the official [rift-node](https://github.com/achird-labs/rift-node) SDK
+(`@rift-vs/rift` on npm). It runs the engine three ways — embedded in-process (FFI via the
+companion `@rift-vs/rift-embedded` package, no Docker), connected to any running admin endpoint, or
+as a managed spawned binary — with a fluent DSL for stubs/predicates/responses/scenarios, plus
+Vitest and Jest testkits. Requires Node.js >= 20, ESM-only, zero runtime dependencies:
 
 ```bash
 npm install @rift-vs/rift
 ```
 
 ```javascript
-import rift from '@rift-vs/rift';
+import { rift, imposter, onGet, okJson, times } from '@rift-vs/rift';
 
-const server = await rift.create({ port: 2525 });
-// Create imposters, run tests...
-await server.close();
+await using engine = await rift.embedded(); // or rift.connect(url) / rift.spawn()
+
+const users = await engine.create(
+  imposter('users').stub(onGet('/api/users/1').willReturn(okJson({ id: 1, name: 'Alice' }))));
+
+await fetch(`${users.url}/api/users/1`);
+await users.verify(onGet('/api/users/1'), times(1)); // throws with a diff on mismatch
 ```
+
+Already on Mountebank, or migrating from the pre-monorepo `@rift-vs/rift`? The Mountebank-compatible
+`create()` stays available as a permanent drop-in, so adopting the typed DSL above is incremental,
+not a forced rewrite.
+
+See the [rift-node docs](https://github.com/achird-labs/rift-node) for the full feature surface.
 
 ### Java / JVM
 

@@ -23,32 +23,73 @@ Rift provides official Node.js bindings via the `@rift-vs/rift` npm package. Thi
 npm install @rift-vs/rift
 ```
 
-The package automatically downloads the appropriate `rift-http-proxy` binary for your platform during installation.
+There is **no `postinstall` download**. Nothing is fetched at `npm install` time — the engine
+binary is resolved lazily, the first time it's actually needed (`rift.spawn()` or the
+Mountebank-compat `create()`), in this order:
+
+1. An explicit override — `binaryPath` passed to `spawn()`, or the `RIFT_BINARY_PATH` env var.
+2. The system `PATH` — the first of `rift-http-proxy` / `rift` / `mb` found, but only if it
+   `--version`-probes as Rift. A Mountebank `mb` shadowing the name on `PATH` is skipped rather
+   than run in Rift's place.
+3. A previously-downloaded copy in the local version cache.
+4. A checksummed download from GitHub Releases (or `RIFT_DOWNLOAD_URL`/`RIFT_MIRROR_URL`), cached
+   for next time.
+
+If `RIFT_OFFLINE` or `RIFT_SKIP_BINARY_DOWNLOAD` is set, step 4 never runs — resolution throws with
+manual-install instructions instead of touching the network. Run `npx rift-fetch` ahead of time
+(e.g. in CI, or to prep an air-gapped install) to warm the cache so first use doesn't pay the
+download cost.
+
+The in-process **embedded** transport (`rift.embedded()`) resolves a separate artifact — the
+`librift_ffi` cdylib — via the companion `@rift-vs/rift-embedded` package, following the same
+override → cache → download order (see below).
 
 ### Supported Platforms
 
-| Platform | Architecture |
-|:---------|:-------------|
-| macOS    | x64, arm64   |
-| Linux    | x64, arm64   |
-| Windows  | x64          |
+| Platform | Architecture | libc |
+|:---------|:-------------|:-----|
+| macOS    | x64, arm64   | -    |
+| Linux    | x64, arm64   | glibc and musl (musl auto-selected on Alpine) |
+| Windows  | x64          | -    |
 
 ---
 
 ## Basic Usage
 
+The modern surface is a typed, fluent DSL over three transports that all hand back the same
+engine client — pick whichever fits how the binary should run:
+
+- `rift.embedded()` — in-process, no child process, needs `@rift-vs/rift-embedded` installed.
+- `rift.spawn()` — manages the `rift` engine binary as a child process for you.
+- `rift.connect(url)` — attaches to an engine already running elsewhere.
+
+```javascript
+import { rift, imposter, onGet, okJson } from '@rift-vs/rift';
+
+await using engine = await rift.spawn(); // or rift.embedded() / rift.connect(url)
+
+const users = await engine.create(
+  imposter('users').stub(onGet('/api/users/1').willReturn(okJson({ id: 1, name: 'Alice' })))
+);
+
+await fetch(`${users.url}/api/users/1`);
+```
+
+`await using` closes the engine automatically at the end of scope (`Symbol.asyncDispose`); call
+`await engine.close()` yourself if you're not in a context that supports it.
+
+### Mountebank-compat `create()`
+
+Existing Mountebank-style code — raw REST calls against the admin API, the `mb` CLI, or code
+already written against the pre-0.15 `@rift-vs/rift` — keeps working unchanged via the default
+export's `create()`:
+
 ```javascript
 import rift from '@rift-vs/rift';
 
-// Start a Rift server
-const server = await rift.create({
-  port: 2525,
-  loglevel: 'info',
-});
+const server = await rift.create({ port: 2525, loglevel: 'info' });
 
-console.log(`Rift server running on ${server.host}:${server.port}`);
-
-// Create an imposter via REST API
+// existing Mountebank-style REST calls / mb client code work unchanged against server.port
 await fetch('http://localhost:2525/imposters', {
   method: 'POST',
   headers: { 'Content-Type': 'application/json' },
@@ -57,24 +98,19 @@ await fetch('http://localhost:2525/imposters', {
     protocol: 'http',
     stubs: [{
       predicates: [{ equals: { path: '/api/users' } }],
-      responses: [{
-        is: {
-          statusCode: 200,
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify([{ id: 1, name: 'Alice' }])
-        }
-      }]
+      responses: [{ is: { statusCode: 200, body: JSON.stringify([{ id: 1, name: 'Alice' }]) } }]
     }]
   })
 });
 
-// Test your mock
 const response = await fetch('http://localhost:4545/api/users');
 console.log(await response.json()); // [{ id: 1, name: 'Alice' }]
 
-// Clean up when done
 await server.close();
 ```
+
+`create()` is a permanent, first-class drop-in — not deprecated — so adopting the typed DSL above
+is incremental, not a forced rewrite.
 
 ---
 
@@ -147,8 +183,13 @@ Creates and starts a new Rift server instance.
 | `host`           | `string`   | `'localhost'` | Bind address                        |
 | `loglevel`       | `string`   | `'info'`      | Log level: debug, info, warn, error |
 | `logfile`        | `string`   | -             | Path to log file                    |
+| `datadir`        | `string`   | -             | Directory for imposter persistence (Mountebank `--datadir` parity) |
 | `ipWhitelist`    | `string[]` | -             | Allowed IP addresses                |
 | `allowInjection` | `boolean`  | `false`       | Enable script injection             |
+
+`impostersRepository` and `redis` (custom Mountebank repository config) are accepted by the type
+for compatibility but rejected at runtime — Rift's native binary can't load a Node repository
+module. Use `datadir` for persistence instead.
 
 #### RiftServer
 
@@ -207,267 +248,85 @@ describe('API Tests', () => {
 });
 ```
 
+(`@rift-vs/rift/testkit/jest` also ships a `setupRift()` helper with automatic per-test imposter
+teardown — see the SDK README's "Testkit" section.)
+
 ---
 
 ## Environment Variables
 
-| Variable                  | Description                                |
-|:--------------------------|:-------------------------------------------|
-| `RIFT_BINARY_PATH`        | Path to the rift-http-proxy binary         |
-| `RIFT_VERSION`            | Version to download (default: latest)      |
-| `RIFT_DOWNLOAD_URL`       | Custom download URL for binary             |
-| `RIFT_SKIP_BINARY_DOWNLOAD` | Skip binary download during install      |
+| Variable                       | Applies to    | Description                                |
+|:--------------------------------|:-------------|:-------------------------------------------|
+| `RIFT_BINARY_PATH`              | engine binary | Explicit path override; skips PATH/cache/download |
+| `RIFT_FFI_LIB`                  | embedded cdylib | Explicit path override; skips cache/download (no checksum — you own the file) |
+| `RIFT_CACHE_DIR`                | embedded cdylib | Overrides the cache root (defaults to `XDG_CACHE_HOME`, then `%LOCALAPPDATA%` on Windows, else `~/.cache`) |
+| `RIFT_DOWNLOAD_URL`             | both          | Alternate release mirror base              |
+| `RIFT_MIRROR_URL`               | engine binary | Alternate mirror base for the binary only (`RIFT_DOWNLOAD_URL` wins if both are set) |
+| `RIFT_OFFLINE` / `RIFT_SKIP_BINARY_DOWNLOAD` | both | Air-gapped mode: never reach the network; resolution throws with manual-install instructions if nothing local is found |
+| `RIFT_SKIP_CHECKSUM`            | engine binary only | Opt out of a missing (not mismatched) checksum sidecar — not available for the cdylib |
+
+Note: these govern binary/library *resolution*, not installation — there's nothing to skip during
+`npm install` since it never downloads anything (see "Installation" above).
 
 ---
 
 ## Manual Binary Installation
 
-If automatic download doesn't work (e.g., behind a firewall), install the binary manually:
+If resolution can't reach the network (e.g. behind a firewall) and nothing is cached or on `PATH`,
+install the binary manually:
 
 1. Download from [GitHub Releases](https://github.com/achird-labs/rift/releases)
-2. Set the `RIFT_BINARY_PATH` environment variable:
+2. Point the SDK at it:
 
 ```bash
-export RIFT_BINARY_PATH=/path/to/rift-http-proxy
-npm install @rift-vs/rift
+export RIFT_BINARY_PATH=/path/to/rift
 ```
+
+Or run `npx rift-fetch` ahead of time on a machine with network access, then copy its resolved
+cache directory to the air-gapped one.
 
 ---
 
-## Local Development & Testing
+## SDK Development
 
-This section explains how to build and test Rift and the npm package locally before publishing.
-
-### 1. Build Rift Binary
-
-First, build the Rift binary from source:
-
-```bash
-# Clone the repository
-git clone https://github.com/achird-labs/rift.git
-cd rift
-
-# Build the release binary
-cargo build --release
-
-# The binary is at: ./target/release/rift-http-proxy
-```
-
-### 2. Build the npm Package
-
-```bash
-cd packages/rift-node
-
-# Install dependencies (skip binary download since we'll use local)
-RIFT_SKIP_BINARY_DOWNLOAD=1 npm install
-
-# Build TypeScript
-npm run build
-```
-
-### 3. Test Locally with npm pack
-
-This method creates a tarball that simulates a published package:
-
-```bash
-# Create the package tarball
-cd packages/rift-node
-npm pack
-# Creates: rift-vs-rift-0.1.0.tgz
-
-# In a test directory, install the tarball
-mkdir /tmp/test-rift && cd /tmp/test-rift
-npm init -y
-npm install /path/to/rift/packages/rift-node/rift-vs-rift-0.1.0.tgz
-```
-
-### 4. Alternative: Test with npm link
-
-For active development, `npm link` is faster:
-
-```bash
-# Link the package globally
-cd packages/rift-node
-npm link
-
-# In your test directory, use the linked package
-cd /tmp/test-rift
-npm init -y
-npm link @rift-vs/rift
-```
-
-### 5. Create a Test Script
-
-Create `test.mjs` in your test directory:
-
-```javascript
-import rift from '@rift-vs/rift';
-
-async function main() {
-  console.log('Starting Rift server...');
-
-  const server = await rift.create({
-    port: 2525,
-    loglevel: 'info',
-  });
-
-  console.log(`Server running on ${server.host}:${server.port}`);
-
-  // Create a test imposter
-  const createResponse = await fetch('http://localhost:2525/imposters', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      port: 4545,
-      protocol: 'http',
-      stubs: [{
-        predicates: [{ equals: { path: '/test' } }],
-        responses: [{ is: { statusCode: 200, body: 'Hello from Rift!' } }]
-      }]
-    })
-  });
-
-  console.log('Imposter created:', createResponse.status);
-
-  // Test the imposter
-  const testResponse = await fetch('http://localhost:4545/test');
-  const body = await testResponse.text();
-  console.log('Response:', body);
-
-  // Verify
-  if (body === 'Hello from Rift!') {
-    console.log('✓ Test passed!');
-  } else {
-    console.error('✗ Test failed!');
-    process.exit(1);
-  }
-
-  // Cleanup
-  await server.close();
-  console.log('Server stopped');
-}
-
-main().catch(err => {
-  console.error('Error:', err);
-  process.exit(1);
-});
-```
-
-### 6. Run the Test
-
-```bash
-# Set the path to your locally built binary
-export RIFT_BINARY_PATH=/path/to/rift/target/release/rift-http-proxy
-
-# Run the test
-node test.mjs
-```
-
-Expected output:
-
-```
-Starting Rift server...
-Server running on localhost:2525
-Imposter created: 201
-Response: Hello from Rift!
-✓ Test passed!
-Server stopped
-```
-
-### Complete Local Test Script
-
-For convenience, here's a script that does everything:
-
-```bash
-#!/bin/bash
-set -e
-
-RIFT_DIR="/path/to/rift"
-TEST_DIR="/tmp/test-rift-local"
-
-# Build Rift
-echo "Building Rift..."
-cd "$RIFT_DIR"
-cargo build --release
-
-# Build npm package
-echo "Building npm package..."
-cd "$RIFT_DIR/packages/rift-node"
-RIFT_SKIP_BINARY_DOWNLOAD=1 npm install
-npm run build
-npm pack
-
-# Setup test directory
-echo "Setting up test..."
-rm -rf "$TEST_DIR"
-mkdir -p "$TEST_DIR"
-cd "$TEST_DIR"
-npm init -y
-npm install "$RIFT_DIR/packages/rift-node"/*.tgz
-
-# Create test file
-cat > test.mjs << 'EOF'
-import rift from '@rift-vs/rift';
-
-const server = await rift.create({ port: 2525 });
-console.log('Server started on port', server.port);
-
-await fetch('http://localhost:2525/imposters', {
-  method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({
-    port: 4545,
-    protocol: 'http',
-    stubs: [{
-      predicates: [{ equals: { path: '/hello' } }],
-      responses: [{ is: { statusCode: 200, body: 'Hello!' } }]
-    }]
-  })
-});
-
-const res = await fetch('http://localhost:4545/hello');
-const text = await res.text();
-
-if (text === 'Hello!') {
-  console.log('✓ Test passed!');
-} else {
-  console.error('✗ Test failed:', text);
-  process.exit(1);
-}
-
-await server.close();
-EOF
-
-# Run test
-echo "Running test..."
-export RIFT_BINARY_PATH="$RIFT_DIR/target/release/rift-http-proxy"
-node test.mjs
-
-echo "Done!"
-```
+This engine repository does not contain the Node.js SDK source — it only documents how to use the
+published package. To build the SDK from source, run its tests, or contribute a change, see
+[`achird-labs/rift-node`](https://github.com/achird-labs/rift-node) and its README/CONTRIBUTING
+guide.
 
 ---
 
 ## Utility Functions
 
-### `findBinary(): Promise<string>`
+### `resolveBinary(options?): Promise<string>`
 
-Locates the rift-http-proxy binary. Searches in order:
-1. `RIFT_BINARY_PATH` environment variable
-2. Package's `binaries/` directory
-3. System PATH
+The current binary resolver. Resolution order:
 
-### `downloadBinary(version?: string): Promise<string>`
+1. `options.binaryPath` or `RIFT_BINARY_PATH`, if it exists on disk.
+2. The first of `rift-http-proxy` / `rift` / `mb` found on `PATH` that `--version`-probes as Rift
+   (a Mountebank `mb` shadowing the name is skipped).
+3. A previously-downloaded copy in the local version cache.
+4. Otherwise, download and checksum-verify the release archive for the resolved version (skipped
+   entirely, throwing instead, when `RIFT_OFFLINE`/`RIFT_SKIP_BINARY_DOWNLOAD` is set).
 
-Downloads the Rift binary for the current platform.
+### `findBinary(): Promise<string>` (deprecated)
 
-### `getBinaryVersion(): Promise<string | null>`
+Legacy wrapper over `resolveBinary()` limited to steps 1-3 above (no download); kept for
+backward compatibility. Prefer `resolveBinary`.
 
-Returns the installed binary version, or null if not found.
+### `downloadBinary(version?: string): Promise<string>` (deprecated)
+
+Legacy wrapper that force-downloads a specific version, bypassing `PATH`/cache. Prefer
+`resolveBinary({ version })`.
+
+### `getBinaryVersion(): Promise<string | null>` (deprecated)
+
+Returns the resolved binary's version string, or `null` if not found.
 
 ---
 
 ## Requirements
 
-- Node.js 18.0.0 or later
+- **Node.js 20.0.0 or later.** The SDK uses the global `fetch`, `worker_threads`, and `await using`.
+- **ESM only.** The package ships as ES modules with no CommonJS build — `import`, not `require()`.
 - One of the supported platforms (see above)
