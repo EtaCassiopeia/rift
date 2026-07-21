@@ -7,50 +7,80 @@ permalink: /performance/
 
 # Performance
 
-Rift delivers **10–500x** the throughput of Mountebank on identical imposter
+Rift delivers **20–6,000x** the throughput of Mountebank on identical imposter
 configs, with sub-millisecond tail latency that stays flat as stub count grows.
 
 ---
 
 ## Benchmark Summary
 
-Native processes on Apple M4 (10 cores) / macOS · Rift 0.1.0 · Mountebank 2.9.1 ·
-`oha`, 50 connections, 20s/scenario. Full method and reproduction:
+The suite was run on two deliberately different hosts. Publishing both is the point:
+the multiplier depends heavily on the machine, and a single number would overstate
+the result.
+
+- **Apple M4 laptop** (10 cores, macOS) — the conservative read
+- **AMD EPYC 9V74** (16 vCPU, 62 GiB, Linux) — the server read
+
+Rift built from `master` (`924cf73`) · Mountebank 2.9.1 · `oha`, 50 keep-alive
+connections, 20s/scenario after warmup, native processes (no Docker), each engine run
+alone. Every figure is the **median of 3 repetitions**. Measured 2026-07-20. Full
+method and reproduction:
 [`tests/benchmark`](https://github.com/achird-labs/rift/tree/master/tests/benchmark).
 
-| Feature | Mountebank | Rift | Speedup |
-|:--------|:-----------|:-----|:--------|
-| Regex (100th pattern) | 106 RPS | 54,434 RPS | **515x** |
-| API stub — no match (404) | 1,309 RPS | 206,865 RPS | **158x** |
-| API stub — last match | 1,351 RPS | 201,403 RPS | **149x** |
-| Query-param routing | 2,366 RPS | 118,228 RPS | **50x** |
-| Header routing | 3,050 RPS | 148,739 RPS | **49x** |
-| Complex AND/OR predicates | 4,646 RPS | 181,320 RPS | **39x** |
-| JSONPath predicates | 4,480 RPS | 173,671 RPS | **39x** |
-| XPath predicates | 5,552 RPS | 174,567 RPS | **31x** |
-| JSON body matching | 7,802 RPS | 188,247 RPS | **24x** |
-| Template responses | 9,446 RPS | 189,649 RPS | **20x** |
+| Scenario | MB (M4) | Rift (M4) | M4 speedup | MB (EPYC) | Rift (EPYC) | EPYC speedup |
+|:---------|--------:|----------:|:-----------|----------:|------------:|:-------------|
+| Regex (100th pattern) | 112 | 207,024 | **1,857x** | 52 | 317,851 | **6,160x** |
+| API stub — no match (404) | 1,351 | 209,763 | **155x** | 549 | 332,574 | **606x** |
+| API stub — last match | 1,344 | 209,523 | **156x** | 542 | 322,530 | **595x** |
+| API stub — middle match | 3,437 | 210,151 | **61x** | 1,081 | 324,067 | **300x** |
+| API stub — first match | 8,546 | 211,378 | **25x** | 5,728 | 323,408 | **57x** |
+| Query-param routing | 2,751 | 164,133 | **60x** | 1,112 | 211,748 | **190x** |
+| Header routing | 3,016 | 158,596 | **53x** | 1,202 | 201,940 | **168x** |
+| Complex AND/OR predicates | 4,703 | 191,987 | **41x** | 1,814 | 259,548 | **143x** |
+| JSONPath predicates | 4,312 | 199,404 | **46x** | 1,921 | 304,796 | **159x** |
+| XPath predicates | 5,542 | 187,869 | **34x** | 1,966 | 247,897 | **126x** |
+| JSON body matching | 7,611 | 199,670 | **26x** | 2,730 | 294,294 | **108x** |
+| Template responses | 9,022 | 194,236 | **22x** | 3,152 | 283,815 | **90x** |
+| Simple static stub | 8,898 | 214,818 | **24x** | 5,982 | 324,952 | **54x** |
 
-> Absolute numbers are unconstrained (whole machine) and scale with hardware. What's
-> stable across machines is the *shape*: Rift stays flat where Mountebank degrades.
+### How to read the two columns
+
+Going from the laptop to the 16-vCPU server, **Rift gets faster (215k → 325k) and
+Mountebank gets slower (8,898 → 5,982)**. Mountebank is single-threaded, so it can
+only use one core, and this server's individual cores are slower than the M4's — it
+gains nothing from the other 15. Rift uses them all.
+
+That means the EPYC multipliers are inflated at *both* ends, and the honest headline
+is the M4 column. It is still 22x–1,857x.
+
+Tail latency is the more stable comparison: Rift's p99 is **0.43–0.97 ms on both
+hosts**, while Mountebank's ranges from 2.9 ms to 1.7 *seconds* depending on scenario.
+
+> Measurement caveat: a laptop thermally throttles under a 30-minute run — both
+> engines lost ~7% between the first and last repetition, and per-scenario spread
+> reached 12% on the M4 versus 5% on EPYC. Treat M4 figures as ±10%.
 
 ---
 
 ## Why throughput stays flat
 
-Rift holds ~120k–210k RPS whether the matching stub is first, middle, or last — and
-on a no-match 404 — while Mountebank degrades linearly with stub count:
+Rift holds ~210k RPS (M4) / ~325k RPS (EPYC) whether the matching stub is first,
+middle, or last — and on a no-match 404 — while Mountebank degrades linearly with
+stub count:
 
 | API stub position | Mountebank (RPS) | Rift (RPS) | Speedup |
 |:------------------|:-----------------|:-----------|:--------|
-| First | 8,124 | 209,555 | **26x** |
-| Middle | 3,071 | 198,504 | **65x** |
-| Last | 1,351 | 201,403 | **149x** |
-| No match (404) | 1,309 | 206,865 | **158x** |
+| First | 8,546 | 211,378 | **25x** |
+| Middle | 3,437 | 210,151 | **61x** |
+| Last | 1,344 | 209,523 | **156x** |
+| No match (404) | 1,351 | 209,763 | **155x** |
 
-Regex is the exception on *both* sides: it can't be hash-dispatched, so it's Rift's
-own slowest matcher (~54k RPS) — but Mountebank's per-stub JS `RegExp` scan collapses
-to 106 RPS at the 100th pattern, a 515x gap.
+Regex used to be the exception on Rift's side too — it can't be hash-dispatched, and
+at the 100th pattern Rift managed ~54k RPS against Mountebank's 106. The
+candidate-bitset matching framework removed that cliff: regex now runs at **207k RPS**,
+in line with every other predicate type. Mountebank's per-stub JS `RegExp` scan still
+collapses to 112 RPS at the 100th pattern, so the gap widened from 515x to **1,857x**
+— not because Mountebank got slower, but because Rift stopped having a slow path.
 
 On the admin control plane, creating 1,000 fully-overlapping stubs (the O(n²) case
 issue #423 fixed) takes Rift 6.6ms vs Mountebank's 114.7ms, and grows memory +9MB vs
@@ -242,12 +272,12 @@ resources:
 
 | Tool | Language | Typical RPS | Best For |
 |:-----|:---------|:------------|:---------|
-| **Rift** | Rust | 100,000+ | High-performance mocking |
+| **Rift** | Rust | 200,000+ | High-performance mocking |
 | Mountebank | Node.js | 500-2,000 | Feature-rich service virtualization |
 | WireMock | Java | 1,000-5,000 | Java ecosystem integration |
 | MockServer | Java | 1,000-3,000 | Contract testing |
 
-Rift provides 10-500x better performance while maintaining Mountebank compatibility.
+Rift provides 20-6,000x better performance while maintaining Mountebank compatibility.
 (Rift's figure is native/unconstrained; it scales with hardware.)
 
 ---

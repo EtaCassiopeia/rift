@@ -33,13 +33,17 @@ Built in Rust with async I/O, Rift delivers exceptional performance:
 
 | Feature | Mountebank | Rift | Speedup |
 |:--------|:-----------|:-----|:--------|
-| Simple stubs | 4,093 RPS | 199,228 RPS | **49x faster** |
-| Regex (100th pattern) | 106 RPS | 54,434 RPS | **515x faster** |
-| JSONPath predicates | 4,480 RPS | 173,671 RPS | **39x faster** |
-| API stub — no match (404) | 1,309 RPS | 206,865 RPS | **158x faster** |
-| Complex predicates | 4,646 RPS | 181,320 RPS | **39x faster** |
+| Simple stubs | 8,898 RPS | 214,818 RPS | **24x faster** |
+| Regex (100th pattern) | 112 RPS | 207,024 RPS | **1,857x faster** |
+| JSONPath predicates | 4,312 RPS | 199,404 RPS | **46x faster** |
+| API stub — no match (404) | 1,351 RPS | 209,763 RPS | **155x faster** |
+| Complex predicates | 4,703 RPS | 191,987 RPS | **41x faster** |
 
-See the [performance page](performance/) for the full suite and method.
+<sub>Apple M4 laptop, 50 connections, median of 3 repetitions. On a 16-vCPU AMD EPYC server the
+same suite reaches 325k RPS and 6,160x on regex — but Mountebank is *slower* there, so the M4
+figures above are the conservative read.</sub>
+
+See the [performance page](performance/) for both hosts, the full suite, and the method.
 
 ### Full Feature Compatibility
 
