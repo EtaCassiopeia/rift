@@ -22,22 +22,32 @@ Rift is a high-performance, [Mountebank](https://www.mbtest.dev/)-compatible moc
 
 ### Blazing Fast Performance
 
-| Workload | Mountebank | Rift | Speedup |
-|:---------|-----------:|-----:|:--------|
-| Simple static stub | 4,141 RPS | 214,028 RPS | **~52x** |
-| Deep path match (410 stubs) | 1,342 RPS | 208,580 RPS | **~155x** |
-| Complex AND/OR predicates | 4,619 RPS | 191,724 RPS | **~42x** |
-| JSON body equals | 7,780 RPS | 203,490 RPS | **~26x** |
-| JSONPath predicate | 3,586 RPS | 201,029 RPS | **~56x** |
-| XPath predicate | 5,640 RPS | 185,417 RPS | **~33x** |
-| Regex path (100 patterns) | 107 RPS | 48,029 RPS | **~449x** |
+Both engines, same machine, same load — measured on two very different hosts so you can see how
+much of the gap is the engine and how much is the hardware:
 
-<sub>Measured 2026-07-07 — Rift `0.11.0` (built from `master`) vs Mountebank `2.9.1`, native
-processes (no Docker) on Apple Silicon (macOS), `oha` at 50 keep-alive connections, 20s/scenario
-after warmup, each engine run alone on the same machine. Throughput scales with matching
-complexity: Rift stays flat while Mountebank's per-request cost grows with stub count and predicate
-type. Full methodology and all 13 scenarios: [`tests/benchmark`](tests/benchmark/). Your numbers
-will vary with hardware and config.</sub>
+| Workload | Apple M4 laptop<br><sub>Mountebank → Rift</sub> | AMD EPYC 9V74, 16 vCPU<br><sub>Mountebank → Rift</sub> |
+|:---------|:--------------------------|:----------------------------|
+| Simple static stub | 8,898 → 214,818 RPS (**24x**) | 5,982 → 324,952 RPS (**54x**) |
+| Deep path match (410 stubs) | 1,344 → 209,523 RPS (**156x**) | 542 → 322,530 RPS (**595x**) |
+| Complex AND/OR predicates | 4,703 → 191,987 RPS (**41x**) | 1,814 → 259,548 RPS (**143x**) |
+| JSON body equals | 7,611 → 199,670 RPS (**26x**) | 2,730 → 294,294 RPS (**108x**) |
+| JSONPath predicate | 4,312 → 199,404 RPS (**46x**) | 1,921 → 304,796 RPS (**159x**) |
+| XPath predicate | 5,542 → 187,869 RPS (**34x**) | 1,966 → 247,897 RPS (**126x**) |
+| Regex path (100 patterns) | 112 → 207,024 RPS (**1,857x**) | 52 → 317,851 RPS (**6,160x**) |
+
+Read the two columns together, not separately. Rift gets **faster** with more cores (215k → 325k);
+Mountebank gets **slower** (8,898 → 5,982), because it is single-threaded and the server's
+individual cores are slower than the laptop's. So the EPYC multipliers are inflated at both ends —
+the M4 column is the more conservative read, and it is still 24x–1,857x.
+
+<sub>Measured 2026-07-20 — Rift built from `master` (`924cf73`) vs Mountebank `2.9.1`, native
+processes (no Docker), `oha` at 50 keep-alive connections, 20s/scenario after warmup, each engine
+run alone on the same machine. Each figure is the median of 3 repetitions; per-scenario spread was
+≤12% on the M4 (a laptop thermally throttles over a 30-minute run — both engines lost ~7% between
+the first and last repetition) and ≤5% on EPYC. Throughput scales with matching complexity: Rift
+stays flat while Mountebank's per-request cost grows with stub count and predicate type. Full
+methodology and all 13 scenarios: [`tests/benchmark`](tests/benchmark/). Your numbers will vary
+with hardware and config.</sub>
 
 ### Full Feature Support
 
