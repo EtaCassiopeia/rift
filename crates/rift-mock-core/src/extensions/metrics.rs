@@ -6,7 +6,7 @@
 use lazy_static::lazy_static;
 use parking_lot::Mutex;
 use prometheus::{
-    CounterVec, Encoder, GaugeVec, HistogramVec, TextEncoder, register_counter_vec,
+    Counter, CounterVec, Encoder, GaugeVec, HistogramVec, TextEncoder, register_counter_vec,
     register_gauge_vec, register_histogram_vec,
 };
 use std::collections::HashMap;
@@ -283,14 +283,43 @@ impl Drop for AcceptOutageGuard {
     }
 }
 
-/// Record a classified accept error for `listener` (issue #838).
+/// Pre-resolved [`ACCEPT_ERRORS_TOTAL`] children for one accept loop (issue #840).
 ///
-/// `class` is `"transient"` or `"systemic"`. Called from the accept loops themselves rather than
-/// from `AcceptErrorLog`, which stays dependency-free and clock-free.
-pub fn record_accept_error(listener: &'static str, class: &'static str) {
-    ACCEPT_ERRORS_TOTAL
-        .with_label_values(&[listener, class])
-        .inc();
+/// Resolving `with_label_values` per error costs a label hash plus a `MetricVec` lookup on a path
+/// that must not carry hoistable work: the transient arm retries with **no backoff by design**
+/// (#750), so a `ECONNABORTED` storm runs it at full loop rate. Resolve the two children once when
+/// the loop starts and pay one atomic add per error instead — the same treatment #746 gave
+/// `ACCEPTED_CONNECTIONS_TOTAL`.
+///
+/// Held per loop alongside [`AcceptBackoff`](crate::proxy::AcceptBackoff),
+/// [`AcceptErrorLog`](crate::proxy::AcceptErrorLog) and [`AcceptOutageGuard`]. Deliberately a
+/// separate type from that guard: this is a pair of monotonic handles with no lifecycle, whereas
+/// the guard owns RAII outage state whose `Drop` carries meaning.
+#[derive(Debug, Clone)]
+pub struct AcceptErrorCounters {
+    transient: Counter,
+    systemic: Counter,
+}
+
+impl AcceptErrorCounters {
+    /// Resolve both class children for `listener` once.
+    #[must_use]
+    pub fn new(listener: &'static str) -> Self {
+        Self {
+            transient: ACCEPT_ERRORS_TOTAL.with_label_values(&[listener, "transient"]),
+            systemic: ACCEPT_ERRORS_TOTAL.with_label_values(&[listener, "systemic"]),
+        }
+    }
+
+    /// Count a transient accept error (retried immediately).
+    pub fn record_transient(&self) {
+        self.transient.inc();
+    }
+
+    /// Count a systemic accept error (backed off).
+    pub fn record_systemic(&self) {
+        self.systemic.inc();
+    }
 }
 
 /// Helper to record proxy request duration
@@ -515,12 +544,16 @@ mod tests {
     }
 
     // Issue #838: the accept-error signals a scrape can alert on. A wedged listener stays bound
-    // and answers nothing, so these are the live evidence that it is degraded.
+    // and answers nothing, so these are the live evidence that it is degraded. Issue #840: driven
+    // through the pre-resolved handles, so this exercises the production path rather than a helper
+    // no loop calls.
     #[test]
-    fn test_record_accept_error_by_listener_and_class() {
-        record_accept_error("test-counter", "systemic");
-        record_accept_error("test-counter", "systemic");
-        record_accept_error("test-counter", "transient");
+    fn test_accept_error_counters_record_by_listener_and_class() {
+        // Unique label so this can never collide with another test's counters.
+        let counters = AcceptErrorCounters::new("test-counter");
+        counters.record_systemic();
+        counters.record_systemic();
+        counters.record_transient();
 
         assert_eq!(
             ACCEPT_ERRORS_TOTAL
@@ -533,6 +566,18 @@ mod tests {
                 .with_label_values(&["test-counter", "transient"])
                 .get(),
             1.0
+        );
+
+        // A second handle for the same listener must address the same children, not fresh ones —
+        // otherwise a restarted loop would silently reset its own series.
+        let again = AcceptErrorCounters::new("test-counter");
+        again.record_transient();
+        assert_eq!(
+            ACCEPT_ERRORS_TOTAL
+                .with_label_values(&["test-counter", "transient"])
+                .get(),
+            2.0,
+            "re-resolving a label must return the same child, not a new counter"
         );
 
         let rendered = collect_metrics();

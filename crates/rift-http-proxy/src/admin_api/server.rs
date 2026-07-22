@@ -360,6 +360,8 @@ async fn accept_loop(
     let mut error_log = AcceptErrorLog::default();
     // Clears its contribution on every exit path, including a cancel break or a panic (#838).
     let mut outage = rift_mock_core::extensions::AcceptOutageGuard::new("admin");
+    // Resolved once per loop, not per error (#840).
+    let accept_errors = rift_mock_core::extensions::AcceptErrorCounters::new("admin");
 
     loop {
         // Acquire a permit *before* accepting so a cap holds connections back in the listener
@@ -410,14 +412,14 @@ async fn accept_loop(
             Err(e) => match classify_accept_error(&e) {
                 // Expected under load — retry immediately, no backoff, no error spam.
                 AcceptErrorClass::Transient => {
-                    rift_mock_core::extensions::record_accept_error("admin", "transient");
+                    accept_errors.record_transient();
                     debug!("transient accept error on the admin listener: {e}");
                     continue;
                 }
                 // Systemic (fd exhaustion / unknown): log once on entry, then back off. Raced
                 // against `cancel` so a backoff sleep never delays admin-server shutdown.
                 AcceptErrorClass::Systemic => {
-                    rift_mock_core::extensions::record_accept_error("admin", "systemic");
+                    accept_errors.record_systemic();
                     match error_log.on_error() {
                         Some(AcceptErrorEvent::Onset) => {
                             outage.enter();
