@@ -939,7 +939,11 @@ impl ImposterManager {
                     // Port is available, return the port and bound listener
                     return Ok((port, listener));
                 }
-                Err(_) => continue, // Port in use by OS, try next
+                // Only "address in use" means "try the next port". Any other bind failure
+                // (e.g. EMFILE — too many open files) is not a port-availability signal: report it
+                // truthfully instead of scanning all 16k ports and then blaming port exhaustion.
+                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => continue,
+                Err(e) => return Err(ImposterError::BindError(port, anyhow::Error::new(e))),
             }
         }
 
@@ -1581,6 +1585,49 @@ mod tests {
     use super::*;
     use crate::imposter::ResponseMode;
 
+    /// Raise this process's soft file-descriptor limit for the fd-heavy concurrent tests (#814).
+    ///
+    /// Several tests in this module open many sockets/runtimes at once; at `--test-threads=16` a
+    /// small launcher default (macOS launchd defaults `RLIMIT_NOFILE` soft to 256) is exhausted
+    /// (`EMFILE`) and they fail spuriously — the failure is resource contention, not a real bug.
+    /// Raise the soft limit toward the hard cap (bounded at 4096), once per process. Best-effort:
+    /// if the raise is refused the test still runs and surfaces `EMFILE` loudly on its own.
+    #[cfg(unix)]
+    fn raise_fd_limit() {
+        use std::sync::Once;
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            // SAFETY: get/setrlimit with a valid resource id and a stack-allocated rlimit; the
+            // calls read/write only that struct and report failure via their return value.
+            unsafe {
+                let mut lim = libc::rlimit {
+                    rlim_cur: 0,
+                    rlim_max: 0,
+                };
+                if libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) == 0 {
+                    let target = lim.rlim_max.min(4096);
+                    if lim.rlim_cur < target {
+                        lim.rlim_cur = target;
+                        if libc::setrlimit(libc::RLIMIT_NOFILE, &lim) != 0 {
+                            eprintln!(
+                                "raise_fd_limit: setrlimit to {target} refused: {}",
+                                std::io::Error::last_os_error()
+                            );
+                        }
+                    }
+                } else {
+                    eprintln!(
+                        "raise_fd_limit: getrlimit failed: {}",
+                        std::io::Error::last_os_error()
+                    );
+                }
+            }
+        });
+    }
+
+    #[cfg(not(unix))]
+    fn raise_fd_limit() {}
+
     // ── Accept-error handling (issue #750) ───────────────────────────────────────────────────
     mod accept_error {
         use super::*;
@@ -1727,9 +1774,12 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let manager = ImposterManager::with_datadir(Some(dir.path().to_path_buf()));
 
+        // Port 19701 is unique across the workspace: create_imposter binds with SO_REUSEPORT, so a
+        // port shared with another test (the old 19503, used by test_add_stub_updates_datadir too)
+        // load-balances between the two imposters across processes (#814).
         let config = serde_json::from_value(serde_json::json!({
             "protocol": "http",
-            "port": 19503,
+            "port": 19701,
             "stubs": []
         }))
         .unwrap();
@@ -1738,12 +1788,12 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         // Remove the file out from under the manager, so the unlink races with an absent file.
-        let file = dir.path().join("19503.json");
+        let file = dir.path().join("19701.json");
         std::fs::remove_file(&file).expect("pre-remove the persisted file");
         assert!(!file.exists(), "precondition: file is already gone");
 
         manager
-            .delete_imposter(19503)
+            .delete_imposter(19701)
             .await
             .expect("delete must succeed when the datadir file is already gone");
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -1756,9 +1806,11 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let manager = ImposterManager::with_datadir(Some(dir.path().to_path_buf()));
 
+        // Port 19702 is unique across the workspace (see the sibling datadir test): a shared
+        // SO_REUSEPORT port would load-balance between two imposters and flake (#814).
         let config = serde_json::from_value(serde_json::json!({
             "protocol": "http",
-            "port": 19503,
+            "port": 19702,
             "stubs": []
         }))
         .unwrap();
@@ -1773,14 +1825,14 @@ mod tests {
         }))
         .unwrap();
 
-        manager.add_stub(19503, stub, None).await.unwrap();
+        manager.add_stub(19702, stub, None).await.unwrap();
 
-        let file = dir.path().join("19503.json");
+        let file = dir.path().join("19702.json");
         let content = std::fs::read_to_string(&file).unwrap();
         let json: serde_json::Value = serde_json::from_str(&content).unwrap();
         assert_eq!(json["stubs"].as_array().unwrap().len(), 1);
 
-        manager.delete_imposter(19503).await.unwrap();
+        manager.delete_imposter(19702).await.unwrap();
     }
 
     #[test]
@@ -3061,6 +3113,7 @@ mod tests {
     // attempt — never the no-match marker.
     #[tokio::test]
     async fn concurrent_mixed_array_never_serves_bogus_no_match() {
+        raise_fd_limit();
         let manager = ImposterManager::new();
         manager
             .create_imposter(imposter_cfg(json!({
@@ -3076,10 +3129,17 @@ mod tests {
             .await
             .expect("create");
 
+        // One shared client cloned into all 100 tasks (Client is Arc-internally): keeps the full
+        // 100-way concurrency — that concurrency is the #559 race gate — without spawning 100
+        // duplicate resolver/connection-pool stacks, which alone exhausted fds under EMFILE (#814).
+        let client = reqwest::Client::new();
         let mut handles = Vec::new();
         for _ in 0..100 {
-            handles.push(tokio::spawn(async {
-                let resp = reqwest::get("http://127.0.0.1:19560/m")
+            let client = client.clone();
+            handles.push(tokio::spawn(async move {
+                let resp = client
+                    .get("http://127.0.0.1:19560/m")
+                    .send()
                     .await
                     .expect("request");
                 resp.headers().contains_key("x-rift-no-match")
@@ -4035,6 +4095,7 @@ mod tests {
         // proxy hot path, and cleared on imposter deletion.
         #[tokio::test]
         async fn shared_store_is_used_and_cleared_on_delete() {
+            raise_fd_limit();
             let spy = Arc::new(SpyProxyStore::new());
             let manager = ImposterManager::new()
                 .with_proxy_store(spy.clone() as Arc<dyn ProxyRecordingStore>);
@@ -4088,6 +4149,7 @@ mod tests {
         // Two identical failing requests each release → the signature never gets stuck InFlight.
         #[tokio::test]
         async fn upstream_failure_releases_claim_end_to_end() {
+            raise_fd_limit();
             let spy = Arc::new(SpyProxyStore::new());
             let manager = ImposterManager::new()
                 .with_proxy_store(spy.clone() as Arc<dyn ProxyRecordingStore>);
@@ -4113,6 +4175,7 @@ mod tests {
         // signature wedges. Two successful upstream calls whose record fails must each release.
         #[tokio::test]
         async fn record_failure_releases_claim_end_to_end() {
+            raise_fd_limit();
             let spy = Arc::new(SpyProxyStore::with_faults(false, true));
             let manager = ImposterManager::new()
                 .with_proxy_store(spy.clone() as Arc<dyn ProxyRecordingStore>);
@@ -4181,6 +4244,9 @@ mod tests {
         }
 
         fn test_runtimes(n: usize) -> TestRuntimes {
+            // Each current-thread runtime costs an epoll/kqueue fd + wakeup pipe; at
+            // --test-threads=16 a low fd limit makes the builds fail with EMFILE (#814).
+            raise_fd_limit();
             let mut handles = Vec::new();
             let mut stop = Vec::new();
             let mut joins = Vec::new();
