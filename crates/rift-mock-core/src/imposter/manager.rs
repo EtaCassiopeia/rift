@@ -706,6 +706,8 @@ impl ImposterManager {
         let mut error_log = AcceptErrorLog::default();
         // Clears its contribution on every exit path, including a cancel break or a panic (#838).
         let mut outage = crate::extensions::AcceptOutageGuard::new("imposter");
+        // Resolved once per loop, not per error (#840).
+        let accept_errors = crate::extensions::AcceptErrorCounters::new("imposter");
         loop {
             // Acquire a permit *before* accepting so a cap holds connections back in the
             // listener backlog/kernel SYN queue rather than accepting them and then failing
@@ -816,13 +818,13 @@ impl ImposterManager {
                         Err(e) => match classify_accept_error(&e) {
                             // Expected under load — retry immediately, no backoff, no error spam.
                             AcceptErrorClass::Transient => {
-                                crate::extensions::record_accept_error("imposter", "transient");
+                                accept_errors.record_transient();
                                 debug!("transient accept error on port {port}: {e}");
                             }
                             // Systemic (fd exhaustion / unknown): log on entry and periodically
                             // while it persists, then back off.
                             AcceptErrorClass::Systemic => {
-                                crate::extensions::record_accept_error("imposter", "systemic");
+                                accept_errors.record_systemic();
                                 match error_log.on_error() {
                                     Some(AcceptErrorEvent::Onset) => {
                                         outage.enter();

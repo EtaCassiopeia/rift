@@ -733,6 +733,8 @@ async fn metrics_accept_loop(
     let mut error_log = AcceptErrorLog::default();
     // Clears its contribution on every exit path, including a cancel break or a panic (#838).
     let mut outage = rift_mock_core::extensions::AcceptOutageGuard::new("metrics");
+    // Resolved once per loop, not per error (#840).
+    let accept_errors = rift_mock_core::extensions::AcceptErrorCounters::new("metrics");
 
     loop {
         // Acquire a permit *before* accepting so a cap holds connections back in the listener
@@ -780,12 +782,12 @@ async fn metrics_accept_loop(
             }
             Err(e) => match classify_accept_error(&e) {
                 AcceptErrorClass::Transient => {
-                    rift_mock_core::extensions::record_accept_error("metrics", "transient");
+                    accept_errors.record_transient();
                     debug!("transient accept error on the metrics listener: {e}");
                     continue;
                 }
                 AcceptErrorClass::Systemic => {
-                    rift_mock_core::extensions::record_accept_error("metrics", "systemic");
+                    accept_errors.record_systemic();
                     match error_log.on_error() {
                         Some(AcceptErrorEvent::Onset) => {
                             outage.enter();

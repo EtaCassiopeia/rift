@@ -295,6 +295,8 @@ impl ProxyServer {
         let mut error_log = super::network::AcceptErrorLog::default();
         // Clears its contribution on every exit path, including a cancel break or a panic (#838).
         let mut outage = crate::extensions::AcceptOutageGuard::new("proxy");
+        // Resolved once per loop, not per error (#840).
+        let accept_errors = crate::extensions::AcceptErrorCounters::new("proxy");
 
         loop {
             // Acquire a permit *before* accepting so a cap holds connections back in the listener
@@ -331,12 +333,12 @@ impl ProxyServer {
                 }
                 Err(e) => match super::network::classify_accept_error(&e) {
                     super::network::AcceptErrorClass::Transient => {
-                        crate::extensions::record_accept_error("proxy", "transient");
+                        accept_errors.record_transient();
                         debug!("transient accept error on the proxy listener: {e}");
                         continue;
                     }
                     super::network::AcceptErrorClass::Systemic => {
-                        crate::extensions::record_accept_error("proxy", "systemic");
+                        accept_errors.record_systemic();
                         match error_log.on_error() {
                             Some(super::network::AcceptErrorEvent::Onset) => {
                                 outage.enter();
