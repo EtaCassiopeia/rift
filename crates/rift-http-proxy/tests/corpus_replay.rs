@@ -6,10 +6,13 @@
 //! `manifest.json` against drift from the fixtures on disk, and proves the *packaged* tarball (not
 //! just the source tree) still serves after `cp`/`jq`/re-tar.
 
+mod support;
+
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-const SERVER: &str = env!("CARGO_BIN_EXE_rift-http-proxy");
+// `rift-verify` is the reference `_verify` replayer (test harness, not the binary under test) and
+// stays pinned to the debug build; only the server is overridable, via `support::server_bin()`.
 const VERIFY: &str = env!("CARGO_BIN_EXE_rift-verify");
 /// The closed set of capability gates a fixture may declare in `manifest.json` `requires`
 /// (extended additively). An SDK CI skips a fixture only when it lacks a declared capability.
@@ -250,7 +253,7 @@ async fn serve_and_verify(corpus: &Path) {
     let log_out = log.reopen().expect("reopen log");
     let log_err = log.reopen().expect("reopen log");
 
-    let mut server = tokio::process::Command::new(SERVER)
+    let mut server = tokio::process::Command::new(support::server_bin())
         .arg("--configfile")
         .arg(tmp.path())
         .args(["--port", &admin_port.to_string(), "--allowInjection"])

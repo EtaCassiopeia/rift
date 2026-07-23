@@ -51,6 +51,24 @@ For each fixture, an SDK conformance suite must:
 The full contract ships in the tarball's `README.md`. See also the
 [`_verify` annotations]({{ site.baseurl }}/configuration/cli/) documented for `rift-verify`.
 
+## Replaying against an externally-supplied server
+
+`crates/rift-http-proxy/tests/corpus_replay.rs`, and the other process-spawning suites under
+`crates/rift-http-proxy/tests/` (`mountebank_compatibility.rs`, `rift_extensions.rs`,
+`issue_360_script_cli.rs`), default to spawning this repo's own debug build of `rift-http-proxy`.
+Set **`RIFT_SERVER_BIN`** to an existing, executable path to run them against any other
+Mountebank-compatible build instead — a differently-packaged rift (e.g. a musl static image) or a
+downstream binary that composes rift's `ServerBuilder`. A set-but-missing/non-executable path
+panics rather than silently falling back. Only the server is overridable this way; the reference
+`_verify` replayer `rift-verify` (used by `corpus_replay.rs`) always stays the debug build built
+alongside the tests.
+
+```sh
+cargo build -p rift-http-proxy
+RIFT_SERVER_BIN=$PWD/target/debug/rift-http-proxy \
+  cargo test -p rift-http-proxy --test corpus_replay
+```
+
 ## Adding a fixture
 
 Fixtures are numbered and append-only (`NN-name.json`, never renumbered). Add the next free number,

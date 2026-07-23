@@ -3,6 +3,8 @@
 //! These tests verify that Rift behaves compatibly with Mountebank's HTTP imposter API.
 //! Tests are organized by feature category and require a running Rift server.
 
+mod support;
+
 use reqwest::Client;
 use serde_json::json;
 use std::time::Duration;
@@ -22,16 +24,8 @@ fn get_test_ports() -> (u16, u16) {
 
 /// Start a Rift server for testing
 async fn start_rift_server(admin_port: u16) -> tokio::process::Child {
-    let child = tokio::process::Command::new("cargo")
-        .args([
-            "run",
-            "--package",
-            "rift-http-proxy",
-            "--",
-            "--port",
-            &admin_port.to_string(),
-            "--allow-injection",
-        ])
+    let child = tokio::process::Command::new(support::server_bin())
+        .args(["--port", &admin_port.to_string(), "--allow-injection"])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
