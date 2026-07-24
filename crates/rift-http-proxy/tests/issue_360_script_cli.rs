@@ -3,14 +3,10 @@
 //! check/run LOGIC directly). One happy path each, via `std::process::Command` against the
 //! checked-in fixtures.
 
+mod support;
+
 use std::path::PathBuf;
 use std::process::Command;
-
-fn rift_bin() -> PathBuf {
-    // The binary target is named `rift-http-proxy` (no `[[bin]] name = "rift"` override in
-    // Cargo.toml — the CLI itself is invoked as `rift` only once packaged/aliased downstream).
-    PathBuf::from(env!("CARGO_BIN_EXE_rift-http-proxy"))
-}
 
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -21,7 +17,7 @@ fn fixture(name: &str) -> PathBuf {
 // AC (issue #360): `rift script check` on a valid script exits 0 and prints OK.
 #[test]
 fn script_check_valid_fixture_exits_zero() {
-    let output = Command::new(rift_bin())
+    let output = Command::new(support::server_bin())
         .args(["script", "check"])
         .arg(fixture("fail-twice.rhai"))
         .output()
@@ -43,7 +39,7 @@ fn script_check_misnamed_entrypoint_fails() {
     let path = dir.path().join("bad.rhai");
     std::fs::write(&path, "fn respnod(ctx) { pass() }").expect("write fixture");
 
-    let output = Command::new(rift_bin())
+    let output = Command::new(support::server_bin())
         .args(["script", "check"])
         .arg(&path)
         .output()
@@ -63,7 +59,7 @@ fn script_check_misnamed_entrypoint_fails() {
 // the 200 (pass) branch, with no server running.
 #[test]
 fn script_run_fail_twice_attempts_2_passes() {
-    let output = Command::new(rift_bin())
+    let output = Command::new(support::server_bin())
         .args(["script", "run"])
         .arg(fixture("fail-twice.rhai"))
         .args(["--request"])
@@ -82,7 +78,7 @@ fn script_run_fail_twice_attempts_2_passes() {
 
 #[test]
 fn script_run_fail_twice_attempts_1_fails_with_503() {
-    let output = Command::new(rift_bin())
+    let output = Command::new(support::server_bin())
         .args(["script", "run"])
         .arg(fixture("fail-twice.rhai"))
         .args(["--state", "attempts=1"])
