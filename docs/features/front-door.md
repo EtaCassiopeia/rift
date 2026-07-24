@@ -118,27 +118,21 @@ different fixes:
 
 ---
 
-## Managing routes at runtime
+## Validation
 
-The route table is also a live admin resource on the admin port, under the same authentication as
-everything else there.
+A route table is validated and applied **as a unit**, at load time — so a table that cannot route
+fails the boot rather than the first request, and there is no half-applied routing topology to
+reason about. A table is rejected when:
 
-```
-GET    /front-door/routes          # the whole table, in effective order
-PUT    /front-door/routes          # replace the table (validated atomically)
-GET    /front-door/routes/:id
-PUT    /front-door/routes/:id      # upsert one route
-DELETE /front-door/routes/:id
-GET    /front-door/resolve?host=&path=&method=
-```
+- two routes share an `id`;
+- two *enabled* routes at the same `priority` have byte-identical `match` clauses (see above);
+- a route sets `strip_prefix` with no `path_prefix` to strip;
+- a `host` contains `*` anywhere but as one leading `*.` label;
+- a `path_prefix` does not start with `/`, or a `method` is not a valid HTTP method.
 
-`resolve` is the debugging endpoint: it answers *which route would win* for a hypothetical request,
-without sending one.
+Every message names the offending route id, because "invalid route table" and a 400 is not
+actionable.
 
-```bash
-curl 'http://localhost:2525/front-door/resolve?host=api.payments.test&path=/v1/charges'
-# {"routeId":"payments","port":4545}
-```
-
-A table is validated as a unit and applied as a unit. A rejected `PUT` changes nothing — there is
-no half-applied routing topology to reason about.
+A `routes` block is only read from the `{"imposters": [...], "routes": {...}}` wrapper form. Putting
+one on a single-imposter document is an error rather than a silent no-op — unknown fields are
+otherwise ignored, so the quiet version would be no routes, no diagnostic, and a green boot.
